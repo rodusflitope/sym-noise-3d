@@ -1,0 +1,13 @@
+# entornos virtuales
+.venv/
+
+# datos grandes / privados
+data/
+
+# cachés de Python
+__pycache__/
+*.pyc
+*.pyo
+
+# notebooks y outputs
+.ipynb_checkpoints/
