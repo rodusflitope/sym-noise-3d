@@ -1,5 +1,10 @@
+from .simple_eps import EpsilonMLP
+
 def build_model(cfg):
-    """
-    Fábrica de modelos. En este paso solo es un 'stub'.
-    """
-    raise NotImplementedError("build_model aún no implementado.")
+    name = cfg["model"]["name"]
+    if name == "epsilon_mlp":
+        return EpsilonMLP(
+            hidden_dim=cfg["model"]["hidden_dim"],
+            time_dim=cfg["model"]["time_dim"],
+        )
+    raise ValueError(f"Modelo desconocido: {name}")
