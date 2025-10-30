@@ -3,14 +3,19 @@ seed: 10
 device: "auto"
 
 model:
-  name: "TBD"
+  name: "epsilon_mlp"
   hidden_dim: 128
+  time_dim: 64
 
 train:
-  batch_size: 4
-  epochs: 1
+  batch_size: 8
+  epochs: 2
+  lr: 1e-3
   log_every: 50
+  num_points: 2048
+  steps_per_epoch: 200
 
-sampler:
-  name: "ddpm"
-  eta: 1.0
+diffusion:
+  T: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
