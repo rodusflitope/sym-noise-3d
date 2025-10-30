@@ -1,0 +1,16 @@
+exp_name: "debug-baseline"
+seed: 10
+device: "auto"
+
+model:
+  name: "TBD"
+  hidden_dim: 128
+
+train:
+  batch_size: 4
+  epochs: 1
+  log_every: 50
+
+sampler:
+  name: "ddpm"
+  eta: 1.0
