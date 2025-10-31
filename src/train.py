@@ -1,32 +1,85 @@
-import argparse
-import pathlib
-import yaml
+import argparse, torch
+from torch.utils.data import Dataset, DataLoader
+
+from src.utils.common import load_cfg, set_seed, get_device
 from src.models import build_model
+from src.schedulers.beta_schedules import make_linear_betas
+from src.schedulers.forward import ForwardDiffusion
+from src.losses.mse_eps import mse_eps
+
+class ToySphereDataset(Dataset):
+    def __init__(self, num_samples=10_000, num_points=1024):
+        super().__init__()
+        self.num_samples = num_samples
+        self.num_points = num_points
+
+    def __len__(self): return self.num_samples
+
+    def __getitem__(self, idx):
+    
+        x = torch.randn(self.num_points, 3)
+        x = x / (x.norm(dim=1, keepdim=True) + 1e-8)
+        return x
+
+def sample_timesteps(batch_size, T, device):
+    return torch.randint(low=0, high=T, size=(batch_size,), device=device, dtype=torch.long)
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Baseline Diffusion - Train")
-    p.add_argument("--cfg", type=str, default="cfgs/default.yaml",
-                   help="Ruta al archivo de configuración YAML.")
+    import pathlib, yaml, argparse as ap
+    p = ap.ArgumentParser(description="Baseline Diffusion - Train")
+    p.add_argument("--cfg", type=str, default="cfgs/default.yaml")
     return p.parse_args()
-
-def load_cfg(path: str):
-    path = pathlib.Path(path)
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
 
 def main():
     args = parse_args()
     cfg = load_cfg(args.cfg)
 
-    print("== Entrenamiento (sólo setup mínimo) ==")
-    print(f"Config cargada desde: {args.cfg}")
-    print(f"Nombre experimento: {cfg.get('exp_name', 'N/A')}")
-    print(f"Semilla: {cfg.get('seed', 'N/A')}")
-    print(f"Device: {cfg.get('device', 'auto')}")
-    print(f"Modelo (placeholder): {cfg.get('model', {})}")
+    set_seed(cfg.get("seed"))
+    device = get_device(cfg.get("device","auto"))
+    print(f"[train] device = {device}")
 
-    # NOTA: en este paso NO instanciamos el modelo ni corremos nada todavia.
-    print("OK: punto de entrada de entrenamiento listo.")
+    model = build_model(cfg).to(device)
+    print("[train] model params:", sum(p.numel() for p in model.parameters())/1e6, "M")
+
+    T = cfg["diffusion"]["T"]
+    betas, alphas, alpha_bars = make_linear_betas(
+        T=T,
+        beta_start=cfg["diffusion"]["beta_start"],
+        beta_end=cfg["diffusion"]["beta_end"],
+        device=device
+    )
+    forward = ForwardDiffusion(betas, alphas, alpha_bars)
+
+    ds = ToySphereDataset(
+        num_samples=cfg["train"]["steps_per_epoch"] * cfg["train"]["batch_size"],
+        num_points=cfg["train"]["num_points"]
+    )
+    dl = DataLoader(ds, batch_size=cfg["train"]["batch_size"], shuffle=True, drop_last=True)
+
+    opt = torch.optim.AdamW(model.parameters(), lr=cfg["train"]["lr"])
+
+    global_step = 0
+    for epoch in range(cfg["train"]["epochs"]):
+        for step, x0 in enumerate(dl):
+            x0 = x0.to(device)
+            B = x0.shape[0]
+            t = sample_timesteps(B, T, device)
+            x_t, eps = forward.add_noise(x0, t)
+
+            eps_pred = model(x_t, t)
+            loss = mse_eps(eps_pred, eps)
+
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+
+            global_step += 1
+            if global_step % cfg["train"]["log_every"] == 0:
+                print(f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f}")
+
+        print(f"== Epoch {epoch} done. ==")
+
+    print("Entrenamiento finalizado.")
 
 if __name__ == "__main__":
     main()
