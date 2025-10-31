@@ -1,4 +1,4 @@
-import argparse, torch
+import argparse, torch, pathlib, yaml, argparse as ap
 from torch.utils.data import Dataset, DataLoader
 
 from src.utils.common import load_cfg, set_seed, get_device
@@ -6,6 +6,7 @@ from src.models import build_model
 from src.schedulers.beta_schedules import make_linear_betas
 from src.schedulers.forward import ForwardDiffusion
 from src.losses.mse_eps import mse_eps
+from src.utils.checkpoint import save_ckpt
 
 class ToySphereDataset(Dataset):
     def __init__(self, num_samples=10_000, num_points=1024):
@@ -25,7 +26,6 @@ def sample_timesteps(batch_size, T, device):
     return torch.randint(low=0, high=T, size=(batch_size,), device=device, dtype=torch.long)
 
 def parse_args():
-    import pathlib, yaml, argparse as ap
     p = ap.ArgumentParser(description="Baseline Diffusion - Train")
     p.add_argument("--cfg", type=str, default="cfgs/default.yaml")
     return p.parse_args()
@@ -78,6 +78,8 @@ def main():
                 print(f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f}")
 
         print(f"== Epoch {epoch} done. ==")
+        ckpt_path = save_ckpt(model, cfg["train"]["out_dir"], cfg["exp_name"], "last.pt")
+        print(f"Checkpoint guardado en: {ckpt_path}")
 
     print("Entrenamiento finalizado.")
 
