@@ -3,7 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from src.utils.common import load_cfg, set_seed, get_device
 from src.models import build_model
-from src.schedulers.beta_schedules import make_linear_betas
+from src.schedulers import build_beta_schedule
 from src.schedulers.forward import ForwardDiffusion
 from src.losses.mse_eps import mse_eps
 from src.utils.checkpoint import save_ckpt
@@ -42,12 +42,7 @@ def main():
     print("[train] model params:", sum(p.numel() for p in model.parameters())/1e6, "M")
 
     T = cfg["diffusion"]["T"]
-    betas, alphas, alpha_bars = make_linear_betas(
-        T=T,
-        beta_start=cfg["diffusion"]["beta_start"],
-        beta_end=cfg["diffusion"]["beta_end"],
-        device=device
-    )
+    betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
     forward = ForwardDiffusion(betas, alphas, alpha_bars)
 
     ds = ToySphereDataset(
