@@ -21,6 +21,7 @@ diffusion:
   beta_start: 0.0001
   beta_end: 0.02
   schedule: "linear"
+  noise_type: "gaussian"
 
 sampler:
   name: "ddpm"

@@ -1,7 +1,7 @@
 import torch
 
 class DDPM_Sampler:
-    def __init__(self, betas, alphas, alpha_bars, eta: float = 1.0, noise_fn=None):
+    def __init__(self, betas, alphas, alpha_bars, eta: float = 1.0, noise_type=None):
 
         self.betas = betas
         self.alphas = alphas
@@ -9,7 +9,7 @@ class DDPM_Sampler:
         self.sqrt_alphas = torch.sqrt(alphas)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
         self.eta = eta
-        self.noise_fn = noise_fn
+        self.noise_type = noise_type
 
         a_bar_prev = torch.cat([torch.tensor([1.0], device=alpha_bars.device), alpha_bars[:-1]], dim=0)
         self.beta_t_tilde = ((1.0 - a_bar_prev) / (1.0 - alpha_bars)) * self.betas
@@ -31,16 +31,24 @@ class DDPM_Sampler:
 
         if t == 0 or sigma_t.item() == 0.0:
             return mu
-        z = torch.randn_like(x_t)
-        if self.noise_fn is not None:
-            z = self.noise_fn(z)
+
+        if self.noise_type is not None:
+            z = self.noise_type.sample(x_t.shape, device)
+        else:
+            z = torch.randn_like(x_t)
+        
         return mu + sigma_t * z
 
     @torch.no_grad()
     def sample(self, model, num_samples: int, num_points: int):
 
         device = self.alpha_bars.device
-        x_t = torch.randn(num_samples, num_points, 3, device=device)
+
+        if self.noise_type is not None:
+            x_t = self.noise_type.sample((num_samples, num_points, 3), device)
+        else:
+            x_t = torch.randn(num_samples, num_points, 3, device=device)
+        
         T = self.betas.shape[0]
         for t in reversed(range(T)):
             x_t = self.step(model, x_t, t)

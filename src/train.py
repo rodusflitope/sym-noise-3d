@@ -3,7 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from src.utils.common import load_cfg, set_seed, get_device
 from src.models import build_model
-from src.schedulers import build_beta_schedule
+from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.losses.mse_eps import mse_eps
 from src.utils.checkpoint import save_ckpt
@@ -43,7 +43,10 @@ def main():
 
     T = cfg["diffusion"]["T"]
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
-    forward = ForwardDiffusion(betas, alphas, alpha_bars)
+    noise_type = build_noise_type(cfg)
+    forward = ForwardDiffusion(betas, alphas, alpha_bars, noise_type=noise_type)
+    
+    print(f"[train] schedule={cfg['diffusion']['schedule']}, noise_type={cfg['diffusion'].get('noise_type', 'gaussian')}")
 
     ds = ToySphereDataset(
         num_samples=cfg["train"]["steps_per_epoch"] * cfg["train"]["batch_size"],
