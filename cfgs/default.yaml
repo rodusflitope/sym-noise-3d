@@ -10,7 +10,7 @@ model:
 train:
   batch_size: 8
   epochs: 2
-  lr: 1e-3
+  lr: 0.001
   log_every: 50
   num_points: 2048
   steps_per_epoch: 200
