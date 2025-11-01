@@ -11,3 +11,6 @@ __pycache__/
 
 # notebooks y outputs
 .ipynb_checkpoints/
+
+# Modelos y runs
+runs/

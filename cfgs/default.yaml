@@ -2,18 +2,24 @@ exp_name: "debug-baseline"
 seed: 10
 device: "auto"
 
+data:
+  root_dir: "data/ShapeNetCore"
+
 model:
   name: "epsilon_mlp"
   hidden_dim: 128
   time_dim: 64
 
+loss:
+  name: "mse_eps"
+
 train:
   batch_size: 8
-  epochs: 2
+  epochs: 5
   lr: 0.001
   log_every: 50
   num_points: 2048
-  steps_per_epoch: 200
+  num_workers: 0
   out_dir: "runs"
 
 diffusion:
