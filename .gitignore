@@ -2,7 +2,7 @@
 .venv/
 
 # datos grandes / privados
-data/
+/data/
 
 # cachés de Python
 __pycache__/
