@@ -41,8 +41,7 @@ def main():
 
     ds = ShapeNetDataset(
         root_dir=cfg["data"]["root_dir"],
-        num_points=cfg["train"]["num_points"],
-        normalize=True
+        num_points=cfg["train"]["num_points"]
     )
     
     dl = DataLoader(
