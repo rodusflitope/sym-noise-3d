@@ -1,5 +1,6 @@
 import torch
 import argparse as ap
+import time
 from torch.utils.data import DataLoader
 
 from src.utils.common import load_cfg, set_seed, get_device
@@ -58,8 +59,12 @@ def main():
     loss_fn = build_loss(cfg)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg["train"]["lr"])
 
+    print("\nIniciando entrenamiento...")
+    train_start_time = time.time()
+    
     global_step = 0
     for epoch in range(cfg["train"]["epochs"]):
+        epoch_start_time = time.time()
         epoch_loss_sum = 0.0
         epoch_steps = 0
         
@@ -84,13 +89,15 @@ def main():
             if global_step % cfg["train"]["log_every"] == 0:
                 print(f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f}")
         
+        epoch_time = time.time() - epoch_start_time
         avg_epoch_loss = epoch_loss_sum / epoch_steps
-        print(f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} ==")
+        print(f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} | Time: {epoch_time:.2f}s ==")
         
         ckpt_path = save_ckpt(model, cfg["train"]["out_dir"], cfg["exp_name"], "last.pt")
         print(f"Checkpoint guardado en: {ckpt_path}")
 
-    print("Entrenamiento finalizado.")
+    total_time = time.time() - train_start_time
+    print(f"\nEntrenamiento finalizado. Tiempo total: {total_time:.2f}s ({total_time/60:.2f}min)")
 
 if __name__ == "__main__":
     main()
