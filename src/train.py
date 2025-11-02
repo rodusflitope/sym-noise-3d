@@ -41,15 +41,18 @@ def main():
 
     ds = ShapeNetDataset(
         root_dir=cfg["data"]["root_dir"],
-        num_points=cfg["train"]["num_points"]
+        num_points=cfg["train"]["num_points"],
+        max_models=cfg["data"].get("max_models", None)
     )
     
     dl = DataLoader(
         ds, 
         batch_size=cfg["train"]["batch_size"], 
         shuffle=True, 
-        drop_last=True,
-        num_workers=cfg["train"].get("num_workers", 0)
+        drop_last=False,
+        num_workers=cfg["train"].get("num_workers", 4),
+        pin_memory=True,
+        persistent_workers=True
     )
 
     loss_fn = build_loss(cfg)
