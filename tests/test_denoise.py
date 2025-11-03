@@ -55,8 +55,16 @@ def main():
     snapshots = []
     snapshot_steps = [T-1, 3*T//4, T//2, T//4, 0]
     
+    print("\n=== DIAGNÓSTICO DE DENOISING ===")
     with torch.no_grad():
         for t in reversed(range(T)):
+            if t in snapshot_steps:
+                t_batch = torch.full((num_samples,), t, dtype=torch.long, device=device)
+                eps_pred = model(x_t, t_batch)
+                print(f"t={t:4d} | x_t: mean={x_t.mean().item():.4f}, std={x_t.std().item():.4f} | "
+                      f"eps_pred: mean={eps_pred.mean().item():.4f}, std={eps_pred.std().item():.4f} | "
+                      f"alpha_bar={alpha_bars[t].item():.6f}")
+            
             x_t = sampler.step(model, x_t, t)
             if t in snapshot_steps:
                 snapshots.append((t, x_t.clone()))

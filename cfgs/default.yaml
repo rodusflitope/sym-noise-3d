@@ -4,7 +4,7 @@ device: "auto"
 
 data:
   root_dir: "data/ShapeNetCore"
-  max_models: 100
+  max_models: 200
 
 model:
   name: "epsilon_mlp"
@@ -16,8 +16,8 @@ loss:
 
 train:
   batch_size: 128
-  epochs: 10
-  lr: 0.01
+  epochs: 50
+  lr: 0.002
   log_every: 50
   num_points: 2048
   num_workers: 8

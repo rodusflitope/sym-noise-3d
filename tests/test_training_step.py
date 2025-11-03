@@ -68,7 +68,8 @@ def main():
         ax2.set_box_aspect([1,1,1])
         
         mse = ((eps_true[0].cpu().numpy() - eps_pred_np) ** 2).mean()
-        print(f"t={t:4d} | input_std={x_t_np.std():.4f} | output_std={eps_pred_np.std():.4f} | mse={mse:.6f}")
+        print(f"t={t:4d} | input_std={x_t[0].std().item():.4f} | output_std={eps_pred[0].std().item():.4f} | mse={mse:.6f} | "
+              f"eps_true: mean={eps_true[0].mean().item():.6f} | eps_pred: mean={eps_pred[0].mean().item():.6f}")
     
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "training_step.png", dpi=150, bbox_inches='tight')

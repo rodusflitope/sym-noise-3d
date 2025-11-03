@@ -83,7 +83,8 @@ def main():
         ax3.set_box_aspect([1,1,1])
         
         mse = ((eps_true_np - eps_pred_np) ** 2).mean()
-        print(f"t={t:4d} | MSE={mse:.6f} | true_std={eps_true_np.std():.4f} | pred_std={eps_pred_np.std():.4f}")
+        print(f"t={t:4d} | MSE={mse:.6f} | true_std={eps_true_np.std():.4f} | pred_std={eps_pred_np.std():.4f} | "
+              f"true_mean={eps_true_np.mean():.4f} | pred_mean={eps_pred_np.mean():.4f}")
     
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "model_predictions.png", dpi=150, bbox_inches='tight')
