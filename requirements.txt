@@ -8,4 +8,3 @@ tqdm
 --extra-index-url https://download.pytorch.org/whl/cu130
 torch
 torchvision
-git+https://github.com/erikwijmans/Pointnet2_PyTorch.git@master#egg=pointnet2
