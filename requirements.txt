@@ -5,6 +5,6 @@ huggingface-hub
 scipy
 trimesh
 tqdm
---extra-index-url https://download.pytorch.org/whl/cu130
+--extra-index-url https://download.pytorch.org/whl/cu128
 torch
-torchvision
+torch-geometric

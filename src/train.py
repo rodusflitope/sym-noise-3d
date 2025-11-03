@@ -1,6 +1,7 @@
 import torch
 import argparse as ap
 import time
+from datetime import datetime
 from torch.utils.data import DataLoader
 
 from src.utils.common import load_cfg, set_seed, get_device
@@ -8,7 +9,7 @@ from src.models import build_model
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.losses import build_loss
-from src.utils.checkpoint import save_ckpt
+from src.utils.checkpoint import save_ckpt, save_training_history
 from src.data import ShapeNetDataset
 
 
@@ -27,6 +28,10 @@ def main():
     set_seed(cfg.get("seed"))
     device = get_device(cfg.get("device","auto"))
     print(f"[train] device = {device}")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_name = f"{cfg['exp_name']}_{timestamp}"
+    print(f"[train] experiment name = {exp_name}")
 
     model = build_model(cfg).to(device)
     print("[train] model params:", sum(p.numel() for p in model.parameters())/1e6, "M")
@@ -62,6 +67,14 @@ def main():
     print("\nIniciando entrenamiento...")
     train_start_time = time.time()
     
+    training_history = {
+        "config": cfg,
+        "timestamp": timestamp,
+        "epochs": [],
+        "best_epoch": None,
+        "best_loss": None
+    }
+    
     best_loss = float('inf')
     global_step = 0
     for epoch in range(cfg["train"]["epochs"]):
@@ -95,14 +108,36 @@ def main():
         avg_epoch_loss = epoch_loss_sum / epoch_steps
         print(f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} | Time: {epoch_time:.2f}s ==")
         
-        save_ckpt(model, cfg["train"]["out_dir"], cfg["exp_name"], "last.pt")
+        epoch_metadata = {
+            "epoch": epoch,
+            "avg_loss": avg_epoch_loss,
+            "time": epoch_time,
+            "global_step": global_step
+        }
+        training_history["epochs"].append(epoch_metadata)
+        
+        ckpt_metadata = {
+            "epoch": epoch,
+            "loss": avg_epoch_loss,
+            "timestamp": timestamp,
+            "config": cfg
+        }
+        
+        save_ckpt(model, cfg["train"]["out_dir"], exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata)
+        save_ckpt(model, cfg["train"]["out_dir"], exp_name, "last.pt", metadata=ckpt_metadata)
         
         if avg_epoch_loss < best_loss:
             best_loss = avg_epoch_loss
-            ckpt_path = save_ckpt(model, cfg["train"]["out_dir"], cfg["exp_name"], "best.pt")
+            training_history["best_epoch"] = epoch
+            training_history["best_loss"] = best_loss
+            ckpt_path = save_ckpt(model, cfg["train"]["out_dir"], exp_name, "best.pt", metadata=ckpt_metadata)
             print(f"Mejor modelo guardado en: {ckpt_path} (loss={best_loss:.6f})")
+        
+        save_training_history(cfg["train"]["out_dir"], exp_name, training_history)
 
     total_time = time.time() - train_start_time
+    training_history["total_time"] = total_time
+    save_training_history(cfg["train"]["out_dir"], exp_name, training_history)
     print(f"\nEntrenamiento finalizado. Tiempo total: {total_time:.2f}s ({total_time/60:.2f}min)")
 
 if __name__ == "__main__":
