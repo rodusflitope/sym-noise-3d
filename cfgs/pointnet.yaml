@@ -4,7 +4,9 @@ device: "auto"
 
 data:
   root_dir: "data/ShapeNetCore"
-  max_models: 200
+  max_models: 2000
+  val_frac: 0.1
+  test_frac: 0.1
 
 model:
   name: "pointnet_eps"
@@ -12,17 +14,21 @@ model:
   time_dim: 128
 
 loss:
-  name: "min_snr"
-  gamma: 5.0
+  name: "mse_eps"
 
 train:
   batch_size: 64
-  epochs: 100
-  lr: 0.0002
+  epochs: 200
   log_every: 50
   num_points: 2048
   num_workers: 8
   out_dir: "runs"
+
+lr_scheduler:
+  name: "cosine_warmup"
+  base_lr: 0.0005
+  warmup_steps: 200
+  min_lr: 0.00002
 
 diffusion:
   T: 1000

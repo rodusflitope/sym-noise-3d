@@ -9,6 +9,8 @@ from src.data import ShapeNetDataset
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.models import build_model
+from src.losses import build_loss
+from src.utils.checkpoint import load_ckpt
 
 
 def ensure_dir(p):
@@ -23,6 +25,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cfg", type=str, default=str(root / "cfgs" / "pointnet.yaml"))
     p.add_argument("--batch", type=int, default=8)
+    p.add_argument("--ckpt", type=str, default=None)
     args = p.parse_args()
 
     cfg = load_cfg(args.cfg)
@@ -51,10 +54,32 @@ def main():
     x_t, eps = forward.add_noise(x0, t)
 
     model = build_model(cfg).to(device)
+    if args.ckpt is not None:
+        try:
+            model = load_ckpt(model, args.ckpt, map_location=device)
+        except Exception:
+            import torch as _torch
+            sd = _torch.load(args.ckpt, map_location=device)
+            meta_cfg = sd.get("metadata", {}).get("config", None)
+            if meta_cfg is None:
+                raise
+            cfg = meta_cfg
+            T = cfg["diffusion"]["T"]
+            betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
+            model = build_model(cfg).to(device)
+            model = load_ckpt(model, args.ckpt, map_location=device)
     model.eval()
     with torch.no_grad():
         eps_pred = model(x_t, t)
     mse = torch.mean((eps_pred - eps) ** 2).item()
+
+    loss_fn = build_loss(cfg)
+    loss_name = cfg["loss"]["name"]
+    if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
+        alpha_bar_t = alpha_bars[t]
+        train_loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t).item()
+    else:
+        train_loss = loss_fn(eps_pred, eps).item()
 
     metrics = {
         "x0_shape": list(x0.shape),
@@ -62,12 +87,16 @@ def main():
         "eps_shape": list(eps.shape),
         "eps_pred_shape": list(eps_pred.shape),
         "mse_eps": float(mse),
+        "train_loss": float(train_loss),
+        "loss_name": loss_name,
+        "ckpt": args.ckpt,
     }
 
     with open(out_dir / "forward_metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
 
     print("mse_eps", metrics["mse_eps"]) 
+    print("train_loss", metrics["train_loss"]) 
 
 
 if __name__ == "__main__":
