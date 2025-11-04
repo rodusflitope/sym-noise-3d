@@ -1,0 +1,38 @@
+exp_name: "pointnet-baseline"
+seed: 10
+device: "auto"
+
+data:
+  root_dir: "data/ShapeNetCore"
+  max_models: 200
+
+model:
+  name: "pointnet_eps"
+  hidden_dim: 128
+  time_dim: 64
+
+loss:
+  name: "mse_eps"
+
+train:
+  batch_size: 64
+  epochs: 50
+  lr: 0.001
+  log_every: 50
+  num_points: 2048
+  num_workers: 8
+  out_dir: "runs"
+
+diffusion:
+  T: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: "linear"
+  noise_type: "gaussian"
+
+sampler:
+  name: "ddpm"
+  eta: 1.0
+  num_samples: 4
+  save_dir: "samples"
+  save_format: "npy"
