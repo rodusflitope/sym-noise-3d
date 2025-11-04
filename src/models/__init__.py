@@ -12,7 +12,5 @@ def build_model(cfg):
         return PointNetEpsilon(
             hidden_dim=cfg["model"]["hidden_dim"],
             time_dim=cfg["model"]["time_dim"],
-            use_fps=cfg["model"].get("use_fps", True),
-            num_fps_points=cfg["model"].get("num_fps_points", 512),
         )
     raise ValueError(f"Modelo desconocido: {name}")
