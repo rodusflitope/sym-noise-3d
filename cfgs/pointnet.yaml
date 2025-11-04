@@ -8,16 +8,17 @@ data:
 
 model:
   name: "pointnet_eps"
-  hidden_dim: 128
-  time_dim: 64
+  hidden_dim: 256
+  time_dim: 128
 
 loss:
-  name: "mse_eps"
+  name: "min_snr"
+  gamma: 5.0
 
 train:
   batch_size: 64
-  epochs: 50
-  lr: 0.001
+  epochs: 100
+  lr: 0.0002
   log_every: 50
   num_points: 2048
   num_workers: 8
@@ -27,7 +28,7 @@ diffusion:
   T: 1000
   beta_start: 0.0001
   beta_end: 0.02
-  schedule: "linear"
+  schedule: "cosine"
   noise_type: "gaussian"
 
 sampler:

@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 
 def make_linear_betas(T: int, beta_start: float, beta_end: float, device):
     betas = torch.linspace(beta_start, beta_end, T, device=device)
@@ -27,6 +26,22 @@ def make_quadratic_betas(T: int, beta_start: float, beta_end: float, device):
 def make_sigmoid_betas(T: int, beta_start: float, beta_end: float, device):
     betas = torch.linspace(-6, 6, T, device=device)
     betas = torch.sigmoid(betas) * (beta_end - beta_start) + beta_start
+    alphas = 1.0 - betas
+    alpha_bars = torch.cumprod(alphas, dim=0)
+    return betas, alphas, alpha_bars
+
+def make_sqrt_betas(T: int, beta_start: float, beta_end: float, device):
+    betas = torch.linspace(beta_start, beta_end, T, device=device) ** 0.5
+    betas = betas / betas.max() * beta_end
+    alphas = 1.0 - betas
+    alpha_bars = torch.cumprod(alphas, dim=0)
+    return betas, alphas, alpha_bars
+
+def make_scaled_linear_betas(T: int, beta_start: float, beta_end: float, device):
+    scale = 1000 / T
+    beta_start_scaled = scale * beta_start
+    beta_end_scaled = scale * beta_end
+    betas = torch.linspace(beta_start_scaled, beta_end_scaled, T, device=device)
     alphas = 1.0 - betas
     alpha_bars = torch.cumprod(alphas, dim=0)
     return betas, alphas, alpha_bars

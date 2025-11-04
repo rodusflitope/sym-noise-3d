@@ -89,7 +89,13 @@ def main():
             x_t, eps = forward.add_noise(x0, t)
 
             eps_pred = model(x_t, t)
-            loss = loss_fn(eps_pred, eps)
+            
+            loss_name = cfg["loss"]["name"]
+            if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
+                alpha_bar_t = alpha_bars[t]
+                loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t)
+            else:
+                loss = loss_fn(eps_pred, eps)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
