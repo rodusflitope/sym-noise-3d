@@ -1,0 +1,46 @@
+exp_name: "pointtransformer-baseline"
+seed: 10
+device: "auto"
+
+data:
+  root_dir: "data/ShapeNetCore"
+  max_models: 200
+  augment: true
+  rotate_prob: 0.5
+  flip_prob: 0.5
+  jitter_sigma: 0.02
+  val_frac: 0.1
+  test_frac: 0.1
+
+model:
+  name: "pointtransformer_eps"
+  hidden_dim: 256
+  time_dim: 128
+  num_heads: 4
+  num_layers: 2
+
+loss:
+  name: "snr_weighted"
+
+train:
+  batch_size: 64
+  epochs: 200
+  lr: 0.0005
+  log_every: 50
+  num_points: 2048
+  num_workers: 8
+  out_dir: "runs"
+
+diffusion:
+  T: 400
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: "cosine"
+  noise_type: "gaussian"
+
+sampler:
+  name: "ddpm"
+  eta: 1.0
+  num_samples: 4
+  save_dir: "samples"
+  save_format: "npy"
