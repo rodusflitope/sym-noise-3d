@@ -2,7 +2,7 @@ import argparse, torch, pathlib, numpy as np
 from src.utils.common import load_cfg, get_device, set_seed
 from src.models import build_model
 from src.schedulers import build_beta_schedule, build_noise_type
-from src.samplers.ddpm import DDPM_Sampler
+from src.samplers import build_sampler
 from src.utils.checkpoint import load_ckpt
 from src.utils.io import save_npy, save_ply
 
@@ -36,8 +36,8 @@ def main():
     
     print(f"[sample] schedule={cfg['diffusion']['schedule']}, noise_type={cfg['diffusion'].get('noise_type', 'gaussian')}")
 
-    eta = float(cfg["sampler"].get("eta", 1.0))
-    sampler = DDPM_Sampler(betas, alphas, alpha_bars, eta=eta, noise_type=noise_type)
+    sampler = build_sampler(cfg, betas, alphas, alpha_bars, noise_type=noise_type)
+    print(f"[sample] sampler={cfg['sampler'].get('name', 'ddpm')}, eta={cfg['sampler'].get('eta', 1.0)}")
 
     num_samples = int(cfg["sampler"]["num_samples"])
     num_points  = int(cfg["train"]["num_points"])

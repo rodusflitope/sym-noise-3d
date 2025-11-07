@@ -9,7 +9,7 @@ sys.path.append(str(root))
 from src.utils.common import load_cfg, get_device, set_seed
 from src.models import build_model
 from src.schedulers import build_beta_schedule, build_noise_type
-from src.samplers.ddpm import DDPM_Sampler
+from src.samplers import build_sampler
 from src.utils.checkpoint import load_ckpt
 
 
@@ -51,8 +51,7 @@ def main():
 
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
     noise_type = build_noise_type(cfg)
-    eta = float(cfg["sampler"].get("eta", 1.0))
-    sampler = DDPM_Sampler(betas, alphas, alpha_bars, eta=eta, noise_type=noise_type)
+    sampler = build_sampler(cfg, betas, alphas, alpha_bars, noise_type=noise_type)
 
     num_samples = int(cfg["sampler"]["num_samples"]) 
     num_points = int(cfg["train"]["num_points"]) 
