@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+
+
+class PointAutoencoder(nn.Module):
+    def __init__(
+        self,
+        num_points: int = 2048,
+        hidden_dim: int = 128,
+        latent_dim: int = 256,
+    ) -> None:
+        super().__init__()
+        self.num_points = num_points
+        self.hidden_dim = hidden_dim
+        self.latent_dim = latent_dim
+        self.encoder_point = nn.Sequential(
+            nn.Linear(3, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+        )
+        self.encoder_global = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, latent_dim),
+        )
+        self.decoder_mlp = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 3),
+        )
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        B, N, _ = x.shape
+        feats = self.encoder_point(x)
+        global_feat = feats.mean(dim=1)
+        latent = self.encoder_global(global_feat)
+        return latent
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        B = z.shape[0]
+        z_exp = z.unsqueeze(1).expand(B, self.num_points, -1)
+        out = self.decoder_mlp(z_exp)
+        return out
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        z = self.encode(x)
+        x_recon = self.decode(z)
+        return x_recon, z
