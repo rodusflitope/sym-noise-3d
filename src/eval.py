@@ -1,105 +1,100 @@
-import argparse as ap, json, pathlib, torch
-from torch.utils.data import DataLoader, Subset
+from __future__ import annotations
 
-from src.utils.common import load_cfg, set_seed, get_device
+import argparse as ap
+import torch
+from typing import Optional
+
+from src.utils.common import load_cfg, get_device
 from src.models import build_model
 from src.schedulers import build_beta_schedule, build_noise_type
-from src.schedulers.forward import ForwardDiffusion
-from src.losses import build_loss
-from src.utils.checkpoint import load_ckpt
+from src.samplers.ddpm import DDPM_Sampler
 from src.data import ShapeNetDataset
+from src.metrics import chamfer_distance
 
 
-def sample_timesteps(batch_size, T, device):
-    return torch.randint(low=0, high=T, size=(batch_size,), device=device, dtype=torch.long)
+def load_checkpoint(model: torch.nn.Module, path: str, device: torch.device) -> None:
+    ckpt = torch.load(path, map_location=device)
+    if isinstance(ckpt, dict):
+        state_dict = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
+    else:
+        state_dict = ckpt
+    model.load_state_dict(state_dict)
 
-
-def parse_args():
-    p = ap.ArgumentParser(description="Baseline Diffusion - Eval Test")
-    p.add_argument("--cfg", type=str, default="cfgs/default.yaml")
-    p.add_argument("--ckpt", type=str, required=True)
-    return p.parse_args()
-
-
-def main():
-    args = parse_args()
-    cfg = load_cfg(args.cfg)
-    set_seed(cfg.get("seed"))
-    device = get_device(cfg.get("device","auto"))
+def evaluate(
+    cfg_path: str,
+    ckpt_path: str,
+    num_samples: int = 10,
+    seed: Optional[int] = None,
+    metric: str = "cd",
+    max_points: Optional[int] = None,
+) -> None:
+    cfg = load_cfg(cfg_path)
+    device = get_device(cfg.get("device", "auto"))
+    if seed is not None:
+        torch.manual_seed(seed)
 
     model = build_model(cfg).to(device)
-    model = load_ckpt(model, args.ckpt, map_location=device)
+    load_checkpoint(model, ckpt_path, device)
     model.eval()
 
-    T = cfg["diffusion"]["T"]
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
     noise_type = build_noise_type(cfg)
-    forward = ForwardDiffusion(betas, alphas, alpha_bars, noise_type=noise_type)
+    sampler_cfg = cfg.get("sampler", {})
+    eta = sampler_cfg.get("eta", 1.0)
+    sampler = DDPM_Sampler(betas, alphas, alpha_bars, eta=eta, noise_type=noise_type)
 
-    ds_full = ShapeNetDataset(
-        root_dir=cfg["data"]["root_dir"],
-        num_points=cfg["train"]["num_points"],
-        max_models=cfg["data"].get("max_models", None)
+    num_points = cfg["train"]["num_points"]
+    samples = sampler.sample(model, num_samples, num_points).cpu()
+
+    data_cfg = cfg.get("data", {})
+    ds = ShapeNetDataset(
+        root_dir=data_cfg["root_dir"],
+        num_points=num_points,
+        max_models=num_samples,
+        categories=data_cfg.get("categories", None),
+        augment=False,
     )
+    metric = metric.lower()
+    do_cd = metric in {"cd", "both"}
+    do_emd = metric in {"emd", "both"}
+    cd_vals = []
+    emd_vals = []
+    for i in range(num_samples):
+        x_gt = ds[i]
+        x_gen = samples[i]
+        if do_cd:
+            cd = chamfer_distance(x_gen.unsqueeze(0), x_gt.unsqueeze(0))
+            cd_vals.append(cd.item())
+        if do_emd:
+            from src.metrics import earth_movers_distance
 
-    ckpt_path = pathlib.Path(args.ckpt)
-    exp_dir = ckpt_path.parent
-    splits_path = exp_dir / "splits.json"
-
-    if splits_path.exists():
-        with open(splits_path, "r", encoding="utf-8") as f:
-            splits = json.load(f)
-        idx_test = splits.get("test", [])
-    else:
-        n = len(ds_full)
-        val_frac = float(cfg["data"].get("val_frac", 0.0))
-        test_frac = float(cfg["data"].get("test_frac", 0.0))
-        n_test = int(n * test_frac)
-        n_val = int(n * val_frac)
-        n_train = max(1, n - n_val - n_test)
-        g = torch.Generator()
-        g.manual_seed(int(cfg.get("seed", 0) or 0))
-        perm = torch.randperm(n, generator=g).tolist()
-        idx_test = perm[n_train+n_val:]
-
-    ds_test = Subset(ds_full, idx_test)
-    dl_test = DataLoader(
-        ds_test,
-        batch_size=cfg["train"]["batch_size"],
-        shuffle=False,
-        drop_last=False,
-        num_workers=cfg["train"].get("num_workers", 4),
-        pin_memory=True,
-        persistent_workers=True
-    )
-
-    loss_fn = build_loss(cfg)
-
-    s = 0.0
-    c = 0
-    with torch.no_grad():
-        for x0 in dl_test:
-            x0 = x0.to(device)
-            B = x0.shape[0]
-            t = sample_timesteps(B, T, device)
-            x_t, eps = forward.add_noise(x0, t)
-            eps_pred = model(x_t, t)
-            loss_name = cfg["loss"]["name"]
-            if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
-                alpha_bar_t = alpha_bars[t]
-                l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t)
+            if max_points is not None and max_points > 0:
+                emd = earth_movers_distance(
+                    x_gen.unsqueeze(0), x_gt.unsqueeze(0), max_points=max_points
+                )
             else:
-                l = loss_fn(eps_pred, eps)
-            s += float(l.item())
-            c += 1
+                emd = earth_movers_distance(x_gen.unsqueeze(0), x_gt.unsqueeze(0))
+            emd_vals.append(emd.item())
+    if do_cd:
+        mean_cd = sum(cd_vals) / len(cd_vals) if cd_vals else float("nan")
+        print(f"Chamfer Distance (mean over {num_samples} samples): {mean_cd:.6f}")
+    if do_emd:
+        mean_emd = sum(emd_vals) / len(emd_vals) if emd_vals else float("nan")
+        print(f"Earth Mover's Distance (mean squared, over {num_samples} samples): {mean_emd:.6f}")
 
-    avg = s / max(1, c)
-    out = {"test_loss": avg, "batches": c, "samples": len(ds_test)}
-    out_path = exp_dir / "eval_test.json"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(out, f, indent=2)
-    print("test_loss", float(avg))
+def parse_args() -> ap.Namespace:
+    parser = ap.ArgumentParser(description="Evaluate a trained 3D diffusion model")
+    parser.add_argument("--cfg", required=True, help="Path to the config YAML used for training")
+    parser.add_argument("--ckpt", required=True, help="Path to the model checkpoint (.pt) to evaluate")
+    parser.add_argument("--num_samples", type=int, default=10, help="Number of samples to generate and evaluate")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
+    parser.add_argument("--metric", type=str, default="cd", choices=["cd", "emd", "both"], 
+                        help="Evaluation metric to compute: cd (Chamfer), emd (Earth Mover's), or both")
+    parser.add_argument("--max_points", type=int, default=None,
+                        help="Maximum number of points to use when computing EMD. If provided, point clouds will be subsampled to this number of points to speed up evaluation.")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    evaluate(args.cfg, args.ckpt, num_samples=args.num_samples, seed=args.seed)

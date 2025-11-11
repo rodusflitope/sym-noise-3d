@@ -1,0 +1,52 @@
+exp_name: "latent-diffusion"
+seed: 10
+device: "auto"
+use_latent_diffusion: true
+
+data:
+  root_dir: "data/ShapeNetCore"
+  max_models: 2000
+  val_frac: 0.1
+  test_frac: 0.1
+  augment: false
+
+model:
+  name: "latent_eps"
+  latent_dim: 256
+  hidden_dim: 512
+  time_dim: 64
+
+autoencoder:
+  checkpoint: "runs/ae_*/best.pt"
+  hidden_dim: 128
+
+loss:
+  name: "mse_eps"
+
+train:
+  batch_size: 128
+  epochs: 200
+  log_every: 50
+  num_points: 2048
+  num_workers: 8
+  out_dir: "runs"
+
+lr_scheduler:
+  name: "cosine_warmup"
+  base_lr: 0.001
+  warmup_steps: 200
+  min_lr: 0.00005
+
+diffusion:
+  T: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: "cosine"
+  noise_type: "gaussian"
+
+sampler:
+  name: "ddpm"
+  eta: 1.0
+  num_samples: 4
+  save_dir: "samples"
+  save_format: "npy"

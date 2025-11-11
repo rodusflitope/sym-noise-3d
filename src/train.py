@@ -12,12 +12,37 @@ from torch.utils.data import DataLoader, Subset
 
 from src.data import ShapeNetDataset
 from src.losses import build_loss
-from src.models import build_model
+from src.models import build_model, PointAutoencoder
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.utils.checkpoint import save_ckpt, save_training_history
 from src.utils.common import load_cfg, set_seed, get_device
 from src.utils.lr import build_optimizer_and_scheduler
+
+
+def load_autoencoder(cfg, device):
+    ae_cfg = cfg.get("autoencoder", {})
+    ae_ckpt = ae_cfg.get("checkpoint", None)
+    if not ae_ckpt:
+        raise ValueError("autoencoder.checkpoint must be specified when using latent diffusion")
+    
+    num_points = cfg["train"]["num_points"]
+    latent_dim = cfg["model"].get("latent_dim", 256)
+    ae_hidden_dim = ae_cfg.get("hidden_dim", 128)
+    
+    ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim).to(device)
+    state = torch.load(ae_ckpt, map_location=device)
+    if isinstance(state, dict):
+        state_dict = state.get("model_state_dict") or state.get("state_dict") or state.get("model") or state
+    else:
+        state_dict = state
+    ae.load_state_dict(state_dict)
+    ae.eval()
+    for p in ae.parameters():
+        p.requires_grad = False
+    
+    print(f"[train] Loaded autoencoder from {ae_ckpt}")
+    return ae
 
 
 def sample_timesteps(batch_size: int, T: int, device: torch.device) -> torch.Tensor:
@@ -41,6 +66,15 @@ def main() -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_name = f"{cfg['exp_name']}_{timestamp}"
     print(f"[train] experiment name = {exp_name}")
+
+    use_latent = cfg.get("use_latent_diffusion", False)
+    autoencoder = None
+    
+    if use_latent:
+        print("[train] MODE: Latent Diffusion")
+        autoencoder = load_autoencoder(cfg, device)
+    else:
+        print("[train] MODE: Direct Point Cloud Diffusion")
 
     model = build_model(cfg).to(device)
     print("[train] model params:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
@@ -140,9 +174,15 @@ def main() -> None:
             x0 = x0.to(device)
             B = x0.shape[0]
             t = sample_timesteps(B, T, device)
-            x_t, eps = forward.add_noise(x0, t)
-
-            eps_pred = model(x_t, t)
+            
+            if use_latent:
+                with torch.no_grad():
+                    z0 = autoencoder.encode(x0)
+                z_t, eps = forward.add_noise(z0, t)
+                eps_pred = model(z_t, t)
+            else:
+                x_t, eps = forward.add_noise(x0, t)
+                eps_pred = model(x_t, t)
 
             loss_name = cfg["loss"]["name"]
             if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
@@ -181,8 +221,15 @@ def main() -> None:
                     x0 = x0.to(device)
                     B = x0.shape[0]
                     t = torch.randint(low=0, high=T, size=(B,), generator=g_val, dtype=torch.long).to(device)
-                    x_t, eps = forward.add_noise(x0, t)
-                    eps_pred = model(x_t, t)
+                    
+                    if use_latent:
+                        z0 = autoencoder.encode(x0)
+                        z_t, eps = forward.add_noise(z0, t)
+                        eps_pred = model(z_t, t)
+                    else:
+                        x_t, eps = forward.add_noise(x0, t)
+                        eps_pred = model(x_t, t)
+                    
                     loss_name = cfg["loss"]["name"]
                     if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
                         alpha_bar_t = alpha_bars[t]
