@@ -1,0 +1,92 @@
+# Example Configuration Template
+# Copy and modify this file to create new experiments
+
+exp_name: "my-experiment"
+seed: 10
+device: "auto"  # "auto", "cuda", "cpu", "cuda:0"
+
+# Training mode: false = point cloud diffusion, true = latent diffusion
+use_latent_diffusion: false
+
+# Data
+data:
+  root_dir: "data/ShapeNetCore"
+  max_models: null  # null = all, or limit for debugging (e.g., 200)
+  val_frac: 0.1
+  test_frac: 0.1
+  categories: null  # null = all, or ["02691156"] for specific synsets
+  augment: false
+  rotate_prob: 0.5
+  flip_prob: 0.5
+  jitter_sigma: 0.01
+
+# Model architecture
+model:
+  name: "pointnet_eps"  # "epsilon_mlp", "pointnet_eps", "pointtransformer_eps", "latent_eps"
+  hidden_dim: 256
+  time_dim: 128
+  num_layers: 4  # for MLP/Transformer
+  num_heads: 8  # for Transformer
+  dropout: 0.0
+  latent_dim: 256  # for latent_eps only
+
+# Autoencoder (only for latent diffusion)
+autoencoder:
+  checkpoint: "runs/ae_*/best.pt"
+  latent_dim: 256
+  hidden_dim: 128
+  epochs: 100  # for train_autoencoder.py
+  lr: 0.001
+  weight_decay: 0.0
+
+# Loss function
+loss:
+  name: "mse_eps"  # "mse_eps", "huber", "snr_weighted", "min_snr", "p2_weighted", "truncated_snr"
+  delta: 1.0  # huber
+  gamma: 5.0  # min_snr, p2_weighted
+  k: 1.0  # p2_weighted
+  min_snr: 0.1  # truncated_snr
+  max_snr: 10.0  # truncated_snr
+
+# Training
+train:
+  batch_size: 64
+  epochs: 200
+  log_every: 50
+  num_points: 2048
+  num_workers: 8
+  out_dir: "runs"
+
+# Learning rate scheduler
+lr_scheduler:
+  name: "cosine_warmup"  # "cosine_warmup", "constant", null
+  base_lr: 0.0005
+  min_lr: 0.00002
+  warmup_steps: 200
+  weight_decay: 0.0
+
+# Diffusion process
+diffusion:
+  T: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: "cosine"  # "linear", "cosine", "quadratic", "sigmoid", "sqrt", "scaled_linear"
+  noise_type: "gaussian"  # "gaussian", "uniform", "spherical", "laplacian", "student_t"
+  df: 3.0  # for student_t
+
+# Sampling
+sampler:
+  name: "ddpm"  # "ddpm", "ddim"
+  eta: 1.0  # 1.0 = DDPM, 0.0 = deterministic DDIM
+  num_samples: 4
+  save_dir: "samples"
+  save_format: "npy"  # "npy", "ply"
+  sampling_steps: null  # null = use diffusion.T
+  clip_denoised: false
+
+# Evaluation
+eval:
+  metrics:
+    - "chamfer"
+  num_samples: 100
+  batch_size: 32
