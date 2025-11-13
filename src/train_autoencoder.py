@@ -49,7 +49,6 @@ def main() -> None:
         root_dir=data_cfg["root_dir"],
         num_points=cfg["train"]["num_points"],
         max_models=data_cfg.get("max_models", None),
-        categories=data_cfg.get("categories", None),
         augment=data_cfg.get("augment", False),
         rotate_prob=data_cfg.get("rotate_prob", 0.5),
         flip_prob=data_cfg.get("flip_prob", 0.5),
