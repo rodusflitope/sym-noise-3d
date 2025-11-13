@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.models.time_embedding import TimeEmbedding
+from src.models.time_embedding import SinusoidalTimeEmbed
 
 
 class LatentEpsilonMLP(nn.Module):
@@ -18,7 +18,7 @@ class LatentEpsilonMLP(nn.Module):
         self.hidden_dim = hidden_dim
         self.time_dim = time_dim
         
-        self.time_embed = TimeEmbedding(time_dim)
+        self.time_embed = SinusoidalTimeEmbed(time_dim)
         
         self.mlp = nn.Sequential(
             nn.Linear(latent_dim + time_dim, hidden_dim),
