@@ -6,7 +6,7 @@ use_latent_diffusion: true
 
 data:
   root_dir: "data/ShapeNetCore"
-  max_models: 100
+  max_models: 1000
   augment: true
   rotate_prob: 0.5
   flip_prob: 0.5

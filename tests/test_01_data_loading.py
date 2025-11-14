@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+from mpl_toolkits.mplot3d import Axes3D
 
 root = pathlib.Path(__file__).resolve().parents[1]
 sys.path.append(str(root))
@@ -45,9 +45,14 @@ def main():
         root_dir=cfg["data"]["root_dir"],
         num_points=cfg["train"]["num_points"],
         max_models=cfg["data"].get("max_models", None),
+        augment=False,
     )
 
-    x0 = ds[0]
+    num_samples = min(8, len(ds))
+    pcs = []
+    for i in range(num_samples):
+        pcs.append(ds[i])
+    x0 = pcs[0]
     x = x0.numpy()
 
     stats = {
@@ -64,12 +69,36 @@ def main():
 
     plot_pc(x, out_dir / "pc0.png")
 
+    all_points = torch.stack(pcs, dim=0)
+    means = all_points.mean(dim=1)
+    radial = torch.sqrt((all_points ** 2).sum(dim=2))
+    radial_max_all = radial.max(dim=1).values
+
+    tol_mean = 5e-2
+    tol_rad = 5e-2
+
+    mean_deviation = means.abs().max().item()
+    rad_deviation = (radial_max_all - 1.0).abs().max().item()
+
+    norm_checks = {
+        "num_samples": int(num_samples),
+        "mean_deviation_max": float(mean_deviation),
+        "radial_max_deviation_max": float(rad_deviation),
+        "mean_tolerance": float(tol_mean),
+        "radial_tolerance": float(tol_rad),
+    }
+
+    with open(out_dir / "normalization_checks.json", "w", encoding="utf-8") as f:
+        json.dump(norm_checks, f, indent=2)
+
     print("shape", x0.shape)
-    print("min", stats["min"]) 
-    print("max", stats["max"]) 
-    print("mean", stats["mean"]) 
-    print("std", stats["std"]) 
-    print("radial_max", stats["radial_max"]) 
+    print("min", stats["min"])
+    print("max", stats["max"])
+    print("mean", stats["mean"])
+    print("std", stats["std"])
+    print("radial_max", stats["radial_max"])
+    print("mean_deviation_max", norm_checks["mean_deviation_max"])
+    print("radial_max_deviation_max", norm_checks["radial_max_deviation_max"])
 
 
 if __name__ == "__main__":
