@@ -8,9 +8,9 @@ import time
 from datetime import datetime
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
-from src.data import ShapeNetDataset
+from src.data import build_datasets_from_config
 from src.losses import build_loss
 from src.models import build_model, PointAutoencoder
 from src.schedulers import build_beta_schedule, build_noise_type
@@ -94,38 +94,15 @@ def main() -> None:
         f"[train] alpha_bar[0]={alpha_bars[0]:.6f}, alpha_bar[T//2]={alpha_bars[T // 2]:.6f}, alpha_bar[-1]={alpha_bars[-1]:.6f}"
     )
 
-    data_cfg = cfg.get("data", {})
-    ds_full = ShapeNetDataset(
-        root_dir=data_cfg["root_dir"],
-        num_points=cfg["train"]["num_points"],
-        max_models=data_cfg.get("max_models", None),
-        augment=data_cfg.get("augment", False),
-        rotate_prob=data_cfg.get("rotate_prob", 0.5),
-        flip_prob=data_cfg.get("flip_prob", 0.5),
-        jitter_sigma=data_cfg.get("jitter_sigma", 0.0),
-    )
+    datasets = build_datasets_from_config(cfg)
+    ds = datasets["train"]
+    ds_val = datasets["val"]
+    splits = datasets["indices"]
 
-    n = len(ds_full)
-    val_frac = float(data_cfg.get("val_frac", 0.0))
-    test_frac = float(data_cfg.get("test_frac", 0.0))
-    n_test = int(n * test_frac)
-    n_val = int(n * val_frac)
-    n_train = max(1, n - n_val - n_test)
-    g = torch.Generator()
-    g.manual_seed(int(cfg.get("seed", 0) or 0))
-    perm = torch.randperm(n, generator=g).tolist()
-    idx_train = perm[:n_train]
-    idx_val = perm[n_train : n_train + n_val]
-    idx_test = perm[n_train + n_val :]
-
-    splits = {"train": idx_train, "val": idx_val, "test": idx_test}
     split_path = pathlib.Path(cfg["train"]["out_dir"]) / exp_name / "splits.json"
     split_path.parent.mkdir(parents=True, exist_ok=True)
     with open(split_path, "w", encoding="utf-8") as f:
         json.dump(splits, f)
-
-    ds = Subset(ds_full, idx_train)
-    ds_val = Subset(ds_full, idx_val) if len(idx_val) > 0 else None
 
     dl = DataLoader(
         ds,
@@ -209,7 +186,7 @@ def main() -> None:
                 )
 
         val_loss = None
-        if dl_val is not None and len(idx_val) > 0:
+        if dl_val is not None and len(splits["val"]) > 0:
             model.eval()
             v_sum = 0.0
             v_steps = 0

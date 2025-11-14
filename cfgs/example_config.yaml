@@ -36,8 +36,6 @@ autoencoder:
   latent_dim: 256
   hidden_dim: 128
   epochs: 100  # for train_autoencoder.py
-  lr: 0.001
-  weight_decay: 0.0
 
 # Loss function
 loss:
@@ -57,13 +55,13 @@ train:
   num_workers: 8
   out_dir: "runs"
 
-# Learning rate scheduler
+# Learning rate and weight decay (shared by train.py y train_autoencoder.py)
 lr_scheduler:
-  name: "cosine_warmup"  # "cosine_warmup", "constant", null
-  base_lr: 0.0005
-  min_lr: 0.00002
-  warmup_steps: 200
-  weight_decay: 0.0
+  name: "cosine_warmup"  # "cosine_warmup" o "none"
+  base_lr: 0.0005        # LR base para todo el entrenamiento
+  min_lr: 0.00002        # LR mínima al final del schedule
+  warmup_steps: 200      # número de pasos de warmup
+  weight_decay: 0.0      # weight decay global
 
 # Diffusion process
 diffusion:

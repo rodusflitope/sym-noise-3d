@@ -17,7 +17,6 @@ loss:
 train:
   batch_size: 128
   epochs: 50
-  lr: 0.002
   log_every: 50
   num_points: 2048
   num_workers: 8

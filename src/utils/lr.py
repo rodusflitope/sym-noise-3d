@@ -11,7 +11,7 @@ def _make_cosine_warmup_lambda(total_steps: int, warmup_steps: int, min_lr_ratio
         if total_steps <= 0:
             return 1.0
         if step < warmup_steps and warmup_steps > 0:
-            return float(step + 1) / float(max(1, warmup_steps))
+            return float(step) / float(max(1, warmup_steps))
         progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
@@ -44,7 +44,12 @@ def build_scheduler(cfg: dict, optimizer: torch.optim.Optimizer, steps_per_epoch
 
 def build_optimizer_and_scheduler(cfg: dict, model, steps_per_epoch: int):
     lr = _get_base_lr(cfg)
-    wd = float(cfg["train"].get("weight_decay", 0.01))
+    sch_cfg = cfg.get("lr_scheduler", {})
+    wd_cfg = sch_cfg.get("weight_decay", None)
+    if wd_cfg is not None:
+        wd = float(wd_cfg)
+    else:
+        wd = float(cfg["train"].get("weight_decay", 0.01))
     opt = build_optimizer(model, lr=lr, weight_decay=wd)
     sch, total_steps = build_scheduler(cfg, opt, steps_per_epoch)
     return opt, sch, total_steps

@@ -15,21 +15,30 @@ class PointAutoencoder(nn.Module):
         self.num_points = num_points
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
+        
         self.encoder_point = nn.Sequential(
             nn.Linear(3, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
-        )
-        self.encoder_global = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+        )
+        
+        self.encoder_global = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, latent_dim),
         )
+        
         self.decoder_mlp = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
+            nn.Linear(latent_dim, hidden_dim * 2),
             nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim * 2, hidden_dim * 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, 3),
         )
@@ -37,7 +46,9 @@ class PointAutoencoder(nn.Module):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         B, N, _ = x.shape
         feats = self.encoder_point(x)
-        global_feat = feats.mean(dim=1)
+        mean_feat = feats.mean(dim=1)
+        max_feat = feats.max(dim=1)[0]
+        global_feat = torch.cat([mean_feat, max_feat], dim=-1)
         latent = self.encoder_global(global_feat)
         return latent
 

@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import argparse as ap
 import json
-import math
 import pathlib
-import time
 from datetime import datetime
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
-from src.data import ShapeNetDataset
+from src.data import build_datasets_from_config
 from src.metrics import chamfer_distance
 from src.models.autoencoder import PointAutoencoder
 from src.utils.common import load_cfg, set_seed, get_device
@@ -34,8 +32,6 @@ def main() -> None:
     latent_dim = ae_cfg.get("latent_dim", 256)
     hidden_dim = ae_cfg.get("hidden_dim", 128)
     ae_epochs = ae_cfg.get("epochs", 100)
-    ae_lr = ae_cfg.get("lr", 1e-3)
-    ae_weight_decay = ae_cfg.get("weight_decay", 0.0)
 
     print(f"[ae] latent_dim={latent_dim} hidden_dim={hidden_dim}")
     autoencoder = PointAutoencoder(
@@ -44,29 +40,10 @@ def main() -> None:
         latent_dim=latent_dim,
     ).to(device)
 
-    data_cfg = cfg.get("data", {})
-    ds_full = ShapeNetDataset(
-        root_dir=data_cfg["root_dir"],
-        num_points=cfg["train"]["num_points"],
-        max_models=data_cfg.get("max_models", None),
-        augment=data_cfg.get("augment", False),
-        rotate_prob=data_cfg.get("rotate_prob", 0.5),
-        flip_prob=data_cfg.get("flip_prob", 0.5),
-        jitter_sigma=data_cfg.get("jitter_sigma", 0.0),
-    )
-    n = len(ds_full)
-    val_frac = float(data_cfg.get("val_frac", 0.0))
-    test_frac = float(data_cfg.get("test_frac", 0.0))
-    n_test = int(n * test_frac)
-    n_val = int(n * val_frac)
-    n_train = max(1, n - n_val - n_test)
-    g = torch.Generator()
-    g.manual_seed(int(cfg.get("seed", 0) or 0))
-    perm = torch.randperm(n, generator=g).tolist()
-    idx_train = perm[:n_train]
-    idx_val = perm[n_train : n_train + n_val]
-    ds = Subset(ds_full, idx_train)
-    ds_val = Subset(ds_full, idx_val) if len(idx_val) > 0 else None
+    datasets = build_datasets_from_config(cfg)
+    ds = datasets["train"]
+    ds_val = datasets["val"]
+    splits = datasets["indices"]
 
     dl = DataLoader(
         ds,
@@ -89,13 +66,17 @@ def main() -> None:
             persistent_workers=True,
         )
 
-    opt = torch.optim.Adam(autoencoder.parameters(), lr=ae_lr, weight_decay=ae_weight_decay)
-    scheduler = None
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_name = f"ae_{cfg['exp_name']}_{timestamp}"
     out_dir = pathlib.Path(cfg["train"]["out_dir"]) / exp_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    
+    split_path = out_dir / "splits.json"
+    with open(split_path, "w", encoding="utf-8") as f:
+        json.dump(splits, f)
+
+    steps_per_epoch = len(ds) // cfg["train"]["batch_size"] if len(ds) > 0 else 0
+    opt, scheduler, total_steps = build_optimizer_and_scheduler(cfg, autoencoder, steps_per_epoch)
 
     training_history: dict[str, object] = {
         "config": cfg,
@@ -104,6 +85,7 @@ def main() -> None:
         "best_epoch": None,
         "best_loss": None,
     }
+    
     best_loss = float("inf")
     for epoch in range(ae_epochs):
         autoencoder.train()
@@ -112,14 +94,21 @@ def main() -> None:
         for x0 in dl:
             x0 = x0.to(device)
             x_recon, _ = autoencoder(x0)
-            loss = torch.mean((x_recon - x0) ** 2)
+            cd = chamfer_distance(x_recon, x0)
+            loss = cd.mean()
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), max_norm=1.0)
             opt.step()
             if scheduler is not None:
                 scheduler.step()
             epoch_loss += loss.item()
             steps += 1
+            
+            del x_recon, cd, loss
+            if steps % 10 == 0:
+                torch.cuda.empty_cache()
+            
         avg_loss = epoch_loss / steps
         val_loss = None
         if dl_val is not None:
@@ -130,11 +119,13 @@ def main() -> None:
                 for x0 in dl_val:
                     x0 = x0.to(device)
                     x_recon, _ = autoencoder(x0)
-                    loss = torch.mean((x_recon - x0) ** 2)
+                    cd = chamfer_distance(x_recon, x0)
+                    loss = cd.mean()
                     v_sum += loss.item()
                     v_steps += 1
             val_loss = v_sum / max(1, v_steps)
             autoencoder.train()
+            
         ckpt_metadata = {
             "epoch": epoch,
             "loss": avg_loss,
@@ -156,6 +147,7 @@ def main() -> None:
                 metadata=ckpt_metadata,
             )
             print(f"[ae] epoch {epoch} new best loss {best_loss:.6f} saved to {ckpt_path}")
+            
         epoch_metadata = {
             "epoch": epoch,
             "avg_loss": avg_loss,
@@ -167,6 +159,7 @@ def main() -> None:
             f"[ae] epoch {epoch} avg loss {avg_loss:.6f} "
             + (f"| val loss {val_loss:.6f}" if val_loss is not None else "")
         )
+        
     total_time = None
     training_history["total_time"] = total_time
     save_training_history(cfg["train"]["out_dir"], exp_name, training_history)
