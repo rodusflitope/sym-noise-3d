@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse as ap
 import json
 import math
+import os
 import pathlib
 import time
 from datetime import datetime
@@ -20,12 +21,15 @@ from src.utils.common import load_cfg, set_seed, get_device
 from src.utils.lr import build_optimizer_and_scheduler
 
 
-def load_autoencoder(cfg, device):
+def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
     ae_cfg = cfg.get("autoencoder", {})
-    ae_ckpt = ae_cfg.get("checkpoint", None)
+
     if not ae_ckpt:
-        raise ValueError("autoencoder.checkpoint must be specified when using latent diffusion")
-    
+        raise ValueError(
+            "Autoencoder checkpoint not specified. "
+            "Pass --ae_ckpt to src.train or set AE_CHECKPOINT in the environment."
+        )
+
     num_points = cfg["train"]["num_points"]
     latent_dim = cfg["model"].get("latent_dim", 256)
     ae_hidden_dim = ae_cfg.get("hidden_dim", 128)
@@ -52,6 +56,15 @@ def sample_timesteps(batch_size: int, T: int, device: torch.device) -> torch.Ten
 def parse_args() -> ap.Namespace:
     p = ap.ArgumentParser(description="Baseline Diffusion - Train")
     p.add_argument("--cfg", type=str, default="cfgs/default.yaml")
+    p.add_argument(
+        "--ae_ckpt",
+        type=str,
+        default=None,
+        help=(
+            "Autoencoder checkpoint path for latent diffusion. "
+            "If omitted, AE_CHECKPOINT from the environment will be used."
+        ),
+    )
     return p.parse_args()
 
 
@@ -69,10 +82,11 @@ def main() -> None:
 
     use_latent = cfg.get("use_latent_diffusion", False)
     autoencoder = None
-    
+
     if use_latent:
         print("[train] MODE: Latent Diffusion")
-        autoencoder = load_autoencoder(cfg, device)
+        ae_ckpt = args.ae_ckpt or os.getenv("AE_CHECKPOINT", None)
+        autoencoder = load_autoencoder(cfg, device, ae_ckpt=ae_ckpt)
     else:
         print("[train] MODE: Direct Point Cloud Diffusion")
 

@@ -4,7 +4,7 @@ device: "auto"
 
 data:
   root_dir: "data/ShapeNetCore"
-  max_models: 200
+  max_models: 2000
   augment: true
   rotate_prob: 0.5
   flip_prob: 0.5

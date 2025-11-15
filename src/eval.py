@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse as ap
+import os
 import torch
 from typing import Optional
 
 from src.utils.common import load_cfg, get_device
-from src.models import build_model
+from src.models import build_model, PointAutoencoder
 from src.schedulers import build_beta_schedule, build_noise_type
-from src.samplers.ddpm import DDPM_Sampler
+from src.samplers import build_sampler
 from src.data import ShapeNetDataset
 from src.metrics import chamfer_distance
 
@@ -27,6 +28,7 @@ def evaluate(
     seed: Optional[int] = None,
     metric: str = "cd",
     max_points: Optional[int] = None,
+    ae_ckpt: Optional[str] = None,
 ) -> None:
     cfg = load_cfg(cfg_path)
     device = get_device(cfg.get("device", "auto"))
@@ -39,12 +41,47 @@ def evaluate(
 
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
     noise_type = build_noise_type(cfg)
-    sampler_cfg = cfg.get("sampler", {})
-    eta = sampler_cfg.get("eta", 1.0)
-    sampler = DDPM_Sampler(betas, alphas, alpha_bars, eta=eta, noise_type=noise_type)
+    sampler = build_sampler(cfg, betas, alphas, alpha_bars, noise_type=noise_type)
 
-    num_points = cfg["train"]["num_points"]
-    samples = sampler.sample(model, num_samples, num_points).cpu()
+    num_points = int(cfg["train"]["num_points"])
+    use_latent = bool(cfg.get("use_latent_diffusion", False))
+
+    if not use_latent:
+        samples = sampler.sample(model, num_samples, num_points).cpu()
+    else:
+        ae_ckpt = ae_ckpt or os.getenv("AE_CHECKPOINT", None)
+        if not ae_ckpt:
+            raise ValueError("Eval en modo latente requiere --ae_ckpt o AE_CHECKPOINT en entorno.")
+
+        ae_cfg = cfg.get("autoencoder", {})
+        latent_dim = int(cfg["model"].get("latent_dim", ae_cfg.get("latent_dim", 256)))
+        ae_hidden_dim = int(ae_cfg.get("hidden_dim", 128))
+        ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim).to(device)
+        load_checkpoint(ae, ae_ckpt, device)
+        ae.eval()
+
+        T = betas.shape[0]
+        if noise_type is not None:
+            z_t = noise_type.sample((num_samples, latent_dim), device)
+        else:
+            z_t = torch.randn(num_samples, latent_dim, device=device)
+
+        sampler_name = cfg['sampler'].get('name', 'ddpm').lower()
+        if sampler_name == 'ddpm':
+            for t in reversed(range(T)):
+                z_t = sampler.step(model, z_t, t)
+        elif sampler_name == 'ddim':
+            num_steps = int(cfg['sampler'].get('num_steps', T))
+            num_steps = min(max(1, num_steps), T)
+            step_size = max(1, T // num_steps)
+            timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
+            for i, t in enumerate(timesteps):
+                t_prev = timesteps[i+1] if i+1 < len(timesteps) else -1
+                z_t = sampler.step(model, z_t, t, t_prev)
+        else:
+            raise ValueError(f"Sampler no soportado: {sampler_name}")
+
+        samples = ae.decode(z_t).cpu()
 
     data_cfg = cfg.get("data", {})
     ds = ShapeNetDataset(
@@ -92,9 +129,12 @@ def parse_args() -> ap.Namespace:
                         help="Evaluation metric to compute: cd (Chamfer), emd (Earth Mover's), or both")
     parser.add_argument("--max_points", type=int, default=None,
                         help="Maximum number of points to use when computing EMD. If provided, point clouds will be subsampled to this number of points to speed up evaluation.")
+    parser.add_argument("--ae_ckpt", type=str, default=None,
+                        help="Checkpoint del autoencoder (requerido si use_latent_diffusion=true)")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    evaluate(args.cfg, args.ckpt, num_samples=args.num_samples, seed=args.seed)
+    evaluate(args.cfg, args.ckpt, num_samples=args.num_samples, seed=args.seed, metric=args.metric,
+             max_points=args.max_points, ae_ckpt=args.ae_ckpt)

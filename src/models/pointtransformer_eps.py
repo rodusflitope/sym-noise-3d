@@ -14,11 +14,16 @@ class PointTransformerEpsilon(nn.Module):
     ) -> None:
         super().__init__()
         self.time_embed = SinusoidalTimeEmbed(time_dim)
+
         self.point_embed = nn.Sequential(
             nn.Linear(3, hidden_dim),
             nn.SiLU(),
+            nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.LayerNorm(hidden_dim),
         )
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
@@ -27,14 +32,23 @@ class PointTransformerEpsilon(nn.Module):
             activation="relu",
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
         self.global_mlp = nn.Sequential(
             nn.Linear(hidden_dim + time_dim, hidden_dim * 2),
             nn.SiLU(),
-            nn.Linear(hidden_dim * 2, hidden_dim),
-        )
-        self.out_mlp = nn.Sequential(
+            nn.LayerNorm(hidden_dim * 2),
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.SiLU(),
+            nn.LayerNorm(hidden_dim),
+        )
+
+        self.out_mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim * 2),
+            nn.SiLU(),
+            nn.LayerNorm(hidden_dim * 2),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.SiLU(),
+            nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, 3),
         )
 

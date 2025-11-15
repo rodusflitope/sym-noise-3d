@@ -16,8 +16,14 @@ class ForwardDiffusion:
             eps = self.noise_type.sample(x0.shape, x0.device)
         else:
             eps = torch.randn_like(x0)
-        
-        s_ab = self.sqrt_alpha_bars[t].view(B, 1, 1)
-        s_1m = self.sqrt_one_minus_alpha_bars[t].view(B, 1, 1)
+        scale_shape = [B] + [1] * (x0.ndim - 1)
+        s_ab = self.sqrt_alpha_bars[t].view(*scale_shape)
+        s_1m = self.sqrt_one_minus_alpha_bars[t].view(*scale_shape)
+
         x_t = s_ab * x0 + s_1m * eps
+
+        assert x_t.shape == x0.shape, (
+            f"ForwardDiffusion.add_noise produced shape {x_t.shape} "
+            f"different from input {x0.shape}."
+        )
         return x_t, eps
