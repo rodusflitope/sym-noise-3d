@@ -72,6 +72,11 @@ def main():
     with torch.no_grad():
         eps_pred = model(x_t, t)
     mse = torch.mean((eps_pred - eps) ** 2).item()
+    
+    eps_pred_mean = eps_pred.mean().item()
+    eps_pred_std = eps_pred.std().item()
+    eps_true_mean = eps.mean().item()
+    eps_true_std = eps.std().item()
 
     loss_fn = build_loss(cfg)
     loss_name = cfg["loss"]["name"]
@@ -86,6 +91,10 @@ def main():
         "x_t_shape": list(x_t.shape),
         "eps_shape": list(eps.shape),
         "eps_pred_shape": list(eps_pred.shape),
+        "eps_pred_mean": float(eps_pred_mean),
+        "eps_pred_std": float(eps_pred_std),
+        "eps_true_mean": float(eps_true_mean),
+        "eps_true_std": float(eps_true_std),
         "mse_eps": float(mse),
         "train_loss": float(train_loss),
         "loss_name": loss_name,
@@ -95,6 +104,8 @@ def main():
     with open(out_dir / "forward_metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
 
+    print("eps_pred: mean={:.4f} std={:.4f}".format(eps_pred_mean, eps_pred_std))
+    print("eps_true: mean={:.4f} std={:.4f}".format(eps_true_mean, eps_true_std))
     print("mse_eps", metrics["mse_eps"]) 
     print("train_loss", metrics["train_loss"]) 
 

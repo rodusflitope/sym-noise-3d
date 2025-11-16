@@ -16,7 +16,12 @@ from src.metrics import chamfer_distance
 def load_checkpoint(model: torch.nn.Module, path: str, device: torch.device) -> None:
     ckpt = torch.load(path, map_location=device)
     if isinstance(ckpt, dict):
-        state_dict = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
+        state_dict = (
+            ckpt.get("model")
+            or ckpt.get("model_state_dict")
+            or ckpt.get("state_dict")
+            or ckpt
+        )
     else:
         state_dict = ckpt
     model.load_state_dict(state_dict)

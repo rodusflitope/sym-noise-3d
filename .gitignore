@@ -15,4 +15,7 @@ __pycache__/
 # Modelos y runs
 runs/
 
+# Samples
+samples/
+
 tests/outputs

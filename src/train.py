@@ -99,13 +99,10 @@ def main() -> None:
     forward = ForwardDiffusion(betas, alphas, alpha_bars, noise_type=noise_type)
 
     print(
-        f"[train] schedule={cfg['diffusion']['schedule']}, noise_type={cfg['diffusion'].get('noise_type', 'gaussian')}"
-    )
-    print(
-        f"[train] T={T}, beta_start={cfg['diffusion']['beta_start']:.6f}, beta_end={cfg['diffusion']['beta_end']:.6f}"
-    )
-    print(
-        f"[train] alpha_bar[0]={alpha_bars[0]:.6f}, alpha_bar[T//2]={alpha_bars[T // 2]:.6f}, alpha_bar[-1]={alpha_bars[-1]:.6f}"
+        f"[train] diffusion: schedule={cfg['diffusion']['schedule']}, "
+        f"noise_type={cfg['diffusion'].get('noise_type', 'gaussian')}, "
+        f"T={T}, alpha_bar[0]={alpha_bars[0]:.6f}, "
+        f"alpha_bar[T//2]={alpha_bars[T // 2]:.6f}, alpha_bar[-1]={alpha_bars[-1]:.6f}"
     )
 
     datasets = build_datasets_from_config(cfg)

@@ -24,7 +24,7 @@ loss:
 
 train:
   batch_size: 64
-  epochs: 200
+  epochs: 100
   log_every: 50
   num_points: 2048
   num_workers: 8
@@ -34,7 +34,7 @@ diffusion:
   T: 400
   beta_start: 0.0001
   beta_end: 0.02
-  schedule: "cosine"
+  schedule: "scaled_linear"
   noise_type: "gaussian"
 
 sampler:
