@@ -47,6 +47,8 @@ def main():
 
     T = cfg["diffusion"]["T"]
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
+    if cfg["diffusion"].get("noise_type", "gaussian").lower() == "symmetric_axis":
+        cfg["diffusion"]["symmetric_axis"] = 0
     noise_type = build_noise_type(cfg)
     forward = ForwardDiffusion(betas, alphas, alpha_bars, noise_type=noise_type)
 

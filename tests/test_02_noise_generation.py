@@ -21,10 +21,10 @@ def ensure_dir(p):
 def plot_pc(pc, path):
     fig = plt.figure(figsize=(6, 6))
     ax = fig.add_subplot(111, projection="3d")
-    ax.scatter(pc[:, 0], pc[:, 1], pc[:, 2], s=1)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")
+    ax.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=1)
+    ax.set_xlabel("x (right)")
+    ax.set_ylabel("z (front -)")
+    ax.set_zlabel("y (up)")
     ax.set_xlim(-1.5, 1.5)
     ax.set_ylim(-1.5, 1.5)
     ax.set_zlim(-1.5, 1.5)
@@ -62,6 +62,8 @@ def main():
 
     T = cfg["diffusion"]["T"]
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
+    if cfg["diffusion"].get("noise_type", "gaussian").lower() == "symmetric_axis":
+        cfg["diffusion"]["symmetric_axis"] = 0
     noise_type = build_noise_type(cfg)
     forward = ForwardDiffusion(betas, alphas, alpha_bars, noise_type=noise_type)
 
@@ -92,6 +94,15 @@ def main():
     print("eps_std", stats["eps_std"]) 
     print("x_t_mean", stats["x_t_mean"]) 
     print("x_t_std", stats["x_t_std"]) 
+
+    if cfg["diffusion"].get("noise_type", "gaussian").lower() == "symmetric_axis":
+        b, n, _ = eps.shape
+        half = n // 2
+        left = eps[:, :half, 0]
+        right = eps[:, -half:, 0]
+        right_mirrored = -right.flip(dims=[1])
+        diff = (left - right_mirrored).abs().mean().item()
+        print("symmetric_axis_x_diff", diff)
 
 
 if __name__ == "__main__":
