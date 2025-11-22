@@ -5,6 +5,7 @@ from torch.utils.data import Dataset, Subset
 from pathlib import Path
 import trimesh
 from typing import Any
+from src.utils.symmetry import order_point_cloud_for_symmetry
 
 
 class ShapeNetDataset(Dataset):
@@ -18,6 +19,8 @@ class ShapeNetDataset(Dataset):
         flip_prob: float = 0.5,
         jitter_sigma: float = 0.0,
         categories: list[str] | None = None,
+        enforce_symmetry: bool = False,
+        symmetry_axis: int = 0,
     ) -> None:
         super().__init__()
         self.root_dir = Path(root_dir)
@@ -26,6 +29,8 @@ class ShapeNetDataset(Dataset):
         self.rotate_prob = rotate_prob
         self.flip_prob = flip_prob
         self.jitter_sigma = jitter_sigma
+        self.enforce_symmetry = enforce_symmetry
+        self.symmetry_axis = symmetry_axis
 
         if categories is None or len(categories) == 0:
             categories = ["02691156"]
@@ -64,6 +69,10 @@ class ShapeNetDataset(Dataset):
             max_dist = torch.sqrt((points_tensor**2).sum(dim=1)).max()
             if max_dist > 0:
                 points_tensor = points_tensor / max_dist
+            
+            if self.enforce_symmetry:
+                points_tensor = order_point_cloud_for_symmetry(points_tensor, axis=self.symmetry_axis)
+                
             self._cache[idx] = points_tensor
             base_points = points_tensor
         points_tensor = base_points.clone()
@@ -98,6 +107,8 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         max_models=data_cfg.get("max_models", None),
         augment=False,
         categories=data_cfg.get("categories", None),
+        enforce_symmetry=data_cfg.get("enforce_symmetry", False),
+        symmetry_axis=data_cfg.get("symmetry_axis", 0),
     )
 
     n = len(base_ds)
@@ -125,6 +136,8 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         flip_prob=data_cfg.get("flip_prob", 0.5),
         jitter_sigma=data_cfg.get("jitter_sigma", 0.0),
         categories=data_cfg.get("categories", None),
+        enforce_symmetry=data_cfg.get("enforce_symmetry", False),
+        symmetry_axis=data_cfg.get("symmetry_axis", 0),
     )
 
     eval_ds_full = base_ds

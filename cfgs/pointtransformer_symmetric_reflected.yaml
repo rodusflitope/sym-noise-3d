@@ -1,4 +1,4 @@
-exp_name: "pointtransformer-baseline"
+exp_name: "pointtransformer-symmetric-reflected"
 seed: 10
 device: "auto"
 
@@ -11,6 +11,8 @@ data:
   jitter_sigma: 0.02
   val_frac: 0.1
   test_frac: 0.1
+  enforce_symmetry: true
+  symmetry_axis: 0
 
 model:
   name: "pointtransformer_eps"
@@ -36,7 +38,12 @@ diffusion:
   beta_start: 0.0001
   beta_end: 0.02
   schedule: "scaled_linear"
-  noise_type: "gaussian"
+  noise_type: "symmetric"
+  symmetric:
+    base_type: "gaussian"
+    mode: "reflected"
+    axis: 0
+    active_dims: [0, 1, 2]
 
 sampler:
   name: "ddpm"

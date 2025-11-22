@@ -13,6 +13,7 @@ from .noise_types import (
     LaplacianNoise,
     StudentTNoise
 )
+from .structural_noise import SymmetricNoiseWrapper
 
 
 def build_beta_schedule(cfg, device):
@@ -51,5 +52,22 @@ def build_noise_type(cfg):
     elif noise_type == "student_t":
         df = cfg["diffusion"].get("student_t_df", 3.0)
         return StudentTNoise(df=df)
+    elif noise_type == "symmetric":
+        sym_cfg = cfg["diffusion"].get("symmetric", {})
+        
+        base_type_name = sym_cfg.get("base_type", "gaussian")
+
+        base_cfg = cfg.copy()
+        base_cfg["diffusion"] = cfg["diffusion"].copy()
+        base_cfg["diffusion"]["noise_type"] = base_type_name
+        
+        base_noise = build_noise_type(base_cfg)
+        
+        return SymmetricNoiseWrapper(
+            base_noise=base_noise,
+            mode=sym_cfg.get("mode", "masked"),
+            axis=sym_cfg.get("axis", 0),
+            active_dims=sym_cfg.get("active_dims", None)
+        )
     else:
         raise ValueError(f"Unknown noise type: {noise_type}")

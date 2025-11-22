@@ -14,6 +14,7 @@ from .noise_types import (
     LaplacianNoise,
     StudentTNoise
 )
+from .structural_noise import SymmetricNoiseWrapper
 from .builder import build_beta_schedule, build_noise_type
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "SphericalNoise",
     "LaplacianNoise",
     "StudentTNoise",
+    "SymmetricNoiseWrapper",
     "build_beta_schedule",
     "build_noise_type",
 ]
