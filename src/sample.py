@@ -29,6 +29,18 @@ def main():
     ckpt = args.ckpt
     if ckpt is None:
         ckpt = str(pathlib.Path(cfg["train"]["out_dir"]) / cfg["exp_name"] / "last.pt")
+
+    p = pathlib.Path(ckpt)
+    if p.is_dir():
+        if (p / "best.pt").exists():
+            ckpt = str(p / "best.pt")
+            print(f"[sample] directory provided, using best.pt: {ckpt}")
+        elif (p / "last.pt").exists():
+            ckpt = str(p / "last.pt")
+            print(f"[sample] directory provided, using last.pt: {ckpt}")
+        else:
+            raise ValueError(f"[sample] ckpt directory '{ckpt}' does not contain 'best.pt' or 'last.pt'. Please specify a file.")
+
     model = load_ckpt(model, ckpt, map_location=device)
     model.eval()
     print(f"[sample] loaded ckpt: {ckpt}")

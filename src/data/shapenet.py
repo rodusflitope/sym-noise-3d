@@ -21,6 +21,7 @@ class ShapeNetDataset(Dataset):
         categories: list[str] | None = None,
         enforce_symmetry: bool = False,
         symmetry_axis: int = 0,
+        sample_symmetric: bool = False,
     ) -> None:
         super().__init__()
         self.root_dir = Path(root_dir)
@@ -31,6 +32,7 @@ class ShapeNetDataset(Dataset):
         self.jitter_sigma = jitter_sigma
         self.enforce_symmetry = enforce_symmetry
         self.symmetry_axis = symmetry_axis
+        self.sample_symmetric = sample_symmetric
 
         if categories is None or len(categories) == 0:
             categories = ["02691156"]
@@ -62,8 +64,25 @@ class ShapeNetDataset(Dataset):
         else:
             obj_path = self.obj_paths[idx]
             mesh = trimesh.load(str(obj_path), force="mesh")
-            points = mesh.sample(self.num_points)
-            points_tensor = torch.from_numpy(points).float()
+            
+            if self.sample_symmetric:
+                n_half = self.num_points // 2
+                points_half = mesh.sample(n_half)
+                points_tensor_half = torch.from_numpy(points_half).float()
+
+                points_tensor_reflected = points_tensor_half.clone()
+                points_tensor_reflected[:, self.symmetry_axis] *= -1
+
+                points_tensor = torch.cat([points_tensor_half, points_tensor_reflected], dim=0)
+                
+                if self.num_points % 2 != 0:
+                    extra = mesh.sample(1)
+                    extra_tensor = torch.from_numpy(extra).float()
+                    points_tensor = torch.cat([points_tensor, extra_tensor], dim=0)
+            else:
+                points = mesh.sample(self.num_points)
+                points_tensor = torch.from_numpy(points).float()
+            
             centroid = points_tensor.mean(dim=0, keepdim=True)
             points_tensor = points_tensor - centroid
             max_dist = torch.sqrt((points_tensor**2).sum(dim=1)).max()
@@ -109,6 +128,7 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         categories=data_cfg.get("categories", None),
         enforce_symmetry=data_cfg.get("enforce_symmetry", False),
         symmetry_axis=data_cfg.get("symmetry_axis", 0),
+        sample_symmetric=data_cfg.get("sample_symmetric", False),
     )
 
     n = len(base_ds)
@@ -138,6 +158,7 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         categories=data_cfg.get("categories", None),
         enforce_symmetry=data_cfg.get("enforce_symmetry", False),
         symmetry_axis=data_cfg.get("symmetry_axis", 0),
+        sample_symmetric=data_cfg.get("sample_symmetric", False),
     )
 
     eval_ds_full = base_ds
