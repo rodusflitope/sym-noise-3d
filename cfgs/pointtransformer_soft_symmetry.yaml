@@ -1,4 +1,4 @@
-exp_name: "pointtransformer-symmetric-average"
+exp_name: "pointtransformer-soft-symmetry"
 seed: 10
 device: "auto"
 
@@ -8,9 +8,6 @@ data:
   augment: false
   val_frac: 0.1
   test_frac: 0.1
-  enforce_symmetry: false
-  sample_symmetric: true
-  symmetry_axis: 0
 
 model:
   name: "pointtransformer_eps"
@@ -21,6 +18,9 @@ model:
 
 loss:
   name: "snr_weighted"
+  symmetry:
+    weight: 0.5
+    warmup_steps: 2000
 
 train:
   batch_size: 64
@@ -36,12 +36,7 @@ diffusion:
   beta_start: 0.0001
   beta_end: 0.02
   schedule: "linear"
-  noise_type: "symmetric"
-  symmetric:
-    base_type: "gaussian"
-    mode: "average"
-    axis: 0
-    active_dims: [0, 1, 2]
+  noise_type: "gaussian"
 
 sampler:
   name: "ddpm"

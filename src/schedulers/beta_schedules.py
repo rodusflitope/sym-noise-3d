@@ -1,26 +1,5 @@
 import torch
-
-def make_linear_betas(T: int, beta_start: float, beta_end: float, device):
-    betas = torch.linspace(beta_start, beta_end, T, device=device)
-    alphas = 1.0 - betas
-    alpha_bars = torch.cumprod(alphas, dim=0)
-    return betas, alphas, alpha_bars
-
-def make_cosine_betas(T: int, beta_start: float, beta_end: float, device, s=0.008):
-    steps = T + 1
-    x = torch.linspace(0, T, steps, device=device)
-    alphas_cumprod = torch.cos(((x / T) + s) / (1 + s) * torch.pi * 0.5) ** 2
-    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-
-    alpha_bar_t = alphas_cumprod[1:]
-    alpha_bar_prev = alphas_cumprod[:-1]
-    betas = 1 - (alpha_bar_t / alpha_bar_prev)
-
-    betas = torch.clamp(betas, min=1e-8, max=0.999)
-
-    alphas = 1.0 - betas
-    alpha_bars = torch.cumprod(alphas, dim=0)
-    return betas, alphas, alpha_bars
+from diffusers import DDPMScheduler
 
 def make_quadratic_betas(T: int, beta_start: float, beta_end: float, device):
     betas = torch.linspace(beta_start**0.5, beta_end**0.5, T, device=device) ** 2
@@ -42,11 +21,16 @@ def make_sqrt_betas(T: int, beta_start: float, beta_end: float, device):
     alpha_bars = torch.cumprod(alphas, dim=0)
     return betas, alphas, alpha_bars
 
-def make_scaled_linear_betas(T: int, beta_start: float, beta_end: float, device):
-    scale = 1000 / T
-    beta_start_scaled = scale * beta_start
-    beta_end_scaled = scale * beta_end
-    betas = torch.linspace(beta_start_scaled, beta_end_scaled, T, device=device)
-    alphas = 1.0 - betas
-    alpha_bars = torch.cumprod(alphas, dim=0)
+def make_diffusers_betas(T: int, schedule_name: str, beta_start: float, beta_end: float, device):
+    scheduler = DDPMScheduler(
+        num_train_timesteps=T, 
+        beta_schedule=schedule_name,
+        beta_start=beta_start,
+        beta_end=beta_end
+    )
+    
+    betas = scheduler.betas.to(device)
+    alphas = scheduler.alphas.to(device)
+    alpha_bars = scheduler.alphas_cumprod.to(device)
+    
     return betas, alphas, alpha_bars

@@ -11,10 +11,10 @@ data:
 
 model:
   name: "pointtransformer_eps"
-  hidden_dim: 256
+  hidden_dim: 128
   time_dim: 128
   num_heads: 4
-  num_layers: 2
+  num_layers: 3
 
 loss:
   name: "snr_weighted"
@@ -29,10 +29,10 @@ train:
   save_every: 10
 
 diffusion:
-  T: 400
+  T: 1000
   beta_start: 0.0001
   beta_end: 0.02
-  schedule: "scaled_linear"
+  schedule: "linear"
   noise_type: "gaussian"
 
 sampler:
@@ -46,4 +46,4 @@ lr_scheduler:
   name: "cosine_warmup"
   base_lr: 1.0e-4
   min_lr: 1.0e-6
-  warmup_steps: 1000
+  warmup_steps: 500

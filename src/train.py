@@ -175,9 +175,9 @@ def main() -> None:
             loss_name = cfg["loss"]["name"]
             if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
                 alpha_bar_t = alpha_bars[t]
-                loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t)
+                loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t, current_step=global_step)
             else:
-                loss = loss_fn(eps_pred, eps)
+                loss = loss_fn(eps_pred, eps, current_step=global_step)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -221,9 +221,9 @@ def main() -> None:
                     loss_name = cfg["loss"]["name"]
                     if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
                         alpha_bar_t = alpha_bars[t]
-                        l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t)
+                        l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t, current_step=global_step)
                     else:
-                        l = loss_fn(eps_pred, eps)
+                        l = loss_fn(eps_pred, eps, current_step=global_step)
                     v_sum += float(l.item())
                     v_steps += 1
             val_loss = v_sum / max(1, v_steps)

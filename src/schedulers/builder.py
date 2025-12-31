@@ -1,10 +1,8 @@
 from .beta_schedules import (
-    make_linear_betas,
-    make_cosine_betas,
     make_quadratic_betas,
     make_sigmoid_betas,
     make_sqrt_betas,
-    make_scaled_linear_betas
+    make_diffusers_betas,
 )
 from .noise_types import (
     GaussianNoise,
@@ -22,19 +20,26 @@ def build_beta_schedule(cfg, device):
     beta_start = cfg["diffusion"]["beta_start"]
     beta_end = cfg["diffusion"]["beta_end"]
     
-    if schedule == "linear":
-        return make_linear_betas(T, beta_start, beta_end, device)
-    elif schedule == "cosine":
-        return make_cosine_betas(T, beta_start, beta_end, device)
-    elif schedule == "quadratic":
+    if schedule == "quadratic":
         return make_quadratic_betas(T, beta_start, beta_end, device)
     elif schedule == "sigmoid":
         return make_sigmoid_betas(T, beta_start, beta_end, device)
     elif schedule == "sqrt":
         return make_sqrt_betas(T, beta_start, beta_end, device)
-    elif schedule == "scaled_linear":
-        return make_scaled_linear_betas(T, beta_start, beta_end, device)
-    else:
+    
+    diffusers_map = {
+        "linear": "linear",
+        "scaled_linear": "scaled_linear",
+        "cosine": "squaredcos_cap_v2",
+        "squaredcos_cap_v2": "squaredcos_cap_v2",
+        "linear_diffusers": "linear",
+    }
+
+    if schedule in diffusers_map:
+        return make_diffusers_betas(T, diffusers_map[schedule], beta_start, beta_end, device)
+    try:
+        return make_diffusers_betas(T, schedule, beta_start, beta_end, device)
+    except Exception:
         raise ValueError(f"Unknown schedule: {schedule}")
 
 

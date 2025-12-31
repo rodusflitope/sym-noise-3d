@@ -1,5 +1,4 @@
 from .losses import (
-    mse_eps,
     huber_loss,
     snr_weighted_mse,
     min_snr_weighted_mse,
@@ -9,7 +8,6 @@ from .losses import (
 from .builder import build_loss
 
 __all__ = [
-    "mse_eps",
     "huber_loss",
     "snr_weighted_mse",
     "min_snr_weighted_mse",

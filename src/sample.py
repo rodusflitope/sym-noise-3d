@@ -4,8 +4,9 @@ from src.utils.common import load_cfg, get_device, set_seed
 from src.models import build_model, PointAutoencoder
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler
-from src.utils.checkpoint import load_ckpt
+from src.utils.checkpoint import load_ckpt, load_ckpt_config
 from src.utils.io import save_npy, save_ply
+from src.vis_samples import plot_pc
 
 def parse_args():
     import argparse as ap
@@ -19,16 +20,12 @@ def parse_args():
 
 def main():
     args = parse_args()
-    cfg = load_cfg(args.cfg)
-    set_seed(cfg.get("seed"))
-    device = get_device(cfg.get("device","auto"))
-    print(f"[sample] device = {device}")
-
-    model = build_model(cfg).to(device)
-
+    
+    temp_cfg = load_cfg(args.cfg)
+    
     ckpt = args.ckpt
     if ckpt is None:
-        ckpt = str(pathlib.Path(cfg["train"]["out_dir"]) / cfg["exp_name"] / "last.pt")
+        ckpt = str(pathlib.Path(temp_cfg["train"]["out_dir"]) / temp_cfg["exp_name"] / "last.pt")
 
     p = pathlib.Path(ckpt)
     if p.is_dir():
@@ -41,9 +38,23 @@ def main():
         else:
             raise ValueError(f"[sample] ckpt directory '{ckpt}' does not contain 'best.pt' or 'last.pt'. Please specify a file.")
 
+    print(f"[sample] Target checkpoint: {ckpt}")
+    saved_cfg = load_ckpt_config(ckpt)
+    if saved_cfg is not None:
+        print("[sample] Using configuration loaded from checkpoint metadata.")
+        cfg = saved_cfg
+    else:
+        print("[sample] Warning: No config found in checkpoint metadata. Using local config file.")
+        cfg = temp_cfg
+
+    set_seed(cfg.get("seed"))
+    device = get_device(cfg.get("device","auto"))
+    print(f"[sample] device = {device}")
+
+    model = build_model(cfg).to(device)
     model = load_ckpt(model, ckpt, map_location=device)
     model.eval()
-    print(f"[sample] loaded ckpt: {ckpt}")
+    print(f"[sample] loaded model weights")
 
     T = cfg["diffusion"]["T"]
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
@@ -61,7 +72,6 @@ def main():
 
     with torch.no_grad():
         if not use_latent:
-            # Modo punto: muestrea directamente nubes de puntos
             pcs = sampler.sample(model, num_samples=num_samples, num_points=num_points)
         else:
             ae_ckpt = args.ae_ckpt or os.getenv("AE_CHECKPOINT", None)
@@ -102,14 +112,23 @@ def main():
 
     pcs_np = pcs.detach().cpu().numpy().astype(np.float32)
 
-    save_dir = pathlib.Path(cfg["sampler"]["save_dir"]) / cfg["exp_name"]
+    run_name = pathlib.Path(ckpt).parent.name
+    save_dir = pathlib.Path(cfg["sampler"]["save_dir"]) / run_name
+    save_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"[sample] Saving samples to: {save_dir}")
+
     for i in range(num_samples):
         out = save_dir / f"sample_{i:03d}.{cfg['sampler']['save_format']}"
         if cfg["sampler"]["save_format"] == "ply":
             save_ply(pcs_np[i], str(out))
         else:
             save_npy(pcs_np[i], str(out))
-    print(f"[sample] saved {num_samples} samples in: {save_dir}")
+            
+        out_vis = out.with_suffix(".png")
+        plot_pc(pcs_np[i], str(out_vis))
+        
+    print(f"[sample] saved {num_samples} samples and visualizations in: {save_dir}")
 
 if __name__ == "__main__":
     main()

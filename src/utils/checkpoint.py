@@ -30,3 +30,11 @@ def load_ckpt(model, ckpt_path: str, map_location=None):
     sd = torch.load(ckpt_path, map_location=map_location)
     model.load_state_dict(sd["model"], strict=True)
     return model
+
+
+def load_ckpt_config(ckpt_path: str):
+    sd = torch.load(ckpt_path, map_location="cpu")
+    metadata = sd.get("metadata", {})
+    if metadata and "config" in metadata:
+        return metadata["config"]
+    return None
