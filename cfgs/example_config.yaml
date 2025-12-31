@@ -38,7 +38,8 @@ autoencoder:
 
 # Loss function
 loss:
-  name: "mse_eps"  # "mse_eps", "huber", "snr_weighted", "min_snr", "p2_weighted", "truncated_snr"
+  name: "mse"  # "mse", "huber"
+  weighting: "none" # "none", "snr", "min_snr", "p2", "truncated_snr"
   delta: 1.0  # huber
   gamma: 5.0  # min_snr, p2_weighted
   k: 1.0  # p2_weighted

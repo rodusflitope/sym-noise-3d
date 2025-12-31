@@ -12,7 +12,8 @@ model:
   time_dim: 64
 
 loss:
-  name: "mse_eps"
+  name: "mse"
+  weighting: "none"
 
 train:
   batch_size: 128

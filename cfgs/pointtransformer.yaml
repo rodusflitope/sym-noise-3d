@@ -17,7 +17,8 @@ model:
   num_layers: 3
 
 loss:
-  name: "snr_weighted"
+  name: "mse"
+  weighting: "snr"
 
 train:
   batch_size: 64

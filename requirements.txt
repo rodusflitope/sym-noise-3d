@@ -7,3 +7,4 @@ trimesh
 tqdm
 diffusers
 transformers
+ninja

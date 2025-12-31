@@ -2,6 +2,7 @@ from .simple_eps import EpsilonMLP
 from .pointnet_eps import PointNetEpsilon
 from .pointtransformer_eps import PointTransformerEpsilon
 from .latent_eps import LatentEpsilonMLP
+from .pvcnn import PVCNN
 
 
 def build_model(cfg):
@@ -35,6 +36,14 @@ def build_model(cfg):
             latent_dim=latent_dim,
             hidden_dim=hidden_dim,
             time_dim=time_dim,
+        )
+    elif name == "pvcnn":
+        return PVCNN(
+            num_classes=3,
+            embed_dim=cfg["model"]["embed_dim"],
+            use_att=cfg["model"].get("use_att", True),
+            dropout=cfg["model"].get("dropout", 0.1),
+            extra_feature_channels=cfg["model"].get("extra_feature_channels", 0)
         )
     raise ValueError(f"Unknown model: {name}")
 

@@ -33,7 +33,8 @@ latent_diffusion:
   time_dim: 64
 
 loss:
-  name: "snr_weighted"
+  name: "mse"
+  weighting: "snr"
 
 train:
   batch_size: 32

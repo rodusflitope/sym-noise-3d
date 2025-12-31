@@ -18,6 +18,18 @@ def parse_args():
                    help="Checkpoint del autoencoder para modo latente (opcional: usa AE_CHECKPOINT si no se pasa)")
     return p.parse_args()
 
+
+class ChannelTransposeWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+    
+    def forward(self, x, t):
+        x = x.transpose(1, 2).contiguous()
+        out = self.model(x, t)
+        return out.transpose(1, 2).contiguous()
+
+
 def main():
     args = parse_args()
     
@@ -54,6 +66,11 @@ def main():
     model = build_model(cfg).to(device)
     model = load_ckpt(model, ckpt, map_location=device)
     model.eval()
+    
+    if cfg["model"]["name"] == "pvcnn":
+        print("[sample] Wrapping PVCNN model for channel transposition [B, N, C] <-> [B, C, N]")
+        model = ChannelTransposeWrapper(model)
+    
     print(f"[sample] loaded model weights")
 
     T = cfg["diffusion"]["T"]

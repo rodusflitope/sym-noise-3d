@@ -160,6 +160,8 @@ def main() -> None:
 
         for x0 in dl:
             x0 = x0.to(device)
+            if cfg["model"]["name"] == "pvcnn":
+                x0 = x0.transpose(1, 2).contiguous()
             B = x0.shape[0]
             t = sample_timesteps(B, T, device)
             
@@ -172,12 +174,8 @@ def main() -> None:
                 x_t, eps = forward.add_noise(x0, t)
                 eps_pred = model(x_t, t)
 
-            loss_name = cfg["loss"]["name"]
-            if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
-                alpha_bar_t = alpha_bars[t]
-                loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t, current_step=global_step)
-            else:
-                loss = loss_fn(eps_pred, eps, current_step=global_step)
+            loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -207,6 +205,8 @@ def main() -> None:
             with torch.no_grad():
                 for x0 in dl_val:
                     x0 = x0.to(device)
+                    if cfg["model"]["name"] == "pvcnn":
+                        x0 = x0.transpose(1, 2).contiguous()
                     B = x0.shape[0]
                     t = torch.randint(low=0, high=T, size=(B,), generator=g_val, dtype=torch.long).to(device)
                     
@@ -218,12 +218,8 @@ def main() -> None:
                         x_t, eps = forward.add_noise(x0, t)
                         eps_pred = model(x_t, t)
                     
-                    loss_name = cfg["loss"]["name"]
-                    if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
-                        alpha_bar_t = alpha_bars[t]
-                        l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t, current_step=global_step)
-                    else:
-                        l = loss_fn(eps_pred, eps, current_step=global_step)
+                    l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+
                     v_sum += float(l.item())
                     v_steps += 1
             val_loss = v_sum / max(1, v_steps)

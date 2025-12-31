@@ -1,4 +1,4 @@
-exp_name: "pointtransformer-baseline"
+exp_name: "pvcnn-baseline"
 seed: 10
 device: "auto"
 
@@ -10,31 +10,32 @@ data:
   test_frac: 0.1
 
 model:
-  name: "pointtransformer_eps"
-  hidden_dim: 128
-  time_dim: 128
-  num_heads: 4
-  num_layers: 3
+  name: "pvcnn"
+  embed_dim: 128
+  use_att: true
+  dropout: 0.1
+  extra_feature_channels: 0
 
 loss:
-  name: "sinkhorn"
-  blur: 0.05
-  p: 2
+  name: "mse"
+  weighting: "none"
+  # blur: 0.05
+  # p: 2
 
 train:
-  batch_size: 64
+  batch_size: 16
   epochs: 100
   log_every: 50
   num_points: 2048
-  num_workers: 8
+  num_workers: 4
   out_dir: "runs"
   save_every: 10
 
 diffusion:
-  T: 400
+  T: 1000
   beta_start: 0.0001
   beta_end: 0.02
-  schedule: "squaredcos_cap_v2"
+  schedule: "linear"
   noise_type: "gaussian"
 
 sampler:
