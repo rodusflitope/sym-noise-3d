@@ -1,17 +1,17 @@
 from .losses import (
-    huber_loss,
-    snr_weighted_mse,
-    min_snr_weighted_mse,
-    p2_weighted_mse,
-    truncated_snr_mse,
+    compute_snr,
+    snr_weight,
+    min_snr_weight,
+    p2_weight,
+    truncated_snr_weight,
 )
 from .builder import build_loss
 
 __all__ = [
-    "huber_loss",
-    "snr_weighted_mse",
-    "min_snr_weighted_mse",
-    "p2_weighted_mse",
-    "truncated_snr_mse",
+    "compute_snr",
+    "snr_weight",
+    "min_snr_weight",
+    "p2_weight",
+    "truncated_snr_weight",
     "build_loss",
 ]

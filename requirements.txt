@@ -8,3 +8,4 @@ tqdm
 diffusers
 transformers
 ninja
+geomloss

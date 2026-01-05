@@ -7,7 +7,10 @@ from src.modules import SharedMLP, PVConv, PointNetSAModule, PointNetAModule, Po
 
 
 def _linear_gn_relu(in_channels, out_channels):
-    return nn.Sequential(nn.Linear(in_channels, out_channels), nn.GroupNorm(8,out_channels), Swish())
+    num_groups = min(8, int(out_channels))
+    while num_groups > 1 and (int(out_channels) % num_groups) != 0:
+        num_groups -= 1
+    return nn.Sequential(nn.Linear(in_channels, out_channels), nn.GroupNorm(num_groups, out_channels), Swish())
 
 
 def create_mlp_components(in_channels, out_channels, classifier=False, dim=2, width_multiplier=1):
@@ -259,8 +262,22 @@ class PVCNN(PVCNN2Base):
         ((128, 128, 64), (64, 2, 32)),
     ]
 
-    def __init__(self, num_classes, embed_dim, use_att, dropout=0.1, extra_feature_channels=3, width_multiplier=1,
-                 voxel_resolution_multiplier=1):
+    def __init__(
+        self,
+        num_classes,
+        embed_dim,
+        use_att,
+        dropout=0.1,
+        extra_feature_channels=3,
+        width_multiplier=1,
+        voxel_resolution_multiplier=1,
+        sa_blocks=None,
+        fp_blocks=None,
+    ):
+        if sa_blocks is not None:
+            self.sa_blocks = sa_blocks
+        if fp_blocks is not None:
+            self.fp_blocks = fp_blocks
         super().__init__(
             num_classes=num_classes, embed_dim=embed_dim, use_att=use_att,
             dropout=dropout, extra_feature_channels=extra_feature_channels,

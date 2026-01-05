@@ -8,6 +8,15 @@ from .se import SE3d
 __all__ = ['PVConv', 'Attention', 'Swish', 'PVConvReLU']
 
 
+def _valid_num_groups(num_channels: int, max_groups: int = 8) -> int:
+    if num_channels <= 0:
+        return 1
+    groups = min(int(max_groups), int(num_channels))
+    while groups > 1 and (num_channels % groups) != 0:
+        groups -= 1
+    return max(1, groups)
+
+
 class Swish(nn.Module):
     def forward(self,x):
         return  x * torch.sigmoid(x)
@@ -16,7 +25,7 @@ class Swish(nn.Module):
 class Attention(nn.Module):
     def __init__(self, in_ch, num_groups, D=3):
         super(Attention, self).__init__()
-        assert in_ch % num_groups == 0
+        num_groups = _valid_num_groups(in_ch, num_groups)
         if D == 3:
             self.q = nn.Conv3d(in_ch, in_ch, 1)
             self.k = nn.Conv3d(in_ch, in_ch, 1)
@@ -71,16 +80,17 @@ class PVConv(nn.Module):
         self.resolution = resolution
 
         self.voxelization = Voxelization(resolution, normalize=normalize, eps=eps)
+        gn_groups = _valid_num_groups(out_channels, 8)
         voxel_layers = [
             nn.Conv3d(in_channels, out_channels, kernel_size, stride=1, padding=kernel_size // 2),
-            nn.GroupNorm(num_groups=8, num_channels=out_channels),
+            nn.GroupNorm(num_groups=gn_groups, num_channels=out_channels),
             Swish()
         ]
         voxel_layers += [nn.Dropout(dropout)] if dropout is not None else []
         voxel_layers += [
             nn.Conv3d(out_channels, out_channels, kernel_size, stride=1, padding=kernel_size // 2),
-            nn.GroupNorm(num_groups=8, num_channels=out_channels),
-            Attention(out_channels, 8) if attention else Swish()
+            nn.GroupNorm(num_groups=gn_groups, num_channels=out_channels),
+            Attention(out_channels, gn_groups) if attention else Swish()
         ]
         if with_se:
             voxel_layers.append(SE3d(out_channels, use_relu=with_se_relu))
@@ -116,7 +126,7 @@ class PVConvReLU(nn.Module):
         voxel_layers += [
             nn.Conv3d(out_channels, out_channels, kernel_size, stride=1, padding=kernel_size // 2),
             nn.BatchNorm3d(out_channels),
-            Attention(out_channels, 8) if attention else nn.LeakyReLU(leak, True)
+            Attention(out_channels, _valid_num_groups(out_channels, 8)) if attention else nn.LeakyReLU(leak, True)
         ]
         if with_se:
             voxel_layers.append(SE3d(out_channels, use_relu=with_se_relu))

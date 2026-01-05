@@ -43,7 +43,11 @@ def build_model(cfg):
             embed_dim=cfg["model"]["embed_dim"],
             use_att=cfg["model"].get("use_att", True),
             dropout=cfg["model"].get("dropout", 0.1),
-            extra_feature_channels=cfg["model"].get("extra_feature_channels", 0)
+            extra_feature_channels=cfg["model"].get("extra_feature_channels", 0),
+            width_multiplier=cfg["model"].get("width_multiplier", 1),
+            voxel_resolution_multiplier=cfg["model"].get("voxel_resolution_multiplier", 1),
+            sa_blocks=cfg["model"].get("sa_blocks"),
+            fp_blocks=cfg["model"].get("fp_blocks"),
         )
     raise ValueError(f"Unknown model: {name}")
 

@@ -23,9 +23,12 @@ class SharedMLP(nn.Module):
             out_channels = [out_channels]
         layers = []
         for oc in out_channels:
+            num_groups = min(8, int(oc))
+            while num_groups > 1 and (int(oc) % num_groups) != 0:
+                num_groups -= 1
             layers.extend([
                 conv(in_channels, oc, 1),
-                bn(8, oc),
+                bn(num_groups, oc),
                 Swish(),
             ])
             in_channels = oc

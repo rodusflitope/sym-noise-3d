@@ -1,11 +1,16 @@
 import torch
+from src.utils.normalization import build_normalizer
+
 
 class DDPM_Sampler:
-    def __init__(self, betas, alphas, alpha_bars, eta: float = 1.0, noise_type=None):
+    def __init__(self, betas, alphas, alpha_bars, eta: float = 1.0, noise_type=None, 
+                 normalize_output: bool = False, normalizer_name: str = "center_and_scale"):
 
         self.betas = betas
         self.alphas = alphas
         self.alpha_bars = alpha_bars
+        self.normalize_output = normalize_output
+        self.normalizer = build_normalizer(normalizer_name) if normalize_output else None
         self.sqrt_alphas = torch.sqrt(alphas)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
         self.eta = eta
@@ -52,4 +57,6 @@ class DDPM_Sampler:
         T = self.betas.shape[0]
         for t in reversed(range(T)):
             x_t = self.step(model, x_t, t)
+        if self.normalize_output and self.normalizer is not None:
+            x_t = self.normalizer.normalize(x_t)
         return x_t

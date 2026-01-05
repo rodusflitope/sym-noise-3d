@@ -18,4 +18,7 @@ runs/
 # Samples
 samples/
 
+# Evals
+evals/
+
 tests/outputs
