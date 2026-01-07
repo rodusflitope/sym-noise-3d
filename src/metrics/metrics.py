@@ -83,3 +83,78 @@ def earth_movers_distance(
         total_cost = cost_np[row_ind, col_ind].mean()
         emd_vals.append(total_cost)
     return torch.tensor(emd_vals, device=x.device, dtype=x.dtype)
+
+def compute_pairwise_dist_batch(x: torch.Tensor, y: torch.Tensor, batch_size: int = 32, use_emd: bool = False):
+    x = _ensure_bnc3(x, name="x_pairwise")
+    y = _ensure_bnc3(y, name="y_pairwise")
+    
+    N = x.shape[0]
+    M = y.shape[0]
+    dist_mat = torch.zeros((N, M), device=x.device, dtype=x.dtype)
+    
+    def dist_fn(p1, p2):
+        if use_emd:
+            return earth_movers_distance(p1, p2)
+        else:
+            return chamfer_distance(p1, p2)
+
+    for i in range(0, N, batch_size):
+        x_batch = x[i : i + batch_size]
+        for j in range(0, M, batch_size):
+            y_batch = y[j : j + batch_size]
+            vals_batch = []
+            for xb in x_batch:
+                xb_expanded = xb.unsqueeze(0).expand(y_batch.shape[0], -1, -1)
+                d = dist_fn(xb_expanded, y_batch)
+                vals_batch.append(d)
+            dist_mat[i : i + batch_size, j : j + batch_size] = torch.stack(vals_batch)
+            
+    return dist_mat
+
+def compute_all_metrics(
+    gen: torch.Tensor, 
+    gt: torch.Tensor, 
+    batch_size: int = 32,
+    metric_type: str = "cd"
+) -> dict:
+    gen = _ensure_bnc3(gen, name="gen")
+    gt = _ensure_bnc3(gt, name="gt")
+    
+    use_emd = (metric_type.lower() == "emd")
+    
+    d_gg = compute_pairwise_dist_batch(gen, gen, batch_size, use_emd)
+    d_rr = compute_pairwise_dist_batch(gt, gt, batch_size, use_emd)
+    d_gr = compute_pairwise_dist_batch(gen, gt, batch_size, use_emd)
+    
+    min_dist_gt_to_gen, _ = d_gr.min(dim=0)
+    mmd = min_dist_gt_to_gen.mean().item()
+    
+    min_dist_gen_to_gt, nearest_gt_indices = d_gr.min(dim=1)
+    unique_gt_covered = torch.unique(nearest_gt_indices)
+    cov = float(len(unique_gt_covered)) / float(gt.shape[0])
+    
+    d_gg.fill_diagonal_(float("inf"))
+    d_rr.fill_diagonal_(float("inf"))
+    
+    top_row = torch.cat([d_gg, d_gr], dim=1)
+    bot_row = torch.cat([d_gr.t(), d_rr], dim=1)
+    full_mat = torch.cat([top_row, bot_row], dim=0)
+    
+    nearest_idx = full_mat.argmin(dim=1)
+    
+    N = gen.shape[0]
+    M = gt.shape[0]
+    
+    gen_nearest = nearest_idx[:N]
+    gt_nearest = nearest_idx[N:]
+    
+    acc_gen = (gen_nearest < N).float().mean()
+    acc_gt = (gt_nearest >= N).float().mean()
+    
+    one_nna = (acc_gen + acc_gt) / 2.0
+    
+    return {
+        "1-NNA": one_nna.item(),
+        "COV": cov,
+        "MMD": mmd
+    }

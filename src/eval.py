@@ -12,7 +12,7 @@ from src.models import build_model, PointAutoencoder
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler
 from src.data import ShapeNetDataset
-from src.metrics import chamfer_distance, earth_movers_distance
+from src.metrics import chamfer_distance, earth_movers_distance, compute_all_metrics
 from src.utils.checkpoint import load_ckpt_config
 
 
@@ -232,6 +232,13 @@ def evaluate(
     print(f"Chamfer Distance (mean over {n_eval} samples): {mean_cd:.6f}")
     print(f"Earth Mover's Distance (mean, over {n_eval} samples): {mean_emd:.6f}")
 
+    print("[eval] Computing advanced metrics (1-NNA, COV, MMD)... this might take a moment.")
+    adv_metrics = compute_all_metrics(gen, gt, batch_size=32, metric_type="cd")
+    
+    print(f"1-NNA (closer to 0.5 is better): {adv_metrics['1-NNA']:.4f}")
+    print(f"COV   (closer to 1.0 is better): {adv_metrics['COV']:.4f}")
+    print(f"MMD   (closer to 0.0 is better): {adv_metrics['MMD']:.6f}")
+
     out = {
         "ckpt": str(ckpt_path),
         "run_dir": str(pathlib.Path(ckpt_path).parent),
@@ -248,6 +255,9 @@ def evaluate(
                 "mean": float(mean_emd),
                 "values": [float(v) for v in emd_vals.detach().cpu().tolist()],
             },
+            "1-NNA": adv_metrics["1-NNA"],
+            "COV": adv_metrics["COV"],
+            "MMD": adv_metrics["MMD"]
         },
     }
 
