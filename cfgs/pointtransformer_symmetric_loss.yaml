@@ -1,4 +1,4 @@
-exp_name: "pointtransformer-soft-symmetry"
+exp_name: "pointtransformer-symmetric-loss"
 seed: 10
 device: "auto"
 
@@ -20,7 +20,7 @@ loss:
   name: "mse"
   weighting: "snr"
   symmetry:
-    weight: 0.5
+    weight: 0.1
     warmup_steps: 2000
 
 train:

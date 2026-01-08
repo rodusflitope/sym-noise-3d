@@ -1,0 +1,75 @@
+exp_name: "pvcnn-baseline"
+seed: 10
+device: "auto"
+
+data:
+  root_dir: "data/ShapeNetCore"
+  max_models: 2000
+  augment: false
+  val_frac: 0.1
+  test_frac: 0.1
+
+model:
+  name: "pvcnn"
+  embed_dim: 256
+  use_att: true
+  dropout: 0.1
+  extra_feature_channels: 0
+  width_multiplier: 0.6
+  voxel_resolution_multiplier: 0.6
+  sa_blocks:
+    - - [32, 2, 32]
+      - [1024, 0.1, 32, [32, 64]]
+    - - [64, 3, 16]
+      - [256, 0.2, 32, [64, 128]]
+    - - [128, 3, 8]
+      - [64, 0.4, 32, [128, 256]]
+    - - null
+      - [16, 0.8, 32, [256, 256, 512]]
+  fp_blocks:
+    - - [256, 256]
+      - [256, 3, 8]
+    - - [256, 256]
+      - [256, 3, 8]
+    - - [256, 128]
+      - [128, 2, 16]
+    - - [128, 128, 64]
+      - [64, 2, 32]
+
+loss:
+  name: "mse"
+  weighting: "none"
+  symmetry:
+    weight: 0.1
+    warmup_steps: 2000
+
+train:
+  batch_size: 32
+  epochs: 100
+  log_every: 50
+  num_points: 2048
+  num_workers: 4
+  out_dir: "runs"
+  save_every: 10
+
+diffusion:
+  T: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: "linear"
+  noise_type: "gaussian"
+
+sampler:
+  name: "ddpm"
+  eta: 1.0
+  num_samples: 4
+  save_dir: "samples"
+  save_format: "npy"
+  normalize_output: true
+  normalizer: "center_and_scale"
+
+lr_scheduler:
+  name: "cosine_warmup"
+  base_lr: 2.0e-4
+  min_lr: 1.0e-6
+  warmup_steps: 500

@@ -232,12 +232,23 @@ def evaluate(
     print(f"Chamfer Distance (mean over {n_eval} samples): {mean_cd:.6f}")
     print(f"Earth Mover's Distance (mean, over {n_eval} samples): {mean_emd:.6f}")
 
-    print("[eval] Computing advanced metrics (1-NNA, COV, MMD)... this might take a moment.")
-    adv_metrics = compute_all_metrics(gen, gt, batch_size=32, metric_type="cd")
+    print("[eval] Computing advanced metrics (CD & EMD)...")
     
-    print(f"1-NNA (closer to 0.5 is better): {adv_metrics['1-NNA']:.4f}")
-    print(f"COV   (closer to 1.0 is better): {adv_metrics['COV']:.4f}")
-    print(f"MMD   (closer to 0.0 is better): {adv_metrics['MMD']:.6f}")
+    metrics_to_compute = ["cd", "emd"]
+    
+    adv_metrics = compute_all_metrics(
+        gen, gt, 
+        batch_size=32, 
+        metrics_list=metrics_to_compute
+    )
+    
+    print("-" * 40)
+    print(f"{'Metric':<15} | {'CD':<10} | {'EMD':<10}")
+    print("-" * 40)
+    print(f"{'1-NNA':<15} | {adv_metrics.get('1-NNA-CD', 0):.4f}     | {adv_metrics.get('1-NNA-EMD', '-'):.4f}")
+    print(f"{'COV':<15}   | {adv_metrics.get('COV-CD', 0):.4f}     | {adv_metrics.get('COV-EMD', '-'):.4f}")
+    print(f"{'MMD':<15}   | {adv_metrics.get('MMD-CD', 0):.6f}   | {adv_metrics.get('MMD-EMD', '-'):.6f}")
+    print("-" * 40)
 
     out = {
         "ckpt": str(ckpt_path),
@@ -255,9 +266,7 @@ def evaluate(
                 "mean": float(mean_emd),
                 "values": [float(v) for v in emd_vals.detach().cpu().tolist()],
             },
-            "1-NNA": adv_metrics["1-NNA"],
-            "COV": adv_metrics["COV"],
-            "MMD": adv_metrics["MMD"]
+            **adv_metrics 
         },
     }
 
