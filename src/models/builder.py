@@ -22,11 +22,16 @@ def build_model(cfg):
         time_dim = cfg["model"]["time_dim"]
         num_heads = cfg["model"]["num_heads"]
         num_layers = cfg["model"]["num_layers"]
+        use_fourier_features = cfg["model"].get("use_fourier_features", False)
+        use_symmetric_attention = cfg["model"].get("use_symmetric_attention", False)
+        
         return PointTransformerEpsilon(
             hidden_dim=hidden_dim,
             time_dim=time_dim,
             num_heads=num_heads,
             num_layers=num_layers,
+            use_fourier_features=use_fourier_features,
+            use_symmetric_attention=use_symmetric_attention,
         )
     elif name == "latent_eps":
         latent_dim = cfg["model"].get("latent_dim", 256)
