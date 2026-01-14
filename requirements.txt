@@ -9,3 +9,5 @@ diffusers
 transformers
 ninja
 geomloss
+loguru
+einops

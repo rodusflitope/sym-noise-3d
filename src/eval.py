@@ -8,7 +8,7 @@ import torch
 from typing import Optional
 
 from src.utils.common import load_cfg, get_device, set_seed
-from src.models import build_model, PointAutoencoder
+from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler
 from src.data import ShapeNetDataset
@@ -18,6 +18,14 @@ from src.utils.checkpoint import load_ckpt_config
 
 
 def load_checkpoint(model: torch.nn.Module, path: str, device: torch.device) -> None:
+    if os.path.isdir(path):
+        if os.path.exists(os.path.join(path, "best.pt")):
+            path = os.path.join(path, "best.pt")
+        elif os.path.exists(os.path.join(path, "last.pt")):
+            path = os.path.join(path, "last.pt")
+        else:
+            raise FileNotFoundError(f"Could not find best.pt or last.pt in {path}")
+
     ckpt = torch.load(path, map_location=device)
     if isinstance(ckpt, dict):
         state_dict = (
@@ -184,34 +192,136 @@ def evaluate(
                 raise ValueError("Eval en modo latente requiere --ae_ckpt o AE_CHECKPOINT en entorno.")
 
             ae_cfg = cfg.get("autoencoder", {})
-            latent_dim = int(cfg["model"].get("latent_dim", ae_cfg.get("latent_dim", 256)))
-            ae_hidden_dim = int(ae_cfg.get("hidden_dim", 128))
-            ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim).to(device)
+            ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
+            if ae_type == "lion":
+                global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
+                local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
+                dropout = float(ae_cfg.get("dropout", 0.1))
+                log_sigma_clip = None
+                if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
+                    clip_cfg = ae_cfg["log_sigma_clip"]
+                    if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
+                        log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
+                    elif isinstance(clip_cfg, dict):
+                        log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
+                    else:
+                        raise ValueError("autoencoder.log_sigma_clip must be [min,max] or {min:..., max:...}")
+                ae = LionAutoencoder(
+                    num_points=num_points,
+                    input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
+                    global_latent_dim=global_latent_dim,
+                    local_latent_dim=local_latent_dim,
+                    dropout=dropout,
+                    log_sigma_clip=log_sigma_clip,
+                ).to(device)
+            elif ae_type == "point_mlp":
+                latent_dim_cfg = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
+                ae_hidden_dim = int(ae_cfg.get("hidden_dim", 128))
+                ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim_cfg).to(device)
+            else:
+                raise ValueError(f"Unknown autoencoder.type: {ae_type}")
+
             load_checkpoint(ae, ae_ckpt, device)
             ae.eval()
 
+            is_lion_two_priors = bool(isinstance(model, LionTwoPriorsDDM))
+            if is_lion_two_priors and not isinstance(ae, LionAutoencoder):
+                raise ValueError("lion_priors requiere autoencoder.type='lion' y usar LionAutoencoder")
+
+            if not is_lion_two_priors:
+                if hasattr(ae, "latent_dim_total"):
+                    latent_dim = int(getattr(ae, "latent_dim_total"))
+                elif hasattr(ae, "latent_dim"):
+                    latent_dim = int(getattr(ae, "latent_dim"))
+                else:
+                    raise ValueError("Autoencoder does not expose latent dimensionality")
+
             T = betas.shape[0]
-            if noise_type is not None:
-                z_t = noise_type.sample((num_samples, latent_dim), device)
-            else:
-                z_t = torch.randn(num_samples, latent_dim, device=device)
 
             sampler_name = cfg["sampler"].get("name", "ddpm").lower()
-            if sampler_name == "ddpm":
-                for t in reversed(range(T)):
-                    z_t = _sampler_step(sampler, model, z_t, t)
-            elif sampler_name == "ddim":
-                num_steps = int(cfg["sampler"].get("num_steps", T))
-                num_steps = min(max(1, num_steps), T)
-                step_size = max(1, T // num_steps)
-                timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
-                for i, t in enumerate(timesteps):
-                    t_prev = timesteps[i + 1] if i + 1 < len(timesteps) else -1
-                    z_t = _sampler_step(sampler, model, z_t, t, t_prev)
-            else:
-                raise ValueError(f"Sampler no soportado: {sampler_name}")
 
-            samples = ae.decode(z_t).detach().cpu()
+            if is_lion_two_priors:
+                style_dim = int(ae.global_latent_dim)
+                local_dim = int(ae.local_flat_dim)
+
+                if noise_type is not None:
+                    z_t = noise_type.sample((num_samples, style_dim), device)
+                    h_t = noise_type.sample((num_samples, local_dim), device)
+                else:
+                    z_t = torch.randn(num_samples, style_dim, device=device)
+                    h_t = torch.randn(num_samples, local_dim, device=device)
+
+                class _ZWrapper(torch.nn.Module):
+                    def __init__(self, inner: LionTwoPriorsDDM):
+                        super().__init__()
+                        self.inner = inner
+
+                    def forward(self, x: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
+                        return self.inner.ddm_z(x, t_batch)
+
+                class _HCondWrapper(torch.nn.Module):
+                    def __init__(self, inner: LionTwoPriorsDDM, z0_cond: torch.Tensor):
+                        super().__init__()
+                        self.inner = inner
+                        self.z0_cond = z0_cond
+
+                    def forward(self, x: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
+                        return self.inner.ddm_h(x, self.z0_cond, t_batch)
+
+                z_model = _ZWrapper(model)
+
+                if sampler_name == "ddpm":
+                    for t in reversed(range(T)):
+                        z_t = _sampler_step(sampler, z_model, z_t, t)
+                elif sampler_name == "ddim":
+                    num_steps = int(cfg["sampler"].get("num_steps", T))
+                    num_steps = min(max(1, num_steps), T)
+                    step_size = max(1, T // num_steps)
+                    timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
+                    for i, t in enumerate(timesteps):
+                        t_prev = timesteps[i + 1] if i + 1 < len(timesteps) else -1
+                        z_t = _sampler_step(sampler, z_model, z_t, t, t_prev)
+                else:
+                    raise ValueError(f"Sampler no soportado: {sampler_name}")
+
+                h_model = _HCondWrapper(model, z_t)
+
+                if sampler_name == "ddpm":
+                    for t in reversed(range(T)):
+                        h_t = _sampler_step(sampler, h_model, h_t, t)
+                elif sampler_name == "ddim":
+                    num_steps = int(cfg["sampler"].get("num_steps", T))
+                    num_steps = min(max(1, num_steps), T)
+                    step_size = max(1, T // num_steps)
+                    timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
+                    for i, t in enumerate(timesteps):
+                        t_prev = timesteps[i + 1] if i + 1 < len(timesteps) else -1
+                        h_t = _sampler_step(sampler, h_model, h_t, t, t_prev)
+                else:
+                    raise ValueError(f"Sampler no soportado: {sampler_name}")
+
+                samples = ae.decode_split(z_t, h_t).detach().cpu()
+            else:
+                if noise_type is not None:
+                    z_t = noise_type.sample((num_samples, latent_dim), device)
+                else:
+                    z_t = torch.randn(num_samples, latent_dim, device=device)
+
+                if sampler_name == "ddpm":
+                    for t in reversed(range(T)):
+                        z_t = _sampler_step(sampler, model, z_t, t)
+                elif sampler_name == "ddim":
+                    num_steps = int(cfg["sampler"].get("num_steps", T))
+                    num_steps = min(max(1, num_steps), T)
+                    step_size = max(1, T // num_steps)
+                    timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
+                    for i, t in enumerate(timesteps):
+                        t_prev = timesteps[i + 1] if i + 1 < len(timesteps) else -1
+                        z_t = _sampler_step(sampler, model, z_t, t, t_prev)
+                else:
+                    raise ValueError(f"Sampler no soportado: {sampler_name}")
+
+                samples = ae.decode(z_t).detach().cpu()
 
     n_eval = min(int(n_eval), int(samples.shape[0]))
     if n_eval <= 0:
@@ -222,6 +332,21 @@ def evaluate(
 
     gen = _ensure_bnc3(gen, name="gen")
     gt = _ensure_bnc3(gt, name="gt")
+
+    # Normalize point clouds for fair metric comparison (shape only, ignore scale/shift)
+    def _normalize_pc(pc: torch.Tensor) -> torch.Tensor:
+        # pc: [B, N, 3]
+        centroid = pc.mean(dim=1, keepdim=True)
+        pc = pc - centroid
+        # max distance from origin
+        dist = torch.sqrt((pc ** 2).sum(dim=2, keepdim=True)).max(dim=1, keepdim=True)[0]
+        # avoid div by zero
+        dist[dist < 1e-8] = 1.0
+        pc = pc / dist
+        return pc
+
+    gen = _normalize_pc(gen)
+    gt = _normalize_pc(gt)
 
     cd_vals = chamfer_distance(gen, gt)
     emd_vals = earth_movers_distance(gen, gt, max_points=max_points)

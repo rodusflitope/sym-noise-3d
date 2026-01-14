@@ -4,6 +4,18 @@ import json
 from datetime import datetime
 
 
+def resolve_ckpt_path(ckpt_path: str) -> str:
+    p = pathlib.Path(ckpt_path)
+    if p.is_dir():
+        if (p / "best.pt").exists():
+            return str(p / "best.pt")
+        elif (p / "last.pt").exists():
+            return str(p / "last.pt")
+        else:
+            raise ValueError(f"Directory '{ckpt_path}' does not contain 'best.pt' or 'last.pt'.")
+    return ckpt_path
+
+
 def save_ckpt(model, out_dir: str, exp_name: str, filename: str = "last.pt", metadata: dict = None):
     d = pathlib.Path(out_dir) / exp_name
     d.mkdir(parents=True, exist_ok=True)
@@ -27,12 +39,14 @@ def save_training_history(out_dir: str, exp_name: str, history: dict):
 
 
 def load_ckpt(model, ckpt_path: str, map_location=None):
+    ckpt_path = resolve_ckpt_path(ckpt_path)
     sd = torch.load(ckpt_path, map_location=map_location)
     model.load_state_dict(sd["model"], strict=True)
     return model
 
 
 def load_ckpt_config(ckpt_path: str):
+    ckpt_path = resolve_ckpt_path(ckpt_path)
     sd = torch.load(ckpt_path, map_location="cpu")
     metadata = sd.get("metadata", {})
     if metadata and "config" in metadata:

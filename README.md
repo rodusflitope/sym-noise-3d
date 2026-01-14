@@ -14,8 +14,8 @@ Below are concise instructions to run each stage end-to-end.
 
 ```pwsh
 python -m venv .venv
-& .venv/Scripts/Activate.ps1
-pip install --upgrade pip
+& .venv/Scripts/activate
+python -m pip install --upgrade pip
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 ```

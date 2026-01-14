@@ -22,3 +22,6 @@ samples/
 evals/
 
 tests/outputs
+
+#Builds
+build/

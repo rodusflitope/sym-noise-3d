@@ -21,7 +21,7 @@ class DDPM_Sampler:
         self.beta_t_tilde = torch.clamp(self.beta_t_tilde, min=1e-20)
 
     @torch.no_grad()
-    def step(self, model, x_t: torch.Tensor, t: int):
+    def step(self, model, x_t: torch.Tensor, t: int, t_prev=None):
 
         B = x_t.shape[0]
         device = x_t.device

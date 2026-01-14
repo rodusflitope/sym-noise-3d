@@ -4,12 +4,17 @@ from torch.utils.cpp_extension import load
 
 _src_path = os.path.dirname(os.path.abspath(__file__))
 
+_build_dir = os.path.join(_src_path, 'build')
+os.makedirs(_build_dir, exist_ok=True)
+
 extra_cflags = ['-O3', '-std=c++17']
 if os.name == 'nt':
     extra_cflags = ['/O2', '/std:c++17']
 
-_backend = load(name='_pvcnn_backend',
+_backend = load(name='_pvcnn_backend_core',
                 extra_cflags=extra_cflags,
+                build_directory=_build_dir,
+                verbose=False,
                 # extra_cuda_cflags=['--compiler-bindir=/usr/bin/gcc-8'], # Removed linux specific flag
                 sources=[os.path.join(_src_path,'src', f) for f in [
                     'ball_query/ball_query.cpp',

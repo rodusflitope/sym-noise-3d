@@ -41,10 +41,23 @@ def build_loss(cfg):
 
     def composed_loss(pred, target, alpha_bar_t=None, current_step=None):
         raw_loss = base_loss_fn(pred, target)
+        
+        style_weight = loss_cfg.get("style_weight", 1.0)
+        style_dim = loss_cfg.get("style_dim", 0)
+        
+        if style_dim > 0 and style_weight != 1.0 and raw_loss.shape[1] > style_dim:
+            loss_style = raw_loss[:, :style_dim]
+            loss_local = raw_loss[:, style_dim:]
+
+            weighted_style = loss_style * style_weight
+
+            raw_loss = torch.cat([weighted_style, loss_local], dim=1)
+        
         if alpha_bar_t is not None:
              w = weight_fn(alpha_bar_t)
-             if hasattr(w, "view"):
-                 w = w.view(-1, 1, 1)
+             if hasattr(w, "shape") and len(w.shape) > 0:
+                 view_shape = [-1] + [1] * (raw_loss.ndim - 1)
+                 w = w.view(*view_shape)
              loss = raw_loss * w
         else:
              loss = raw_loss

@@ -1,0 +1,69 @@
+exp_name: "lion-latent-diffusion"
+seed: 10
+device: "auto"
+
+use_latent_diffusion: true
+
+data:
+  root_dir: "data/ShapeNetCore"
+  max_models: 2000
+  augment: false
+  val_frac: 0.1
+  test_frac: 0.1
+  categories: null
+
+model:
+  name: "lion_priors"
+  input_dim: 3
+  time_dim: 64
+  hidden_dim_z: 512
+  hidden_dim_style: 512
+  dropout: 0.1
+  width_multiplier: 0.6
+  voxel_resolution_multiplier: 0.6
+
+autoencoder:
+  type: "lion"
+  global_latent_dim: 128
+  local_latent_dim: 16
+  dropout: 0.1
+  log_sigma_clip: [-10.0, 2.0]
+  kl_weight_global: 0.001
+  kl_weight_local: 0.001
+  epochs: 100
+
+loss:
+  w_z: 1.0
+  w_h: 1.0
+
+train:
+  batch_size: 32
+  epochs: 100
+  log_every: 50
+  num_points: 2048
+  num_workers: 8
+  out_dir: "runs"
+
+diffusion:
+  T: 1000
+  beta_start: 0.0001
+  beta_end: 0.01
+  schedule: "scaled_linear"
+  noise_type: "gaussian"
+
+sampler:
+  name: "ddpm"
+  eta: 1.0
+  num_samples: 4
+  save_dir: "samples"
+  save_format: "npy"
+
+ema:
+  use: true
+  beta: 0.999
+
+lr_scheduler:
+  name: "cosine_warmup"
+  warmup_steps: 1000
+  base_lr: 0.0002
+  min_lr: 0.00001

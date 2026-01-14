@@ -21,7 +21,12 @@ def _make_cosine_warmup_lambda(total_steps: int, warmup_steps: int, min_lr_ratio
 def build_scheduler(cfg: dict, optimizer: torch.optim.Optimizer, steps_per_epoch: int):
     sch_cfg = cfg.get("lr_scheduler", {})
     name = sch_cfg.get("name", "none").lower()
-    epochs = int(cfg["train"]["epochs"])
+    epochs = cfg.get("train", {}).get("epochs", None)
+    if epochs is None:
+        epochs = cfg.get("autoencoder", {}).get("epochs", None)
+    if epochs is None:
+        raise KeyError("Missing required config key: train.epochs (or autoencoder.epochs)")
+    epochs = int(epochs)
     total_steps = int(epochs * steps_per_epoch)
 
     if name == "none":

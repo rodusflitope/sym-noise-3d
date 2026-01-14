@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from src.data import build_datasets_from_config
 from src.losses import build_loss
-from src.models import build_model, PointAutoencoder
+from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.utils.checkpoint import save_ckpt, save_training_history
@@ -30,22 +30,59 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
             "Pass --ae_ckpt to src.train or set AE_CHECKPOINT in the environment."
         )
 
-    num_points = cfg["train"]["num_points"]
-    latent_dim = cfg["model"].get("latent_dim", 256)
-    ae_hidden_dim = ae_cfg.get("hidden_dim", 128)
-    
-    ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim).to(device)
+    p = pathlib.Path(ae_ckpt)
+    if p.is_dir():
+        if (p / "best.pt").exists():
+            ae_ckpt = str(p / "best.pt")
+            print(f"[train] AE checkpoint directory provided, using best.pt: {ae_ckpt}")
+        elif (p / "last.pt").exists():
+            ae_ckpt = str(p / "last.pt")
+            print(f"[train] AE checkpoint directory provided, using last.pt: {ae_ckpt}")
+
+    ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
+    num_points = int(cfg["train"]["num_points"])
+
+    if ae_type == "lion":
+        global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
+        local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
+        dropout = float(ae_cfg.get("dropout", 0.1))
+        skip_weight = float(ae_cfg.get("skip_weight", 0.01))
+        log_sigma_clip = None
+        if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
+            clip_cfg = ae_cfg["log_sigma_clip"]
+            if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
+                log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
+            elif isinstance(clip_cfg, dict):
+                log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
+            else:
+                raise ValueError("autoencoder.log_sigma_clip must be [min,max] or {min:..., max:...}")
+        ae = LionAutoencoder(
+            num_points=num_points,
+            input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
+            global_latent_dim=global_latent_dim,
+            local_latent_dim=local_latent_dim,
+            dropout=dropout,
+            log_sigma_clip=log_sigma_clip,
+            skip_weight=skip_weight,
+        ).to(device)
+    elif ae_type == "point_mlp":
+        latent_dim = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
+        ae_hidden_dim = int(ae_cfg.get("hidden_dim", 128))
+        ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim).to(device)
+    else:
+        raise ValueError(f"Unknown autoencoder.type: {ae_type}")
+
     state = torch.load(ae_ckpt, map_location=device)
     if isinstance(state, dict):
         state_dict = state.get("model_state_dict") or state.get("state_dict") or state.get("model") or state
     else:
         state_dict = state
-    ae.load_state_dict(state_dict)
+    ae.load_state_dict(state_dict, strict=True)
     ae.eval()
     for p in ae.parameters():
         p.requires_grad = False
-    
-    print(f"[train] Loaded autoencoder from {ae_ckpt}")
+
+    print(f"[train] Loaded autoencoder ({ae_type}) from {ae_ckpt}")
     return ae
 
 
@@ -82,11 +119,18 @@ def main() -> None:
 
     use_latent = cfg.get("use_latent_diffusion", False)
     autoencoder = None
+    latent_dim = None
 
     if use_latent:
         print("[train] MODE: Latent Diffusion")
         ae_ckpt = args.ae_ckpt or os.getenv("AE_CHECKPOINT", None)
         autoencoder = load_autoencoder(cfg, device, ae_ckpt=ae_ckpt)
+        if hasattr(autoencoder, "latent_dim_total"):
+            latent_dim = int(getattr(autoencoder, "latent_dim_total"))
+        elif hasattr(autoencoder, "latent_dim"):
+            latent_dim = int(getattr(autoencoder, "latent_dim"))
+        else:
+            raise ValueError("Autoencoder does not expose latent dimensionality")
     else:
         print("[train] MODE: Direct Point Cloud Diffusion")
 
@@ -136,7 +180,8 @@ def main() -> None:
             persistent_workers=True,
         )
 
-    loss_fn = build_loss(cfg)
+    use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, LionAutoencoder))
+    loss_fn = None if use_two_priors else build_loss(cfg)
     steps_per_epoch = math.ceil(len(ds) / cfg["train"]["batch_size"]) if len(ds) > 0 else 0
     opt, scheduler, total_steps = build_optimizer_and_scheduler(cfg, model, steps_per_epoch)
 
@@ -160,21 +205,41 @@ def main() -> None:
 
         for x0 in dl:
             x0 = x0.to(device)
-            if cfg["model"]["name"] == "pvcnn":
+            if not use_latent and cfg["model"]["name"] == "pvcnn":
                 x0 = x0.transpose(1, 2).contiguous()
             B = x0.shape[0]
             t = sample_timesteps(B, T, device)
             
-            if use_latent:
+            if use_two_priors:
                 with torch.no_grad():
-                    z0 = autoencoder.encode(x0)
+                    z0, h0 = autoencoder.encode_split(x0, sample=True)
+
+                z_t, eps_z = forward.add_noise(z0, t)
+                h_t, eps_h = forward.add_noise(h0, t)
+
+                eps_pred_z = model.ddm_z(z_t, t)
+                eps_pred_h = model.ddm_h(h_t, z0, t)
+
+                mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
+                mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
+                w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
+                w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
+                loss = (w_z * mse_z) + (w_h * mse_h)
+            elif use_latent:
+                with torch.no_grad():
+                    if isinstance(autoencoder, LionAutoencoder):
+                        z0 = autoencoder.encode(x0, sample=True)
+                    else:
+                        z0 = autoencoder.encode(x0)
                 z_t, eps = forward.add_noise(z0, t)
                 eps_pred = model(z_t, t)
+                assert loss_fn is not None
+                loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
             else:
                 x_t, eps = forward.add_noise(x0, t)
                 eps_pred = model(x_t, t)
-
-            loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+                assert loss_fn is not None
+                loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
 
 
             opt.zero_grad(set_to_none=True)
@@ -190,9 +255,14 @@ def main() -> None:
 
             if global_step % cfg["train"]["log_every"] == 0:
                 current_lr = opt.param_groups[0]["lr"]
-                print(
-                    f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} | lr={current_lr:.6f}"
-                )
+                if use_two_priors:
+                    print(
+                        f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} | lr={current_lr:.6f}"
+                    )
+                else:
+                    print(
+                        f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} | lr={current_lr:.6f}"
+                    )
 
         val_loss = None
         if dl_val is not None and len(splits["val"]) > 0:
@@ -210,15 +280,28 @@ def main() -> None:
                     B = x0.shape[0]
                     t = torch.randint(low=0, high=T, size=(B,), generator=g_val, dtype=torch.long).to(device)
                     
-                    if use_latent:
+                    if use_two_priors:
+                        z0, h0 = autoencoder.encode_split(x0, sample=False)
+                        z_t, eps_z = forward.add_noise(z0, t)
+                        h_t, eps_h = forward.add_noise(h0, t)
+                        eps_pred_z = model.ddm_z(z_t, t)
+                        eps_pred_h = model.ddm_h(h_t, z0, t)
+                        mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
+                        mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
+                        w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
+                        w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
+                        l = (w_z * mse_z) + (w_h * mse_h)
+                    elif use_latent:
                         z0 = autoencoder.encode(x0)
                         z_t, eps = forward.add_noise(z0, t)
                         eps_pred = model(z_t, t)
+                        assert loss_fn is not None
+                        l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
                     else:
                         x_t, eps = forward.add_noise(x0, t)
                         eps_pred = model(x_t, t)
-                    
-                    l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+                        assert loss_fn is not None
+                        l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
 
                     v_sum += float(l.item())
                     v_steps += 1

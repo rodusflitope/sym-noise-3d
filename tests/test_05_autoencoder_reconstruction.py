@@ -12,23 +12,85 @@ sys.path.append(str(root))
 from src.utils.common import load_cfg, get_device, set_seed
 from src.data import build_datasets_from_config
 from src.models.autoencoder import PointAutoencoder
+from src.models.lion_ae import LionAutoencoder
 from src.metrics import chamfer_distance, earth_movers_distance
-from src.utils.checkpoint import load_ckpt
+from src.utils.checkpoint import load_ckpt, load_ckpt_config
 
 
 def ensure_dir(p: pathlib.Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
+def _load_autoencoder(cfg, device, ae_ckpt: str):
+    ae_cfg = cfg.get("autoencoder", {})
+    
+    if "type" not in ae_cfg:
+        if "global_latent_dim" in ae_cfg:
+            ae_type = "lion"
+        else:
+            ae_type = "point_mlp"
+    else:
+        ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
+
+    num_points = int(cfg["train"]["num_points"])
+
+    if ae_type == "lion":
+        global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
+        local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
+        dropout = float(ae_cfg.get("dropout", 0.1))
+        log_sigma_clip = None
+        if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
+            clip_cfg = ae_cfg["log_sigma_clip"]
+            if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
+                log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
+            elif isinstance(clip_cfg, dict):
+                log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
+        ae = LionAutoencoder(
+            num_points=num_points,
+            input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
+            global_latent_dim=global_latent_dim,
+            local_latent_dim=local_latent_dim,
+            dropout=dropout,
+            log_sigma_clip=log_sigma_clip,
+        ).to(device)
+    elif ae_type == "point_mlp":
+        latent_dim = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
+        ae_hidden_dim = int(ae_cfg.get("hidden_dim", 128))
+        ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim).to(device)
+    else:
+        raise ValueError(f"Unknown autoencoder.type: {ae_type}")
+
+    ae = load_ckpt(ae, ae_ckpt, map_location=device)
+    ae.eval()
+    return ae
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate PointAutoencoder reconstruction quality")
+    parser = argparse.ArgumentParser(description="Evaluate autoencoder reconstruction quality")
     parser.add_argument("--cfg", type=str, default=str(root / "cfgs" / "latent_diffusion.yaml"))
     parser.add_argument("--ckpt", type=str, required=True, help="Path to trained autoencoder checkpoint")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"], help="Dataset split to evaluate on")
     parser.add_argument("--max_batches", type=int, default=10, help="Number of batches to evaluate (for speed)")
     args = parser.parse_args()
 
-    cfg = load_cfg(args.cfg)
+    ckpt = args.ckpt
+    ckpt_path = pathlib.Path(ckpt)
+    if ckpt_path.is_dir():
+        if (ckpt_path / "best.pt").exists():
+            ckpt = str(ckpt_path / "best.pt")
+        elif (ckpt_path / "last.pt").exists():
+            ckpt = str(ckpt_path / "last.pt")
+        else:
+            raise ValueError(f"Directory '{ckpt}' does not contain 'best.pt' or 'last.pt'.")
+
+    saved_cfg = load_ckpt_config(ckpt)
+    if saved_cfg is not None:
+        print("[test_05] Using configuration from checkpoint metadata.")
+        cfg = saved_cfg
+    else:
+        print("[test_05] Warning: No config in checkpoint metadata, using --cfg file.")
+        cfg = load_cfg(args.cfg)
+
     set_seed(cfg.get("seed"))
     device = get_device(cfg.get("device", "auto"))
 
@@ -50,23 +112,15 @@ def main() -> None:
         drop_last=False,
     )
 
+    autoencoder = _load_autoencoder(cfg, device, ckpt)
+
     ae_cfg = cfg.get("autoencoder", {})
-    num_points = int(cfg["train"].get("num_points", 2048))
-    hidden_dim = int(ae_cfg.get("hidden_dim", 128))
-    latent_dim = int(ae_cfg.get("latent_dim", 256))
-
-    autoencoder = PointAutoencoder(
-        num_points=num_points,
-        hidden_dim=hidden_dim,
-        latent_dim=latent_dim,
-    ).to(device)
-
-    autoencoder = load_ckpt(autoencoder, args.ckpt, map_location=device)
-    autoencoder.eval()
+    ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
 
     all_chamfer = []
     all_mse = []
     all_emd = []
+    num_points = int(cfg["train"].get("num_points", 2048))
 
     with torch.no_grad():
         for batch_idx, x0 in enumerate(loader):
@@ -74,7 +128,10 @@ def main() -> None:
                 break
 
             x0 = x0.to(device)
-            x_recon, z = autoencoder(x0)
+            if ae_type == "lion":
+                x_recon, posterior = autoencoder(x0)
+            else:
+                x_recon, z = autoencoder(x0)
 
             cd = chamfer_distance(x0, x_recon)
             all_chamfer.append(cd.detach().cpu())

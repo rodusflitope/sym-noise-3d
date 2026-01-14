@@ -1,0 +1,40 @@
+exp_name: "lion-ae-train"
+seed: 10
+device: "auto"
+
+data:
+  root_dir: "data/ShapeNetCore"
+  max_models: 1000
+  augment: false
+  val_frac: 0.1
+  test_frac: 0.1
+  categories: ["02691156"]
+
+autoencoder:
+  type: "lion"
+  epochs: 100
+  global_latent_dim: 128
+  local_latent_dim: 16
+  log_sigma_clip: [-10.0, 2.0]
+  recon_loss: "chamfer"
+  lambda_z: 0.01
+  lambda_h: 0.01
+  kl_anneal:
+    enabled: true
+    min_coeff: 1.0e-7
+    max_coeff: 0.5
+    portion: 0.5
+    const_portion: 0.0
+
+train:
+  batch_size: 4
+  num_points: 1024
+  num_workers: 4
+  out_dir: "runs"
+  amp: true
+  amp_forward: false
+  loss_fp32: true
+  raise_on_nonfinite_loss: false
+  skip_nonfinite_batches: true
+  grad_accum_steps: 8
+  lr: 2.0e-4

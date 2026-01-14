@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+from mpl_toolkits.mplot3d import Axes3D
 
 root = pathlib.Path(__file__).resolve().parents[1]
 sys.path.append(str(root))
