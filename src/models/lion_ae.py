@@ -65,6 +65,15 @@ class LionAutoencoder(nn.Module):
 
         self.style_mlp = nn.Identity()
 
+    def global2style(self, style: torch.Tensor) -> torch.Tensor:
+        ndim = style.ndim
+        if ndim == 4:
+            style = style.squeeze(-1).squeeze(-1)
+        style = self.style_mlp(style) if self.style_mlp is not None else style
+        if ndim == 4:
+            style = style.unsqueeze(-1).unsqueeze(-1)
+        return style
+
     @property
     def local_context_dim(self) -> int:
         return int(self.input_dim + self.local_latent_dim)

@@ -39,20 +39,30 @@ class ShapeNetDataset(Dataset):
 
         self.obj_paths: list[Path] = []
         for cat_id in categories:
-            cat_path = self.root_dir / cat_id / cat_id
-            if not cat_path.exists():
-                continue
-            for model_dir in cat_path.iterdir():
-                if model_dir.is_dir():
-                    obj_file = model_dir / "models" / "model_normalized.obj"
-                    if obj_file.exists():
-                        self.obj_paths.append(obj_file)
+            candidate_dirs = []
+            cat_path_primary = self.root_dir / cat_id / cat_id
+            cat_path_alt = self.root_dir / cat_id
+            if cat_path_primary.exists():
+                candidate_dirs.append(cat_path_primary)
+            if cat_path_alt.exists() and cat_path_alt not in candidate_dirs:
+                candidate_dirs.append(cat_path_alt)
+            for cat_path in candidate_dirs:
+                for model_dir in cat_path.iterdir():
+                    if model_dir.is_dir():
+                        obj_file = model_dir / "models" / "model_normalized.obj"
+                        if obj_file.exists():
+                            self.obj_paths.append(obj_file)
 
         if max_models is not None and max_models > 0:
             self.obj_paths = self.obj_paths[:max_models]
 
         self._cache: dict[int, torch.Tensor] = {}
 
+        if len(self.obj_paths) == 0:
+            raise ValueError(
+                f"[ShapeNetDataset] 0 modelos cargados en {self.root_dir}. "
+                "Revisa la estructura de ShapeNetCore y categories."
+            )
         print(f"[ShapeNetDataset] {len(self.obj_paths)} modelos cargados")
 
     def __len__(self) -> int:

@@ -14,6 +14,28 @@ def _load_autoencoder(cfg, device, ae_ckpt: str):
     ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
     num_points = int(cfg["train"]["num_points"])
 
+    ckpt_cfg = load_ckpt_config(ae_ckpt)
+    if ckpt_cfg is not None:
+        ckpt_train = ckpt_cfg.get("train", {})
+        ckpt_ae = ckpt_cfg.get("autoencoder", {})
+        ckpt_num_points = ckpt_train.get("num_points", None)
+        if ckpt_num_points is not None and int(ckpt_num_points) != num_points:
+            raise ValueError(
+                f"AE num_points mismatch: ckpt={ckpt_num_points} cfg={num_points}. "
+                "Use the same num_points for AE and priors."
+            )
+        if ae_type == "lion":
+            ckpt_g = ckpt_ae.get("global_latent_dim", None)
+            ckpt_l = ckpt_ae.get("local_latent_dim", None)
+            if ckpt_g is not None and int(ckpt_g) != int(ae_cfg.get("global_latent_dim", 128)):
+                raise ValueError(
+                    f"AE global_latent_dim mismatch: ckpt={ckpt_g} cfg={ae_cfg.get('global_latent_dim', 128)}."
+                )
+            if ckpt_l is not None and int(ckpt_l) != int(ae_cfg.get("local_latent_dim", 16)):
+                raise ValueError(
+                    f"AE local_latent_dim mismatch: ckpt={ckpt_l} cfg={ae_cfg.get('local_latent_dim', 16)}."
+                )
+
     if ae_type == "lion":
         global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
         local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
@@ -102,7 +124,8 @@ def main():
     print(f"[sample] device = {device}")
 
     model = build_model(cfg).to(device)
-    model = load_ckpt(model, ckpt, map_location=device)
+    prefer_ema = bool((cfg.get("ema", {}) or {}).get("use", False))
+    model = load_ckpt(model, ckpt, map_location=device, prefer_ema=prefer_ema)
     model.eval()
     
     if cfg["model"]["name"] == "pvcnn":
@@ -190,7 +213,12 @@ def main():
                 else:
                     raise ValueError(f"Sampler no soportado para modo latente: {sampler_name}")
 
-                h_model = _HCondWrapper(model, z_t)
+                if hasattr(ae, "global2style"):
+                    z_t_cond = ae.global2style(z_t)
+                else:
+                    z_t_cond = z_t
+
+                h_model = _HCondWrapper(model, z_t_cond)
 
                 if sampler_name == 'ddpm':
                     for t in reversed(range(T)):

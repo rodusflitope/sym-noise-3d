@@ -10,7 +10,7 @@ data:
   augment: false
   val_frac: 0.1
   test_frac: 0.1
-  categories: null
+  categories: ["02691156"]
 
 model:
   name: "lion_priors"
@@ -30,7 +30,7 @@ autoencoder:
   log_sigma_clip: [-10.0, 2.0]
   kl_weight_global: 0.001
   kl_weight_local: 0.001
-  epochs: 100
+  epochs: 200
 
 loss:
   w_z: 1.0
@@ -40,7 +40,7 @@ train:
   batch_size: 32
   epochs: 100
   log_every: 50
-  num_points: 2048
+  num_points: 1024
   num_workers: 8
   out_dir: "runs"
 

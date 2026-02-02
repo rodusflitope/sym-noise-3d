@@ -16,9 +16,10 @@ from src.losses import build_loss
 from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
-from src.utils.checkpoint import save_ckpt, save_training_history
+from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_config
 from src.utils.common import load_cfg, set_seed, get_device
 from src.utils.lr import build_optimizer_and_scheduler
+from src.utils.ema import EMA
 
 
 def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
@@ -41,6 +42,28 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
 
     ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
     num_points = int(cfg["train"]["num_points"])
+
+    ckpt_cfg = load_ckpt_config(ae_ckpt)
+    if ckpt_cfg is not None:
+        ckpt_train = ckpt_cfg.get("train", {})
+        ckpt_ae = ckpt_cfg.get("autoencoder", {})
+        ckpt_num_points = ckpt_train.get("num_points", None)
+        if ckpt_num_points is not None and int(ckpt_num_points) != num_points:
+            raise ValueError(
+                f"AE num_points mismatch: ckpt={ckpt_num_points} cfg={num_points}. "
+                "Use the same num_points for AE and priors."
+            )
+        if ae_type == "lion":
+            ckpt_g = ckpt_ae.get("global_latent_dim", None)
+            ckpt_l = ckpt_ae.get("local_latent_dim", None)
+            if ckpt_g is not None and int(ckpt_g) != int(ae_cfg.get("global_latent_dim", 128)):
+                raise ValueError(
+                    f"AE global_latent_dim mismatch: ckpt={ckpt_g} cfg={ae_cfg.get('global_latent_dim', 128)}."
+                )
+            if ckpt_l is not None and int(ckpt_l) != int(ae_cfg.get("local_latent_dim", 16)):
+                raise ValueError(
+                    f"AE local_latent_dim mismatch: ckpt={ckpt_l} cfg={ae_cfg.get('local_latent_dim', 16)}."
+                )
 
     if ae_type == "lion":
         global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
@@ -185,6 +208,13 @@ def main() -> None:
     steps_per_epoch = math.ceil(len(ds) / cfg["train"]["batch_size"]) if len(ds) > 0 else 0
     opt, scheduler, total_steps = build_optimizer_and_scheduler(cfg, model, steps_per_epoch)
 
+    ema_cfg = cfg.get("ema", {}) or {}
+    ema = None
+    if bool(ema_cfg.get("use", False)):
+        ema_beta = float(ema_cfg.get("beta", 0.999))
+        ema = EMA(model, beta=ema_beta)
+        print(f"[train] EMA enabled: beta={ema_beta}")
+
     print("\nIniciando entrenamiento...")
     train_start_time = time.time()
 
@@ -203,8 +233,13 @@ def main() -> None:
         epoch_loss_sum = 0.0
         epoch_steps = 0
 
+        epoch_mse_z_sum = 0.0
+        epoch_mse_h_sum = 0.0
+
         for x0 in dl:
             x0 = x0.to(device)
+            mse_z = torch.tensor(0.0, device=device)
+            mse_h = torch.tensor(0.0, device=device)
             if not use_latent and cfg["model"]["name"] == "pvcnn":
                 x0 = x0.transpose(1, 2).contiguous()
             B = x0.shape[0]
@@ -218,7 +253,11 @@ def main() -> None:
                 h_t, eps_h = forward.add_noise(h0, t)
 
                 eps_pred_z = model.ddm_z(z_t, t)
-                eps_pred_h = model.ddm_h(h_t, z0, t)
+                if hasattr(autoencoder, "global2style"):
+                    z0_cond = autoencoder.global2style(z0)
+                else:
+                    z0_cond = z0
+                eps_pred_h = model.ddm_h(h_t, z0_cond, t)
 
                 mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
                 mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
@@ -246,6 +285,8 @@ def main() -> None:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
+            if ema is not None:
+                ema.update(model)
             if scheduler is not None:
                 scheduler.step()
 
@@ -253,11 +294,17 @@ def main() -> None:
             epoch_loss_sum += loss.item()
             epoch_steps += 1
 
+            if use_two_priors:
+                epoch_mse_z_sum += float(mse_z.detach().item())
+                epoch_mse_h_sum += float(mse_h.detach().item())
+
             if global_step % cfg["train"]["log_every"] == 0:
                 current_lr = opt.param_groups[0]["lr"]
                 if use_two_priors:
                     print(
-                        f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} | lr={current_lr:.6f}"
+                        f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} "
+                        f"| mse_z={float(mse_z.detach().item()):.6f} | mse_h={float(mse_h.detach().item()):.6f} "
+                        f"| lr={current_lr:.6f}"
                     )
                 else:
                     print(
@@ -265,10 +312,18 @@ def main() -> None:
                     )
 
         val_loss = None
+        val_mse_z = None
+        val_mse_h = None
         if dl_val is not None and len(splits["val"]) > 0:
+            if ema is not None:
+                ema.store(model)
+                ema.copy_to(model)
             model.eval()
             v_sum = 0.0
             v_steps = 0
+
+            v_mse_z_sum = 0.0
+            v_mse_h_sum = 0.0
             seed_val = int(cfg.get("seed", 0) or 0) + 12345
             g_val = torch.Generator()
             g_val.manual_seed(seed_val)
@@ -285,12 +340,18 @@ def main() -> None:
                         z_t, eps_z = forward.add_noise(z0, t)
                         h_t, eps_h = forward.add_noise(h0, t)
                         eps_pred_z = model.ddm_z(z_t, t)
-                        eps_pred_h = model.ddm_h(h_t, z0, t)
+                        if hasattr(autoencoder, "global2style"):
+                            z0_cond = autoencoder.global2style(z0)
+                        else:
+                            z0_cond = z0
+                        eps_pred_h = model.ddm_h(h_t, z0_cond, t)
                         mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
                         mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
                         w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
                         w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
                         l = (w_z * mse_z) + (w_h * mse_h)
+                        v_mse_z_sum += float(mse_z.detach().item())
+                        v_mse_h_sum += float(mse_h.detach().item())
                     elif use_latent:
                         z0 = autoencoder.encode(x0)
                         z_t, eps = forward.add_noise(z0, t)
@@ -306,14 +367,29 @@ def main() -> None:
                     v_sum += float(l.item())
                     v_steps += 1
             val_loss = v_sum / max(1, v_steps)
+            if use_two_priors:
+                val_mse_z = v_mse_z_sum / max(1, v_steps)
+                val_mse_h = v_mse_h_sum / max(1, v_steps)
             model.train()
+            if ema is not None:
+                ema.restore(model)
 
         epoch_time = time.time() - epoch_start_time
         avg_epoch_loss = epoch_loss_sum / epoch_steps
+        avg_epoch_mse_z = (epoch_mse_z_sum / max(1, epoch_steps)) if use_two_priors else None
+        avg_epoch_mse_h = (epoch_mse_h_sum / max(1, epoch_steps)) if use_two_priors else None
         if val_loss is not None:
-            print(
-                f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} | Val loss: {val_loss:.6f} | Time: {epoch_time:.2f}s =="
-            )
+            if use_two_priors and val_mse_z is not None and val_mse_h is not None:
+                print(
+                    f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} "
+                    f"(mse_z={avg_epoch_mse_z:.6f}, mse_h={avg_epoch_mse_h:.6f}) "
+                    f"| Val loss: {val_loss:.6f} (mse_z={val_mse_z:.6f}, mse_h={val_mse_h:.6f}) "
+                    f"| Time: {epoch_time:.2f}s =="
+                )
+            else:
+                print(
+                    f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} | Val loss: {val_loss:.6f} | Time: {epoch_time:.2f}s =="
+                )
         else:
             print(f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} | Time: {epoch_time:.2f}s ==")
 
@@ -324,6 +400,11 @@ def main() -> None:
             "time": epoch_time,
             "global_step": global_step,
         }
+        if use_two_priors:
+            epoch_metadata["avg_mse_z"] = avg_epoch_mse_z
+            epoch_metadata["avg_mse_h"] = avg_epoch_mse_h
+            epoch_metadata["val_mse_z"] = val_mse_z
+            epoch_metadata["val_mse_h"] = val_mse_h
         training_history["epochs"].append(epoch_metadata)
 
         ckpt_metadata: dict[str, object] = {
@@ -333,8 +414,9 @@ def main() -> None:
             "config": cfg,
         }
 
-        save_ckpt(model, cfg["train"]["out_dir"], exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata)
-        save_ckpt(model, cfg["train"]["out_dir"], exp_name, "last.pt", metadata=ckpt_metadata)
+        ema_state = ema.state_dict() if ema is not None else None
+        save_ckpt(model, cfg["train"]["out_dir"], exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata, ema_state=ema_state)
+        save_ckpt(model, cfg["train"]["out_dir"], exp_name, "last.pt", metadata=ckpt_metadata, ema_state=ema_state)
 
         sel = val_loss if val_loss is not None else avg_epoch_loss
         if sel < best_loss:
@@ -342,7 +424,7 @@ def main() -> None:
             training_history["best_epoch"] = epoch
             training_history["best_loss"] = best_loss
             ckpt_path = save_ckpt(
-                model, cfg["train"]["out_dir"], exp_name, "best.pt", metadata=ckpt_metadata
+                model, cfg["train"]["out_dir"], exp_name, "best.pt", metadata=ckpt_metadata, ema_state=ema_state
             )
             print(f"Mejor modelo guardado en: {ckpt_path} (loss={best_loss:.6f})")
 

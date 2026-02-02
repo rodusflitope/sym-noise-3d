@@ -16,12 +16,21 @@ def resolve_ckpt_path(ckpt_path: str) -> str:
     return ckpt_path
 
 
-def save_ckpt(model, out_dir: str, exp_name: str, filename: str = "last.pt", metadata: dict = None):
+def save_ckpt(
+    model,
+    out_dir: str,
+    exp_name: str,
+    filename: str = "last.pt",
+    metadata: dict | None = None,
+    ema_state: dict | None = None,
+):
     d = pathlib.Path(out_dir) / exp_name
     d.mkdir(parents=True, exist_ok=True)
     path = d / filename
     
     save_dict = {"model": model.state_dict()}
+    if ema_state is not None:
+        save_dict["model_ema"] = ema_state
     if metadata:
         save_dict["metadata"] = metadata
     
@@ -38,9 +47,17 @@ def save_training_history(out_dir: str, exp_name: str, history: dict):
     return str(path)
 
 
-def load_ckpt(model, ckpt_path: str, map_location=None):
+def load_ckpt(model, ckpt_path: str, map_location=None, prefer_ema: bool = False):
     ckpt_path = resolve_ckpt_path(ckpt_path)
     sd = torch.load(ckpt_path, map_location=map_location)
+
+    if prefer_ema and isinstance(sd, dict) and "model_ema" in sd and isinstance(sd["model_ema"], dict):
+        ema_payload = sd["model_ema"]
+        shadow = ema_payload.get("shadow", None)
+        if isinstance(shadow, dict):
+            model.load_state_dict(shadow, strict=True)
+            return model
+
     model.load_state_dict(sd["model"], strict=True)
     return model
 
