@@ -1,4 +1,4 @@
-exp_name: "pvcnn-symmetric-average"
+exp_name: "pvcnn-symmetric-masked"
 seed: 10
 device: "auto"
 
@@ -10,7 +10,7 @@ data:
   test_frac: 0.1
 
 model:
-  name: "pvcnn"
+  name: "legacy_pvcnn"
   embed_dim: 256
   use_att: true
   dropout: 0.1
@@ -54,11 +54,12 @@ diffusion:
   beta_start: 0.0001
   beta_end: 0.02
   schedule: "linear"
+  noise_type: "symmetric"
   symmetric:
     base_type: "gaussian"
-    mode: "average"
+    mode: "masked"
     axis: 0
-    active_dims: [0, 1, 2]
+    active_dims: [1, 2]
 
 sampler:
   name: "ddpm"

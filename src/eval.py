@@ -39,17 +39,6 @@ def load_checkpoint(model: torch.nn.Module, path: str, device: torch.device) -> 
     model.load_state_dict(state_dict)
 
 
-class ChannelTransposeWrapper(torch.nn.Module):
-    def __init__(self, model: torch.nn.Module):
-        super().__init__()
-        self.model = model
-
-    def forward(self, x: torch.Tensor, t: torch.Tensor):
-        x = x.transpose(1, 2).contiguous()
-        out = self.model(x, t)
-        return out.transpose(1, 2).contiguous()
-
-
 def _ensure_bnc3(x: torch.Tensor, *, name: str) -> torch.Tensor:
     if x.ndim != 3:
         raise ValueError(f"[eval] {name} must be rank-3 [B,N,3] or [B,3,N], got shape={tuple(x.shape)}")
@@ -157,9 +146,6 @@ def evaluate(
     model = build_model(cfg).to(device)
     load_checkpoint(model, ckpt_path, device)
     model.eval()
-
-    if cfg.get("model", {}).get("name") == "pvcnn":
-        model = ChannelTransposeWrapper(model)
 
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
     noise_type = build_noise_type(cfg)

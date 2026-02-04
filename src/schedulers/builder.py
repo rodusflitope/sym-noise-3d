@@ -11,7 +11,8 @@ from .noise_types import (
     LaplacianNoise,
     StudentTNoise
 )
-from .structural_noise import SymmetricNoiseWrapper
+from src.structural_properties import build_structural_properties
+from src.structural_properties.base import StructuralPropertyApplier
 
 
 def build_beta_schedule(cfg, device):
@@ -44,35 +45,28 @@ def build_beta_schedule(cfg, device):
 
 
 def build_noise_type(cfg):
-    noise_type = cfg["diffusion"].get("noise_type", "gaussian").lower()
-    
-    if noise_type == "gaussian":
-        return GaussianNoise()
-    elif noise_type == "uniform":
-        return UniformNoise()
-    elif noise_type == "spherical":
-        return SphericalNoise()
-    elif noise_type == "laplacian":
-        return LaplacianNoise()
-    elif noise_type == "student_t":
-        df = cfg["diffusion"].get("student_t_df", 3.0)
-        return StudentTNoise(df=df)
-    elif noise_type == "symmetric":
-        sym_cfg = cfg["diffusion"].get("symmetric", {})
-        
-        base_type_name = sym_cfg.get("base_type", "gaussian")
+    diff_cfg = cfg.get("diffusion", {}) or {}
+    noise_type = str(diff_cfg.get("noise_type", "gaussian")).lower()
 
-        base_cfg = cfg.copy()
-        base_cfg["diffusion"] = cfg["diffusion"].copy()
-        base_cfg["diffusion"]["noise_type"] = base_type_name
-        
-        base_noise = build_noise_type(base_cfg)
-        
-        return SymmetricNoiseWrapper(
-            base_noise=base_noise,
-            mode=sym_cfg.get("mode", "masked"),
-            axis=sym_cfg.get("axis", 0),
-            active_dims=sym_cfg.get("active_dims", None)
-        )
+    base_name = noise_type
+    if noise_type == "symmetric":
+        sym_cfg = diff_cfg.get("symmetric", {}) or {}
+        base_name = str(sym_cfg.get("base_type", "gaussian")).lower()
+
+    if base_name == "gaussian":
+        base_noise = GaussianNoise()
+    elif base_name == "uniform":
+        base_noise = UniformNoise()
+    elif base_name == "spherical":
+        base_noise = SphericalNoise()
+    elif base_name == "laplacian":
+        base_noise = LaplacianNoise()
+    elif base_name == "student_t":
+        df = diff_cfg.get("student_t_df", 3.0)
+        base_noise = StudentTNoise(df=df)
     else:
-        raise ValueError(f"Unknown noise type: {noise_type}")
+        raise ValueError(f"Unknown noise type: {base_name}")
+
+    props = build_structural_properties(cfg)
+    applier = StructuralPropertyApplier(props)
+    return applier.wrap_noise(base_noise)

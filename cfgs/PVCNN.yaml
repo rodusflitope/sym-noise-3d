@@ -4,37 +4,17 @@ device: "auto"
 
 data:
   root_dir: "data/ShapeNetCore"
-  max_models: 2000
+  max_models: 1000
   augment: false
   val_frac: 0.1
   test_frac: 0.1
 
 model:
   name: "pvcnn"
-  embed_dim: 256
-  use_att: true
-  dropout: 0.1
-  extra_feature_channels: 0
-  width_multiplier: 0.6
-  voxel_resolution_multiplier: 0.6
-  sa_blocks:
-    - - [32, 2, 32]
-      - [1024, 0.1, 32, [32, 64]]
-    - - [64, 3, 16]
-      - [256, 0.2, 32, [64, 128]]
-    - - [128, 3, 8]
-      - [64, 0.4, 32, [128, 256]]
-    - - null
-      - [16, 0.8, 32, [256, 256, 512]]
-  fp_blocks:
-    - - [256, 256]
-      - [256, 3, 8]
-    - - [256, 256]
-      - [256, 3, 8]
-    - - [256, 128]
-      - [128, 2, 16]
-    - - [128, 128, 64]
-      - [64, 2, 32]
+  hidden_dim: 128
+  time_dim: 64
+  resolution: 16
+  num_blocks: 2
 
 loss:
   name: "mse"
@@ -48,6 +28,7 @@ train:
   num_workers: 4
   out_dir: "runs"
   save_every: 10
+  amp: True 
 
 diffusion:
   T: 1000

@@ -1,4 +1,4 @@
-exp_name: "pvcnn-symmetric-loss"
+exp_name: "pvcnn-baseline"
 seed: 10
 device: "auto"
 
@@ -10,7 +10,7 @@ data:
   test_frac: 0.1
 
 model:
-  name: "pvcnn"
+  name: "legacy_pvcnn"
   embed_dim: 256
   use_att: true
   dropout: 0.1
@@ -39,9 +39,6 @@ model:
 loss:
   name: "mse"
   weighting: "none"
-  symmetry:
-    weight: 0.02
-    warmup_steps: 2000
 
 train:
   batch_size: 32

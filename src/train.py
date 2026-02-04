@@ -11,6 +11,8 @@ from datetime import datetime
 import torch
 from torch.utils.data import DataLoader
 
+from contextlib import nullcontext
+
 from src.data import build_datasets_from_config
 from src.losses import build_loss
 from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM
@@ -182,14 +184,16 @@ def main() -> None:
     with open(split_path, "w", encoding="utf-8") as f:
         json.dump(splits, f)
 
+    num_workers = int(cfg["train"].get("num_workers", 4))
+    persistent_workers = bool(num_workers > 0)
     dl = DataLoader(
         ds,
         batch_size=cfg["train"]["batch_size"],
         shuffle=True,
         drop_last=False,
-        num_workers=cfg["train"].get("num_workers", 4),
+        num_workers=num_workers,
         pin_memory=True,
-        persistent_workers=True,
+        persistent_workers=persistent_workers,
     )
     dl_val = None
     if ds_val is not None:
@@ -198,9 +202,9 @@ def main() -> None:
             batch_size=cfg["train"]["batch_size"],
             shuffle=False,
             drop_last=False,
-            num_workers=cfg["train"].get("num_workers", 4),
+            num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=True,
+            persistent_workers=persistent_workers,
         )
 
     use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, LionAutoencoder))
@@ -217,6 +221,28 @@ def main() -> None:
 
     print("\nIniciando entrenamiento...")
     train_start_time = time.time()
+
+    amp_cfg = cfg.get("train", {})
+    amp_enabled = bool(amp_cfg.get("amp", False)) and (device.type == "cuda")
+    amp_dtype_name = str(amp_cfg.get("amp_dtype", "fp16")).lower()
+    if amp_dtype_name not in {"fp16", "bf16"}:
+        raise ValueError(f"train.amp_dtype must be 'fp16' or 'bf16', got: {amp_dtype_name}")
+    amp_dtype = torch.float16 if amp_dtype_name == "fp16" else torch.bfloat16
+    amp_mod = getattr(torch, "amp", None)
+    amp_grad_scaler = getattr(amp_mod, "GradScaler", None) if amp_mod is not None else None
+    amp_autocast = getattr(amp_mod, "autocast", None) if amp_mod is not None else None
+    if amp_grad_scaler is not None and amp_autocast is not None:
+        scaler = amp_grad_scaler("cuda", enabled=bool(amp_enabled and amp_dtype == torch.float16))
+        autocast_ctx = (
+            (lambda: amp_autocast("cuda", dtype=amp_dtype)) if amp_enabled else (lambda: nullcontext())
+        )
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=bool(amp_enabled and amp_dtype == torch.float16))
+        autocast_ctx = (
+            (lambda: torch.cuda.amp.autocast(dtype=amp_dtype)) if amp_enabled else (lambda: nullcontext())
+        )
+    if amp_enabled:
+        print(f"[train] AMP enabled: dtype={amp_dtype_name}")
 
     training_history: dict[str, object] = {
         "config": cfg,
@@ -240,51 +266,57 @@ def main() -> None:
             x0 = x0.to(device)
             mse_z = torch.tensor(0.0, device=device)
             mse_h = torch.tensor(0.0, device=device)
-            if not use_latent and cfg["model"]["name"] == "pvcnn":
-                x0 = x0.transpose(1, 2).contiguous()
             B = x0.shape[0]
             t = sample_timesteps(B, T, device)
             
-            if use_two_priors:
-                with torch.no_grad():
-                    z0, h0 = autoencoder.encode_split(x0, sample=True)
+            with autocast_ctx():
+                if use_two_priors:
+                    with torch.no_grad():
+                        z0, h0 = autoencoder.encode_split(x0, sample=True)
 
-                z_t, eps_z = forward.add_noise(z0, t)
-                h_t, eps_h = forward.add_noise(h0, t)
+                    z_t, eps_z = forward.add_noise(z0, t)
+                    h_t, eps_h = forward.add_noise(h0, t)
 
-                eps_pred_z = model.ddm_z(z_t, t)
-                if hasattr(autoencoder, "global2style"):
-                    z0_cond = autoencoder.global2style(z0)
-                else:
-                    z0_cond = z0
-                eps_pred_h = model.ddm_h(h_t, z0_cond, t)
-
-                mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
-                mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
-                w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
-                w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
-                loss = (w_z * mse_z) + (w_h * mse_h)
-            elif use_latent:
-                with torch.no_grad():
-                    if isinstance(autoencoder, LionAutoencoder):
-                        z0 = autoencoder.encode(x0, sample=True)
+                    eps_pred_z = model.ddm_z(z_t, t)
+                    if hasattr(autoencoder, "global2style"):
+                        z0_cond = autoencoder.global2style(z0)
                     else:
-                        z0 = autoencoder.encode(x0)
-                z_t, eps = forward.add_noise(z0, t)
-                eps_pred = model(z_t, t)
-                assert loss_fn is not None
-                loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
-            else:
-                x_t, eps = forward.add_noise(x0, t)
-                eps_pred = model(x_t, t)
-                assert loss_fn is not None
-                loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+                        z0_cond = z0
+                    eps_pred_h = model.ddm_h(h_t, z0_cond, t)
+
+                    mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
+                    mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
+                    w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
+                    w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
+                    loss = (w_z * mse_z) + (w_h * mse_h)
+                elif use_latent:
+                    with torch.no_grad():
+                        if isinstance(autoencoder, LionAutoencoder):
+                            z0 = autoencoder.encode(x0, sample=True)
+                        else:
+                            z0 = autoencoder.encode(x0)
+                    z_t, eps = forward.add_noise(z0, t)
+                    eps_pred = model(z_t, t)
+                    assert loss_fn is not None
+                    loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+                else:
+                    x_t, eps = forward.add_noise(x0, t)
+                    eps_pred = model(x_t, t)
+                    assert loss_fn is not None
+                    loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
 
 
             opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            opt.step()
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                opt.step()
             if ema is not None:
                 ema.update(model)
             if scheduler is not None:
@@ -330,39 +362,38 @@ def main() -> None:
             with torch.no_grad():
                 for x0 in dl_val:
                     x0 = x0.to(device)
-                    if cfg["model"]["name"] == "pvcnn":
-                        x0 = x0.transpose(1, 2).contiguous()
                     B = x0.shape[0]
                     t = torch.randint(low=0, high=T, size=(B,), generator=g_val, dtype=torch.long).to(device)
-                    
-                    if use_two_priors:
-                        z0, h0 = autoencoder.encode_split(x0, sample=False)
-                        z_t, eps_z = forward.add_noise(z0, t)
-                        h_t, eps_h = forward.add_noise(h0, t)
-                        eps_pred_z = model.ddm_z(z_t, t)
-                        if hasattr(autoencoder, "global2style"):
-                            z0_cond = autoencoder.global2style(z0)
+
+                    with autocast_ctx():
+                        if use_two_priors:
+                            z0, h0 = autoencoder.encode_split(x0, sample=False)
+                            z_t, eps_z = forward.add_noise(z0, t)
+                            h_t, eps_h = forward.add_noise(h0, t)
+                            eps_pred_z = model.ddm_z(z_t, t)
+                            if hasattr(autoencoder, "global2style"):
+                                z0_cond = autoencoder.global2style(z0)
+                            else:
+                                z0_cond = z0
+                            eps_pred_h = model.ddm_h(h_t, z0_cond, t)
+                            mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
+                            mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
+                            w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
+                            w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
+                            l = (w_z * mse_z) + (w_h * mse_h)
+                            v_mse_z_sum += float(mse_z.detach().item())
+                            v_mse_h_sum += float(mse_h.detach().item())
+                        elif use_latent:
+                            z0 = autoencoder.encode(x0)
+                            z_t, eps = forward.add_noise(z0, t)
+                            eps_pred = model(z_t, t)
+                            assert loss_fn is not None
+                            l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
                         else:
-                            z0_cond = z0
-                        eps_pred_h = model.ddm_h(h_t, z0_cond, t)
-                        mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
-                        mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
-                        w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
-                        w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
-                        l = (w_z * mse_z) + (w_h * mse_h)
-                        v_mse_z_sum += float(mse_z.detach().item())
-                        v_mse_h_sum += float(mse_h.detach().item())
-                    elif use_latent:
-                        z0 = autoencoder.encode(x0)
-                        z_t, eps = forward.add_noise(z0, t)
-                        eps_pred = model(z_t, t)
-                        assert loss_fn is not None
-                        l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
-                    else:
-                        x_t, eps = forward.add_noise(x0, t)
-                        eps_pred = model(x_t, t)
-                        assert loss_fn is not None
-                        l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+                            x_t, eps = forward.add_noise(x0, t)
+                            eps_pred = model(x_t, t)
+                            assert loss_fn is not None
+                            l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
 
                     v_sum += float(l.item())
                     v_steps += 1

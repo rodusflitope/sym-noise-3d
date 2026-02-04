@@ -69,15 +69,29 @@ def build_model(cfg):
             voxel_resolution_multiplier=voxel_resolution_multiplier,
         )
     elif name == "pvcnn":
-        from .pvcnn import PVCNN
-        return PVCNN(
-            num_classes=3,
-            embed_dim=cfg["model"]["embed_dim"],
-            use_att=cfg["model"].get("use_att", True),
-            dropout=cfg["model"].get("dropout", 0.1),
-            extra_feature_channels=cfg["model"].get("extra_feature_channels", 0),
-            width_multiplier=cfg["model"].get("width_multiplier", 1),
-            voxel_resolution_multiplier=cfg["model"].get("voxel_resolution_multiplier", 1),
+        from .pvcnn import PVCNNEpsilon
+
+        hidden_dim = int(cfg["model"].get("hidden_dim", 128))
+        time_dim = int(cfg["model"].get("time_dim", 64))
+        resolution = int(cfg["model"].get("resolution", cfg["model"].get("voxel_resolution", 32)))
+        num_blocks = int(cfg["model"].get("num_blocks", 4))
+        return PVCNNEpsilon(
+            hidden_dim=hidden_dim,
+            time_dim=time_dim,
+            resolution=resolution,
+            num_blocks=num_blocks,
+            cfg=cfg,
+        )
+    elif name in {"legacy_pvcnn", "pvcnn_legacy"}:
+        from .legacy_pvcnn import LegacyPVCNNEpsilon
+
+        return LegacyPVCNNEpsilon(
+            embed_dim=int(cfg["model"].get("embed_dim", cfg["model"].get("time_dim", 64))),
+            use_att=bool(cfg["model"].get("use_att", True)),
+            dropout=float(cfg["model"].get("dropout", 0.1)),
+            extra_feature_channels=int(cfg["model"].get("extra_feature_channels", 0)),
+            width_multiplier=float(cfg["model"].get("width_multiplier", 1.0)),
+            voxel_resolution_multiplier=float(cfg["model"].get("voxel_resolution_multiplier", 1.0)),
             sa_blocks=cfg["model"].get("sa_blocks"),
             fp_blocks=cfg["model"].get("fp_blocks"),
         )

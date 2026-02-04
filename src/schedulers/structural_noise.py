@@ -16,8 +16,10 @@ class SymmetricNoiseWrapper(NoiseType):
             self.active_dims = active_dims
 
     def sample(self, shape, device):
-
         noise = self.base_noise.sample(shape, device)
+
+        if noise.ndim != 3 or noise.shape[-1] < 3:
+            return noise
         
         if self.mode == "masked":
 

@@ -10,7 +10,7 @@ data:
   test_frac: 0.1
 
 model:
-  name: "pvcnn"
+  name: "legacy_pvcnn"
   embed_dim: 256
   use_att: true
   dropout: 0.1
@@ -54,6 +54,7 @@ diffusion:
   beta_start: 0.0001
   beta_end: 0.02
   schedule: "linear"
+  noise_type: "symmetric"
   symmetric:
     base_type: "gaussian"
     mode: "reflected"

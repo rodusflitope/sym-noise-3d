@@ -15,15 +15,12 @@ class SymmetricLoss:
         reflect = torch.eye(3, device=pred.device)
         reflect[self.axis, self.axis] = -1
 
-        pred_for_sym = pred
+        if pred.ndim != 3 or pred.shape[-1] != 3:
+            return base_loss
 
-        #Caso PVCNN que viene traspuesto
-        if pred.ndim == 3 and pred.shape[1] == 3 and pred.shape[-1] != 3:
-            pred_for_sym = pred.transpose(1, 2)
+        pred_reflected = pred @ reflect
 
-        pred_reflected = pred_for_sym @ reflect
-
-        sym_loss_batch = chamfer_distance(pred_for_sym, pred_reflected)
+        sym_loss_batch = chamfer_distance(pred, pred_reflected)
         sym_loss = sym_loss_batch.mean()
 
         if self.warmup_steps > 0:

@@ -79,17 +79,6 @@ def parse_args():
     return p.parse_args()
 
 
-class ChannelTransposeWrapper(torch.nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-    
-    def forward(self, x, t):
-        x = x.transpose(1, 2).contiguous()
-        out = self.model(x, t)
-        return out.transpose(1, 2).contiguous()
-
-
 def main():
     args = parse_args()
     
@@ -127,10 +116,6 @@ def main():
     prefer_ema = bool((cfg.get("ema", {}) or {}).get("use", False))
     model = load_ckpt(model, ckpt, map_location=device, prefer_ema=prefer_ema)
     model.eval()
-    
-    if cfg["model"]["name"] == "pvcnn":
-        print("[sample] Wrapping PVCNN model for channel transposition [B, N, C] <-> [B, C, N]")
-        model = ChannelTransposeWrapper(model)
     
     print(f"[sample] loaded model weights")
 

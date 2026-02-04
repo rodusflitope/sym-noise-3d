@@ -1,4 +1,6 @@
 from functools import partial
+
+import torch
 import torch.nn.functional as F
 from .losses import (
     snr_weight,
@@ -6,7 +8,8 @@ from .losses import (
     p2_weight,
     truncated_snr_weight,
 )
-from .symmetry_loss import SymmetricLoss
+from src.structural_properties import build_structural_properties
+from src.structural_properties.base import StructuralPropertyApplier
 
 def build_loss(cfg):
     loss_cfg = cfg.get("loss", {})
@@ -63,10 +66,6 @@ def build_loss(cfg):
              loss = raw_loss
         return loss.mean()
 
-    sym_cfg = loss_cfg.get("symmetry")
-    if sym_cfg:
-        weight = sym_cfg.get("weight", 0.1)
-        warmup_steps = sym_cfg.get("warmup_steps", 0)
-        return SymmetricLoss(composed_loss, weight=weight, warmup_steps=warmup_steps)
-    
-    return composed_loss
+    props = build_structural_properties(cfg)
+    applier = StructuralPropertyApplier(props)
+    return applier.wrap_loss(composed_loss)
