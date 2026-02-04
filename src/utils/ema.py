@@ -1,86 +1,47 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
-
 import torch
+from torch.optim.swa_utils import AveragedModel
 
 
-@dataclass
-class EMAState:
-    beta: float
-    step: int
-    shadow: dict[str, torch.Tensor]
+def build_ema_model(
+    model: torch.nn.Module,
+    ema_cfg: dict,
+) -> tuple[AveragedModel, list[tuple[torch.Tensor, torch.Tensor]] | None]:
+    decay = float(ema_cfg.get("decay", ema_cfg.get("beta", 0.999)))
+    if not (0.0 < decay < 1.0):
+        raise ValueError(f"ema.decay must be in (0,1), got {decay}")
 
+    warmup_steps = int(ema_cfg.get("warmup_steps", 0) or 0)
+    warmup_init = float(ema_cfg.get("warmup_init", 0.0))
+    if warmup_steps < 0:
+        raise ValueError(f"ema.warmup_steps must be >= 0, got {warmup_steps}")
+    if not (0.0 <= warmup_init < 1.0):
+        raise ValueError(f"ema.warmup_init must be in [0,1), got {warmup_init}")
+    if warmup_steps > 0 and warmup_init >= decay:
+        raise ValueError(f"ema.warmup_init must be < ema.decay (init={warmup_init}, decay={decay})")
 
-class EMA:
-    def __init__(self, model: torch.nn.Module, beta: float = 0.999, device: torch.device | None = None) -> None:
-        if not (0.0 < beta < 1.0):
-            raise ValueError(f"EMA beta must be in (0,1), got {beta}")
-        self.beta = float(beta)
-        self.step = 0
-        self._device = device
-        self.shadow: dict[str, torch.Tensor] = {}
-        self._backup: dict[str, torch.Tensor] | None = None
-        self._init_from_model(model)
+    def avg_fn(averaged: torch.Tensor, current: torch.Tensor, num_averaged: torch.Tensor) -> torch.Tensor:
+        step = int(num_averaged.item()) if torch.is_tensor(num_averaged) else int(num_averaged)
+        if warmup_steps > 0:
+            frac = min(1.0, float(step + 1) / float(warmup_steps))
+            d = warmup_init + (decay - warmup_init) * frac
+        else:
+            d = decay
+        if averaged.dtype.is_floating_point and current.dtype.is_floating_point:
+            return averaged.mul(d).add(current, alpha=1.0 - d)
+        return current
 
-    def _init_from_model(self, model: torch.nn.Module) -> None:
-        sd = model.state_dict()
-        for k, v in sd.items():
-            if not torch.is_tensor(v):
-                continue
-            t = v.detach()
-            if self._device is not None:
-                t = t.to(self._device)
-            self.shadow[k] = t.clone()
-
-    @torch.no_grad()
-    def update(self, model: torch.nn.Module) -> None:
-        self.step += 1
-        sd = model.state_dict()
-        for k, v in sd.items():
-            if k not in self.shadow:
-                continue
-            if not torch.is_tensor(v):
-                continue
-            cur = v.detach()
-            if self._device is not None:
-                cur = cur.to(self._device)
-            old = self.shadow[k]
-            if old.dtype.is_floating_point and cur.dtype.is_floating_point:
-                self.shadow[k] = old.mul(self.beta).add(cur, alpha=1.0 - self.beta)
-            else:
-                self.shadow[k] = cur.clone()
-
-    def state_dict(self) -> dict[str, Any]:
-        return {
-            "beta": self.beta,
-            "step": self.step,
-            "shadow": self.shadow,
-        }
-
-    def load_state_dict(self, state: dict[str, Any]) -> None:
-        self.beta = float(state.get("beta", self.beta))
-        self.step = int(state.get("step", self.step))
-        shadow = state.get("shadow", None)
-        if isinstance(shadow, dict):
-            self.shadow = {k: v.detach().clone() for k, v in shadow.items() if torch.is_tensor(v)}
-
-    @torch.no_grad()
-    def store(self, model: torch.nn.Module) -> None:
-        self._backup = {k: v.detach().clone() for k, v in model.state_dict().items() if torch.is_tensor(v)}
-
-    @torch.no_grad()
-    def copy_to(self, model: torch.nn.Module) -> None:
-        sd = model.state_dict()
-        for k in list(sd.keys()):
-            if k in self.shadow:
-                sd[k].copy_(self.shadow[k].to(device=sd[k].device, dtype=sd[k].dtype))
-        model.load_state_dict(sd, strict=False)
-
-    @torch.no_grad()
-    def restore(self, model: torch.nn.Module) -> None:
-        if self._backup is None:
-            return
-        model.load_state_dict(self._backup, strict=False)
-        self._backup = None
+    try:
+        ema_model = AveragedModel(model, avg_fn=avg_fn, use_buffers=True)
+        return ema_model, None
+    except TypeError:
+        ema_model = AveragedModel(model, avg_fn=avg_fn)
+        src_buffers = dict(model.named_buffers())
+        ema_buffers = dict(ema_model.module.named_buffers())
+        pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for name, b in src_buffers.items():
+            eb = ema_buffers.get(name)
+            if eb is not None and torch.is_tensor(b) and torch.is_tensor(eb):
+                pairs.append((eb, b))
+        return ema_model, pairs

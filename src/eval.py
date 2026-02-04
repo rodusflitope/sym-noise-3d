@@ -17,7 +17,7 @@ from src.utils.checkpoint import load_ckpt_config
 
 
 
-def load_checkpoint(model: torch.nn.Module, path: str, device: torch.device) -> None:
+def load_checkpoint(model: torch.nn.Module, path: str, device: torch.device, *, prefer_ema: bool = False) -> None:
     if os.path.isdir(path):
         if os.path.exists(os.path.join(path, "best.pt")):
             path = os.path.join(path, "best.pt")
@@ -28,12 +28,18 @@ def load_checkpoint(model: torch.nn.Module, path: str, device: torch.device) -> 
 
     ckpt = torch.load(path, map_location=device)
     if isinstance(ckpt, dict):
-        state_dict = (
-            ckpt.get("model")
-            or ckpt.get("model_state_dict")
-            or ckpt.get("state_dict")
-            or ckpt
-        )
+        if prefer_ema and isinstance(ckpt.get("model_ema", None), dict):
+            ema_payload = ckpt["model_ema"]
+            shadow = ema_payload.get("shadow", None) if isinstance(ema_payload, dict) else None
+            if isinstance(shadow, dict):
+                model.load_state_dict(shadow)
+                return
+            try:
+                model.load_state_dict(ema_payload)
+                return
+            except Exception:
+                pass
+        state_dict = ckpt.get("model") or ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
     else:
         state_dict = ckpt
     model.load_state_dict(state_dict)
@@ -144,7 +150,8 @@ def evaluate(
     device = get_device(cfg.get("device", "auto"))
 
     model = build_model(cfg).to(device)
-    load_checkpoint(model, ckpt_path, device)
+    prefer_ema = bool((cfg.get("ema", {}) or {}).get("use", False))
+    load_checkpoint(model, ckpt_path, device, prefer_ema=prefer_ema)
     model.eval()
 
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)

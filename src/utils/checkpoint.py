@@ -57,6 +57,11 @@ def load_ckpt(model, ckpt_path: str, map_location=None, prefer_ema: bool = False
         if isinstance(shadow, dict):
             model.load_state_dict(shadow, strict=True)
             return model
+        try:
+            model.load_state_dict(ema_payload, strict=True)
+            return model
+        except Exception:
+            pass
 
     model.load_state_dict(sd["model"], strict=True)
     return model

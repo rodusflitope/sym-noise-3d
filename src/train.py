@@ -21,7 +21,7 @@ from src.schedulers.forward import ForwardDiffusion
 from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_config
 from src.utils.common import load_cfg, set_seed, get_device
 from src.utils.lr import build_optimizer_and_scheduler
-from src.utils.ema import EMA
+from src.utils.ema import build_ema_model
 
 
 def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
@@ -214,10 +214,13 @@ def main() -> None:
 
     ema_cfg = cfg.get("ema", {}) or {}
     ema = None
+    ema_buffer_pairs = None
     if bool(ema_cfg.get("use", False)):
-        ema_beta = float(ema_cfg.get("beta", 0.999))
-        ema = EMA(model, beta=ema_beta)
-        print(f"[train] EMA enabled: beta={ema_beta}")
+        ema, ema_buffer_pairs = build_ema_model(model, ema_cfg)
+        decay = float(ema_cfg.get("decay", ema_cfg.get("beta", 0.999)))
+        warmup_steps = int(ema_cfg.get("warmup_steps", 0) or 0)
+        warmup_init = float(ema_cfg.get("warmup_init", 0.0))
+        print(f"[train] EMA enabled: decay={decay} warmup_steps={warmup_steps} warmup_init={warmup_init}")
 
     print("\nIniciando entrenamiento...")
     train_start_time = time.time()
@@ -318,7 +321,10 @@ def main() -> None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 opt.step()
             if ema is not None:
-                ema.update(model)
+                ema.update_parameters(model)
+                if ema_buffer_pairs is not None:
+                    for eb, b in ema_buffer_pairs:
+                        eb.copy_(b)
             if scheduler is not None:
                 scheduler.step()
 
@@ -347,10 +353,8 @@ def main() -> None:
         val_mse_z = None
         val_mse_h = None
         if dl_val is not None and len(splits["val"]) > 0:
-            if ema is not None:
-                ema.store(model)
-                ema.copy_to(model)
-            model.eval()
+            model_to_eval = ema.module if ema is not None else model
+            model_to_eval.eval()
             v_sum = 0.0
             v_steps = 0
 
@@ -370,12 +374,12 @@ def main() -> None:
                             z0, h0 = autoencoder.encode_split(x0, sample=False)
                             z_t, eps_z = forward.add_noise(z0, t)
                             h_t, eps_h = forward.add_noise(h0, t)
-                            eps_pred_z = model.ddm_z(z_t, t)
+                            eps_pred_z = model_to_eval.ddm_z(z_t, t)
                             if hasattr(autoencoder, "global2style"):
                                 z0_cond = autoencoder.global2style(z0)
                             else:
                                 z0_cond = z0
-                            eps_pred_h = model.ddm_h(h_t, z0_cond, t)
+                            eps_pred_h = model_to_eval.ddm_h(h_t, z0_cond, t)
                             mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
                             mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
                             w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
@@ -386,12 +390,12 @@ def main() -> None:
                         elif use_latent:
                             z0 = autoencoder.encode(x0)
                             z_t, eps = forward.add_noise(z0, t)
-                            eps_pred = model(z_t, t)
+                            eps_pred = model_to_eval(z_t, t)
                             assert loss_fn is not None
                             l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
                         else:
                             x_t, eps = forward.add_noise(x0, t)
-                            eps_pred = model(x_t, t)
+                            eps_pred = model_to_eval(x_t, t)
                             assert loss_fn is not None
                             l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
 
@@ -403,7 +407,7 @@ def main() -> None:
                 val_mse_h = v_mse_h_sum / max(1, v_steps)
             model.train()
             if ema is not None:
-                ema.restore(model)
+                ema.module.train()
 
         epoch_time = time.time() - epoch_start_time
         avg_epoch_loss = epoch_loss_sum / epoch_steps
@@ -445,7 +449,7 @@ def main() -> None:
             "config": cfg,
         }
 
-        ema_state = ema.state_dict() if ema is not None else None
+        ema_state = ema.module.state_dict() if ema is not None else None
         save_ckpt(model, cfg["train"]["out_dir"], exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata, ema_state=ema_state)
         save_ckpt(model, cfg["train"]["out_dir"], exp_name, "last.pt", metadata=ckpt_metadata, ema_state=ema_state)
 
