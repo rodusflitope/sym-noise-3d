@@ -2,7 +2,6 @@ from .simple_eps import EpsilonMLP
 from .pointnet_eps import PointNetEpsilon
 from .pointtransformer_eps import PointTransformerEpsilon
 from .latent_eps import LatentEpsilonMLP
-from .lion_two_priors import LionTwoPriorsDDM
 
 
 def build_model(cfg):
@@ -43,6 +42,8 @@ def build_model(cfg):
             time_dim=time_dim,
         )
     elif name == "lion_priors":
+        from .lion_two_priors import LionTwoPriorsDDM
+
         ae_cfg = cfg.get("autoencoder", {})
         num_points = int(cfg["train"]["num_points"])
         input_dim = int(cfg.get("model", {}).get("input_dim", 3))
@@ -50,11 +51,12 @@ def build_model(cfg):
         local_feat_dim = int(ae_cfg.get("local_latent_dim", 16))
 
         time_dim = int(cfg["model"].get("time_dim", 64))
-        hidden_dim_z = int(cfg["model"].get("hidden_dim_z", cfg["model"].get("hidden_dim", 512)))
-        hidden_dim_style = int(cfg["model"].get("hidden_dim_style", cfg["model"].get("hidden_dim", 512)))
-        dropout = float(cfg["model"].get("dropout", cfg.get("train", {}).get("dropout", 0.1)))
-        width_multiplier = float(cfg["model"].get("width_multiplier", 1.0))
-        voxel_resolution_multiplier = float(cfg["model"].get("voxel_resolution_multiplier", 1.0))
+        hidden_dim_z = int(cfg["model"].get("hidden_dim_z", 512))
+        hidden_dim_h = int(cfg["model"].get("hidden_dim_h", 128))
+        resolution = int(cfg["model"].get("resolution", 32))
+        num_blocks_z = int(cfg["model"].get("num_blocks_z", 4))
+        num_blocks_h = int(cfg["model"].get("num_blocks_h", 4))
+        dropout = float(cfg["model"].get("dropout", 0.1))
 
         return LionTwoPriorsDDM(
             num_points=num_points,
@@ -63,10 +65,11 @@ def build_model(cfg):
             local_feat_dim=local_feat_dim,
             time_dim=time_dim,
             hidden_dim_z=hidden_dim_z,
-            hidden_dim_style=hidden_dim_style,
+            hidden_dim_h=hidden_dim_h,
+            resolution=resolution,
+            num_blocks_z=num_blocks_z,
+            num_blocks_h=num_blocks_h,
             dropout=dropout,
-            width_multiplier=width_multiplier,
-            voxel_resolution_multiplier=voxel_resolution_multiplier,
         )
     elif name == "pvcnn":
         from .pvcnn import PVCNNEpsilon

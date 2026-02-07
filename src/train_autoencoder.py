@@ -17,8 +17,11 @@ except Exception:
 
 from src.data import build_datasets_from_config
 from src.metrics import chamfer_distance, earth_movers_distance
-from src.models.lion_ae import LionAutoencoder
-from src.models.autoencoder import PointAutoencoder
+from src.models import LionAutoencoder, LionAutoencoderMLP, PointAutoencoder
+try:
+    from src.models import LionAutoencoderLegacy
+except Exception:
+    LionAutoencoderLegacy = None
 from src.utils.common import load_cfg, set_seed, get_device, kl_coeff
 from src.utils.lr import build_optimizer_and_scheduler
 from src.utils.checkpoint import save_ckpt, save_training_history
@@ -58,6 +61,15 @@ def main() -> None:
     lambda_z = float(lambda_z)
     lambda_h = float(lambda_h)
 
+    lambda_h_xyz = float(ae_cfg.get("lambda_h_xyz", 0.0))
+    lambda_h_feat = float(ae_cfg.get("lambda_h_feat", lambda_h))
+
+    kl_normalize = str(ae_cfg.get("kl_normalize", "sum")).lower()
+    if kl_normalize not in {"per_dim", "sum"}:
+        raise ValueError("autoencoder.kl_normalize must be 'per_dim' or 'sum'")
+
+    kl_free_bits = float(ae_cfg.get("kl_free_bits", 0.0))
+
     kl_anneal_cfg = ae_cfg.get("kl_anneal", {}) or {}
     kl_anneal_enabled = bool(kl_anneal_cfg.get("enabled", False))
     kl_min_coeff = float(kl_anneal_cfg.get("min_coeff", 1e-7))
@@ -86,15 +98,57 @@ def main() -> None:
             return F.l1_loss(x_recon, x_gt, reduction="mean")
         raise ValueError(f"Unknown autoencoder.recon_loss: {recon_loss_name}")
 
-    if ae_type == "lion":
-        print(f"[ae] LionAutoencoder: global_dim={global_latent_dim} local_dim={local_latent_dim}")
+    def kl_normal_logsigma(mu: torch.Tensor, log_sigma: torch.Tensor) -> torch.Tensor:
+        if mu.shape != log_sigma.shape:
+            raise ValueError(f"KL expects same shapes, got {tuple(mu.shape)} vs {tuple(log_sigma.shape)}")
+        if mu.ndim != 2:
+            mu = mu.reshape(mu.shape[0], -1)
+            log_sigma = log_sigma.reshape(log_sigma.shape[0], -1)
+        kl_per_dim = 0.5 * (mu.pow(2) + (2 * log_sigma).exp() - 2 * log_sigma - 1)
+        if kl_free_bits > 0:
+            kl_per_dim = torch.clamp(kl_per_dim, min=kl_free_bits)
+        if kl_normalize == "per_dim":
+            return kl_per_dim.mean()
+        return kl_per_dim.sum(dim=1).mean()
+
+    if ae_type in {"lion", "lion_pvcnn"}:
+        print(f"[ae] LionAutoencoder(PVCNN): global_dim={global_latent_dim} local_dim={local_latent_dim}")
         autoencoder = LionAutoencoder(
+            num_points=cfg["train"]["num_points"],
+            input_dim=3,
+            global_latent_dim=global_latent_dim,
+            local_latent_dim=local_latent_dim,
+            hidden_dim=int(ae_cfg.get("hidden_dim", 128)),
+            resolution=int(ae_cfg.get("resolution", 32)),
+            enc_blocks=int(ae_cfg.get("enc_blocks", 3)),
+            local_enc_blocks=int(ae_cfg.get("local_enc_blocks", 2)),
+            dec_blocks=int(ae_cfg.get("dec_blocks", 3)),
+            log_sigma_clip=log_sigma_clip,
+            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
+            pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
+        ).to(device)
+    elif ae_type in {"lion_mlp", "lion_simple"}:
+        print(f"[ae] LionAutoencoder(MLP): global_dim={global_latent_dim} local_dim={local_latent_dim}")
+        autoencoder = LionAutoencoderMLP(
             num_points=cfg["train"]["num_points"],
             input_dim=3,
             global_latent_dim=global_latent_dim,
             local_latent_dim=local_latent_dim,
             dropout=float(ae_cfg.get("dropout", 0.1)),
             log_sigma_clip=log_sigma_clip,
+            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
+            pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
+        ).to(device)
+    elif ae_type in {"lion_legacy", "lion_vendored", "lion_optimized"}:
+        print(f"[ae] LionAutoencoder(legacy): global_dim={global_latent_dim} local_dim={local_latent_dim}")
+        autoencoder = LionAutoencoderLegacy(
+            num_points=cfg["train"]["num_points"],
+            input_dim=3,
+            global_latent_dim=global_latent_dim,
+            local_latent_dim=local_latent_dim,
+            dropout=float(ae_cfg.get("dropout", 0.1)),
+            log_sigma_clip=log_sigma_clip,
+            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
         ).to(device)
     elif ae_type == "point_mlp":
         latent_dim = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
@@ -150,12 +204,15 @@ def main() -> None:
 
     opt, scheduler, total_steps = build_optimizer_and_scheduler(cfg, autoencoder, steps_per_epoch)
 
-    if kl_anneal_enabled and ae_type == "lion":
+    lion_types = {"lion", "lion_pvcnn", "lion_mlp", "lion_simple", "lion_legacy", "lion_vendored", "lion_optimized"}
+    if kl_anneal_enabled and ae_type in lion_types:
         print(
             "[ae] KL anneal enabled: "
             f"min={kl_min_coeff:g} max={kl_max_coeff:g} "
             f"portion={kl_anneal_portion:g} const_portion={kl_const_portion:g} total_steps={total_steps}"
         )
+    if kl_free_bits > 0:
+        print(f"[ae] Free-bits threshold: {kl_free_bits:g} nats/dim")
 
     use_amp = bool(cfg.get("train", {}).get("amp", False)) and device.type == "cuda"
     amp_forward = bool(cfg.get("train", {}).get("amp_forward", True))
@@ -181,6 +238,10 @@ def main() -> None:
     for epoch in pbar_epochs:
         autoencoder.train()
         epoch_loss = 0.0
+        epoch_recon = 0.0
+        epoch_kl_g = 0.0
+        epoch_kl_l_xyz = 0.0
+        epoch_kl_l_feat = 0.0
         steps = 0
 
         opt.zero_grad(set_to_none=True)
@@ -189,7 +250,7 @@ def main() -> None:
         for x0 in pbar_batch:
             x0 = x0.to(device)
 
-            if kl_anneal_enabled and ae_type == "lion":
+            if kl_anneal_enabled and ae_type in lion_types:
                 kl_weight = kl_coeff(
                     step=opt_step,
                     total_step=float(kl_anneal_portion) * float(total_steps),
@@ -202,7 +263,7 @@ def main() -> None:
 
             try:
                 with torch.amp.autocast('cuda', enabled=(use_amp and amp_forward)):
-                    if ae_type == "lion":
+                    if ae_type in lion_types:
                         x_recon, posterior = autoencoder(x0)
                     else:
                         x_recon, _ = autoencoder(x0)
@@ -213,7 +274,7 @@ def main() -> None:
                         x_recon_c = x_recon.float()
                         x0_c = x0.float()
                         recon_loss = compute_recon_loss(x_recon_c, x0_c)
-                        if ae_type == "lion":
+                        if ae_type in lion_types:
                             assert posterior is not None
                             g_mu = posterior["global_mu"].float()
                             g_logvar = posterior["global_logvar"].float()
@@ -222,16 +283,40 @@ def main() -> None:
                             if log_sigma_clip is not None:
                                 g_logvar = g_logvar.clamp(min=log_sigma_clip[0], max=log_sigma_clip[1])
                                 l_logvar = l_logvar.clamp(min=log_sigma_clip[0], max=log_sigma_clip[1])
-                            kl_global = -0.5 * torch.sum(1 + 2 * g_logvar - g_mu.pow(2) - (2 * g_logvar).exp(), dim=1).mean()
-                            kl_local = -0.5 * torch.sum(1 + 2 * l_logvar - l_mu.pow(2) - (2 * l_logvar).exp(), dim=1).mean()
-                            loss = recon_loss + float(kl_weight) * ((lambda_z * kl_global) + (lambda_h * kl_local))
+                            kl_global = kl_normal_logsigma(g_mu, g_logvar)
+
+                            input_dim = int(getattr(autoencoder, "input_dim", 3))
+                            local_latent_dim_eff = int(getattr(autoencoder, "local_latent_dim", local_latent_dim))
+                            num_points_eff = int(getattr(autoencoder, "num_points", cfg["train"]["num_points"]))
+                            local_expected = num_points_eff * (input_dim + local_latent_dim_eff)
+
+                            kl_l_xyz = torch.tensor(0.0, device=device)
+                            kl_l_feat = torch.tensor(0.0, device=device)
+                            if l_mu.ndim == 2 and l_mu.shape[1] == local_expected:
+                                l_mu_t = l_mu.view(-1, num_points_eff, input_dim + local_latent_dim_eff)
+                                l_ls_t = l_logvar.view(-1, num_points_eff, input_dim + local_latent_dim_eff)
+                                mu_xyz = l_mu_t[..., :input_dim].reshape(l_mu_t.shape[0], -1)
+                                ls_xyz = l_ls_t[..., :input_dim].reshape(l_ls_t.shape[0], -1)
+                                mu_feat = l_mu_t[..., input_dim:].reshape(l_mu_t.shape[0], -1)
+                                ls_feat = l_ls_t[..., input_dim:].reshape(l_ls_t.shape[0], -1)
+                                if mu_xyz.numel() > 0:
+                                    kl_l_xyz = kl_normal_logsigma(mu_xyz, ls_xyz)
+                                if mu_feat.numel() > 0:
+                                    kl_l_feat = kl_normal_logsigma(mu_feat, ls_feat)
+                            else:
+                                kl_l_feat = kl_normal_logsigma(l_mu, l_logvar)
+
+                            kl_local = (lambda_h_xyz * kl_l_xyz) + (lambda_h_feat * kl_l_feat)
+                            loss = recon_loss + float(kl_weight) * ((lambda_z * kl_global) + kl_local)
                         else:
                             kl_global = torch.tensor(0.0, device=device)
+                            kl_l_xyz = torch.tensor(0.0, device=device)
+                            kl_l_feat = torch.tensor(0.0, device=device)
                             kl_local = torch.tensor(0.0, device=device)
                             loss = recon_loss
                 else:
                     recon_loss = compute_recon_loss(x_recon, x0)
-                    if ae_type == "lion":
+                    if ae_type in lion_types:
                         assert posterior is not None
                         g_mu = posterior["global_mu"]
                         g_logvar = posterior["global_logvar"]
@@ -240,11 +325,35 @@ def main() -> None:
                         if log_sigma_clip is not None:
                             g_logvar = g_logvar.clamp(min=log_sigma_clip[0], max=log_sigma_clip[1])
                             l_logvar = l_logvar.clamp(min=log_sigma_clip[0], max=log_sigma_clip[1])
-                        kl_global = -0.5 * torch.sum(1 + 2 * g_logvar - g_mu.pow(2) - (2 * g_logvar).exp(), dim=1).mean()
-                        kl_local = -0.5 * torch.sum(1 + 2 * l_logvar - l_mu.pow(2) - (2 * l_logvar).exp(), dim=1).mean()
-                        loss = recon_loss + float(kl_weight) * ((lambda_z * kl_global) + (lambda_h * kl_local))
+                        kl_global = kl_normal_logsigma(g_mu, g_logvar)
+
+                        input_dim = int(getattr(autoencoder, "input_dim", 3))
+                        local_latent_dim_eff = int(getattr(autoencoder, "local_latent_dim", local_latent_dim))
+                        num_points_eff = int(getattr(autoencoder, "num_points", cfg["train"]["num_points"]))
+                        local_expected = num_points_eff * (input_dim + local_latent_dim_eff)
+
+                        kl_l_xyz = torch.tensor(0.0, device=device)
+                        kl_l_feat = torch.tensor(0.0, device=device)
+                        if l_mu.ndim == 2 and l_mu.shape[1] == local_expected:
+                            l_mu_t = l_mu.view(-1, num_points_eff, input_dim + local_latent_dim_eff)
+                            l_ls_t = l_logvar.view(-1, num_points_eff, input_dim + local_latent_dim_eff)
+                            mu_xyz = l_mu_t[..., :input_dim].reshape(l_mu_t.shape[0], -1)
+                            ls_xyz = l_ls_t[..., :input_dim].reshape(l_ls_t.shape[0], -1)
+                            mu_feat = l_mu_t[..., input_dim:].reshape(l_mu_t.shape[0], -1)
+                            ls_feat = l_ls_t[..., input_dim:].reshape(l_ls_t.shape[0], -1)
+                            if mu_xyz.numel() > 0:
+                                kl_l_xyz = kl_normal_logsigma(mu_xyz, ls_xyz)
+                            if mu_feat.numel() > 0:
+                                kl_l_feat = kl_normal_logsigma(mu_feat, ls_feat)
+                        else:
+                            kl_l_feat = kl_normal_logsigma(l_mu, l_logvar)
+
+                        kl_local = (lambda_h_xyz * kl_l_xyz) + (lambda_h_feat * kl_l_feat)
+                        loss = recon_loss + float(kl_weight) * ((lambda_z * kl_global) + kl_local)
                     else:
                         kl_global = torch.tensor(0.0, device=device)
+                        kl_l_xyz = torch.tensor(0.0, device=device)
+                        kl_l_feat = torch.tensor(0.0, device=device)
                         kl_local = torch.tensor(0.0, device=device)
                         loss = recon_loss
 
@@ -266,7 +375,7 @@ def main() -> None:
                         xr_absmax = float(x_recon.abs().max().item())
                         x0_absmax = float(x0.abs().max().item())
 
-                    if ae_type == "lion":
+                    if ae_type in lion_types:
                         assert posterior is not None
                         g_logvar = posterior["global_logvar"].float() if (loss_fp32 and use_amp) else posterior["global_logvar"]
                         l_logvar = posterior["local_logvar"].float() if (loss_fp32 and use_amp) else posterior["local_logvar"]
@@ -307,6 +416,11 @@ def main() -> None:
                     opt_step += 1
 
                 epoch_loss += report_loss
+                epoch_recon += float(recon_loss.detach().item())
+                epoch_kl_g += float(kl_global.detach().item())
+                if ae_type in lion_types:
+                    epoch_kl_l_xyz += float(kl_l_xyz.detach().item())
+                    epoch_kl_l_feat += float(kl_l_feat.detach().item())
                 steps += 1
                 pbar_batch.set_postfix({"loss": f"{report_loss:.4f}"})
             except torch.cuda.OutOfMemoryError:
@@ -329,6 +443,10 @@ def main() -> None:
             opt_step += 1
 
         avg_loss = epoch_loss / max(1, steps)
+        avg_recon = epoch_recon / max(1, steps)
+        avg_kl_g = epoch_kl_g / max(1, steps)
+        avg_kl_l_xyz = epoch_kl_l_xyz / max(1, steps)
+        avg_kl_l_feat = epoch_kl_l_feat / max(1, steps)
         pbar_epochs.set_postfix({"avg_loss": f"{avg_loss:.4f}", "best": f"{best_loss:.4f}"})
         val_loss = None
         if dl_val is not None:
@@ -372,12 +490,19 @@ def main() -> None:
             "epoch": epoch,
             "avg_loss": avg_loss,
             "val_loss": val_loss,
+            "avg_recon": avg_recon,
+            "avg_kl_global": avg_kl_g,
+            "avg_kl_local_xyz": avg_kl_l_xyz,
+            "avg_kl_local_feat": avg_kl_l_feat,
+            "kl_weight": float(kl_weight),
         }
         training_history["epochs"].append(epoch_metadata)
         save_training_history(cfg["train"]["out_dir"], exp_name, training_history)
         print(
-            f"[ae] epoch {epoch} avg loss {avg_loss:.6f} "
-            + (f"| val loss {val_loss:.6f}" if val_loss is not None else "")
+            f"[ae] epoch {epoch} avg_loss={avg_loss:.6f} avg_recon={avg_recon:.6f} "
+            + (f"| val_loss(recon)={val_loss:.6f}" if val_loss is not None else "")
+            + f" | kl_g={avg_kl_g:.6f} kl_l_xyz={avg_kl_l_xyz:.6f} kl_l_feat={avg_kl_l_feat:.6f}"
+            + f" | kl_w={kl_weight:.6g}"
         )
         
     total_time = None

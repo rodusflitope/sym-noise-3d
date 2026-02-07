@@ -41,7 +41,10 @@ def build_scheduler(cfg: dict, optimizer: torch.optim.Optimizer, steps_per_epoch
         base_lr = _get_base_lr(cfg)
         min_lr_ratio = float(min_lr) / float(base_lr) if base_lr > 0 else 0.0
         lr_lambda = _make_cosine_warmup_lambda(total_steps, warmup_steps, min_lr_ratio)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "Detected call of `lr_scheduler.step\\(\\)` before")
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
         return scheduler, total_steps
 
     raise ValueError(f"lr_scheduler desconocido: {name}")

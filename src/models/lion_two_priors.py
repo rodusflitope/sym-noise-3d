@@ -2,10 +2,48 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from types import SimpleNamespace
 
 from src.models.time_embedding import SinusoidalTimeEmbed
-from .lion_impl.latent_points_ada import PVCNN2Unet, PointTransPVC
+from .pvcnn.voxelize import Voxelization
+from .pvcnn.devoxelize import TrilinearDevoxelization
+
+
+def _group_norm(ch: int) -> nn.GroupNorm:
+    g = min(8, ch)
+    while g > 1 and ch % g != 0:
+        g -= 1
+    return nn.GroupNorm(g, ch)
+
+
+class _AdaPVConv(nn.Module):
+    def __init__(self, c_in: int, c_out: int, resolution: int, style_dim: int):
+        super().__init__()
+        self.voxelize = Voxelization(resolution)
+        self.devoxelize = TrilinearDevoxelization()
+        self.point_in = nn.Sequential(
+            nn.Conv1d(c_in, c_out, 1, bias=False), _group_norm(c_out), nn.SiLU(),
+        )
+        self.voxel_conv = nn.Sequential(
+            nn.Conv3d(c_out, c_out, 3, padding=1, bias=False), _group_norm(c_out), nn.SiLU(),
+            nn.Conv3d(c_out, c_out, 3, padding=1, bias=False), _group_norm(c_out), nn.SiLU(),
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv1d(c_out, c_out, 1, bias=False), _group_norm(c_out), nn.SiLU(),
+        )
+        self.skip = nn.Conv1d(c_in, c_out, 1, bias=False) if c_in != c_out else nn.Identity()
+        self.ada_scale = nn.Linear(style_dim, c_out)
+        self.ada_bias = nn.Linear(style_dim, c_out)
+
+    def forward(self, feats_bcn: torch.Tensor, coords_bnc3: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
+        x_in = self.point_in(feats_bcn)
+        vox = self.voxelize(x_in, coords_bnc3)
+        vox = self.voxel_conv(vox)
+        devox = self.devoxelize(vox, coords_bnc3)
+        out = self.fuse(devox)
+        out = out + self.skip(feats_bcn)
+        s = self.ada_scale(style).unsqueeze(-1)
+        b = self.ada_bias(style).unsqueeze(-1)
+        return out * (1 + s) + b
 
 
 class LionGlobalLatentDDM(nn.Module):
@@ -14,26 +52,27 @@ class LionGlobalLatentDDM(nn.Module):
         style_dim: int = 128,
         time_dim: int = 64,
         hidden_dim: int = 512,
+        num_blocks: int = 4,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
         self.style_dim = int(style_dim)
-        self.time_dim = int(time_dim)
+        self.time_embed = SinusoidalTimeEmbed(int(time_dim))
 
-        self.time_embed = SinusoidalTimeEmbed(self.time_dim)
-        self.net = nn.Sequential(
-            nn.Linear(self.style_dim + self.time_dim, int(hidden_dim)),
-            nn.SiLU(),
-            nn.Dropout(float(dropout)),
-            nn.Linear(int(hidden_dim), self.style_dim),
-            nn.SiLU(),
-            nn.Dropout(float(dropout)),
-        )
-        self.eps_head = nn.Linear(self.style_dim, self.style_dim)
+        layers = []
+        d_in = self.style_dim + int(time_dim)
+        for _ in range(int(num_blocks)):
+            layers.extend([
+                nn.Linear(d_in, int(hidden_dim)),
+                _group_norm(int(hidden_dim)),
+                nn.SiLU(),
+                nn.Dropout(float(dropout)),
+            ])
+            d_in = int(hidden_dim)
+        self.net = nn.Sequential(*layers)
+        self.eps_head = nn.Linear(int(hidden_dim), self.style_dim)
 
     def forward(self, z_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        if z_t.ndim != 2 or z_t.shape[1] != self.style_dim:
-            raise ValueError(f"LionGlobalLatentDDM expects z_t [B,{self.style_dim}], got {tuple(z_t.shape)}")
         t_emb = self.time_embed(t)
         h = self.net(torch.cat([z_t, t_emb], dim=-1))
         return self.eps_head(h)
@@ -47,79 +86,47 @@ class LionLocalLatentDDM(nn.Module):
         style_dim: int = 128,
         local_feat_dim: int = 16,
         time_dim: int = 64,
-        hidden_dim_style: int = 512,
+        hidden_dim: int = 128,
+        resolution: int = 32,
+        num_blocks: int = 4,
         dropout: float = 0.1,
-        width_multiplier: float = 1.0,
-        voxel_resolution_multiplier: float = 1.0,
     ) -> None:
         super().__init__()
         self.num_points = int(num_points)
         self.input_dim = int(input_dim)
         self.style_dim = int(style_dim)
         self.local_feat_dim = int(local_feat_dim)
-        self.time_dim = int(time_dim)
-
         self.local_context_dim = self.input_dim + self.local_feat_dim
         self.local_flat_dim = self.num_points * self.local_context_dim
 
-        self._dummy_cfg = SimpleNamespace(
-            ddpm=SimpleNamespace(
-                input_dim=self.input_dim,
-                dropout=float(dropout),
-            ),
-            latent_pts=SimpleNamespace(
-                style_dim=self.style_dim,
-                skip_weight=0.0,
-                pts_sigma_offset=0.0,
-                latent_dim_ext=[self.local_feat_dim],
-                ada_mlp_init_scale=1e-5,
-            ),
-            data=SimpleNamespace(
-                tr_max_sample_points=self.num_points,
-            ),
+        h = int(hidden_dim)
+        self.time_embed = SinusoidalTimeEmbed(int(time_dim))
+
+        cond_dim = self.style_dim + int(time_dim)
+        self.cond_proj = nn.Sequential(
+            nn.Linear(cond_dim, h), nn.SiLU(), nn.Linear(h, self.style_dim),
         )
 
-        self.local_net = PVCNN2Unet(
-            num_classes=self.local_context_dim,
-            embed_dim=self.time_dim,
-            use_att=1,
-            dropout=float(dropout),
-            extra_feature_channels=self.local_feat_dim,
-            input_dim=self.input_dim,
-            cfg=self._dummy_cfg,
-            sa_blocks=PointTransPVC.sa_blocks,
-            fp_blocks=PointTransPVC.fp_blocks,
-            width_multiplier=width_multiplier,
-            voxel_resolution_multiplier=voxel_resolution_multiplier,
+        self.in_proj = nn.Sequential(
+            nn.Conv1d(self.local_context_dim, h, 1, bias=False), _group_norm(h), nn.SiLU(),
         )
-
-        self.time_embed = SinusoidalTimeEmbed(self.time_dim)
-        self.style_embedder = nn.Sequential(
-            nn.Linear(self.style_dim + self.time_dim, int(hidden_dim_style)),
-            nn.SiLU(),
-            nn.Dropout(float(dropout)),
-            nn.Linear(int(hidden_dim_style), self.style_dim),
-            nn.SiLU(),
-            nn.Dropout(float(dropout)),
-        )
+        self.blocks = nn.ModuleList([
+            _AdaPVConv(h, h, int(resolution), self.style_dim) for _ in range(int(num_blocks))
+        ])
+        self.out_head = nn.Conv1d(h, self.local_context_dim, 1)
 
     def forward(self, h_t: torch.Tensor, z0: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        if h_t.ndim != 2 or h_t.shape[1] != self.local_flat_dim:
-            raise ValueError(f"LionLocalLatentDDM expects h_t [B,{self.local_flat_dim}], got {tuple(h_t.shape)}")
-        if z0.ndim != 2 or z0.shape[1] != self.style_dim:
-            raise ValueError(f"LionLocalLatentDDM expects z0 [B,{self.style_dim}], got {tuple(z0.shape)}")
-        if h_t.shape[0] != z0.shape[0]:
-            raise ValueError(f"LionLocalLatentDDM expects same batch for h_t and z0, got {h_t.shape[0]} and {z0.shape[0]}")
-
+        B = h_t.shape[0]
         t_emb = self.time_embed(t)
-        style_cond = self.style_embedder(torch.cat([z0, t_emb], dim=-1))
+        style = self.cond_proj(torch.cat([z0, t_emb], dim=-1))
 
-        local = h_t.view(-1, self.num_points, self.local_context_dim)
-        local_in = local.permute(0, 2, 1).contiguous()
-
-        eps_local = self.local_net(local_in, t=t.float(), style=style_cond)
-        eps_local = eps_local.permute(0, 2, 1).contiguous().view(-1, self.local_flat_dim)
-        return eps_local
+        local = h_t.view(B, self.num_points, self.local_context_dim)
+        coords = local[..., :3]
+        feats = self.in_proj(local.transpose(1, 2))
+        for blk in self.blocks:
+            feats = blk(feats, coords, style)
+        eps = self.out_head(feats).transpose(1, 2).reshape(B, -1)
+        return eps
 
 
 class LionTwoPriorsDDM(nn.Module):
@@ -131,10 +138,12 @@ class LionTwoPriorsDDM(nn.Module):
         local_feat_dim: int = 16,
         time_dim: int = 64,
         hidden_dim_z: int = 512,
-        hidden_dim_style: int = 512,
+        hidden_dim_h: int = 128,
+        resolution: int = 32,
+        num_blocks_z: int = 4,
+        num_blocks_h: int = 4,
         dropout: float = 0.1,
-        width_multiplier: float = 1.0,
-        voxel_resolution_multiplier: float = 1.0,
+        **_kwargs,
     ) -> None:
         super().__init__()
         self.style_dim = int(style_dim)
@@ -146,6 +155,7 @@ class LionTwoPriorsDDM(nn.Module):
             style_dim=self.style_dim,
             time_dim=int(time_dim),
             hidden_dim=int(hidden_dim_z),
+            num_blocks=int(num_blocks_z),
             dropout=float(dropout),
         )
         self.ddm_h = LionLocalLatentDDM(
@@ -154,16 +164,16 @@ class LionTwoPriorsDDM(nn.Module):
             style_dim=self.style_dim,
             local_feat_dim=self.local_feat_dim,
             time_dim=int(time_dim),
-            hidden_dim_style=int(hidden_dim_style),
+            hidden_dim=int(hidden_dim_h),
+            resolution=int(resolution),
+            num_blocks=int(num_blocks_h),
             dropout=float(dropout),
-            width_multiplier=float(width_multiplier),
-            voxel_resolution_multiplier=float(voxel_resolution_multiplier),
         )
 
     @property
     def local_context_dim(self) -> int:
-        return int(self.input_dim + self.local_feat_dim)
+        return self.input_dim + self.local_feat_dim
 
     @property
     def local_flat_dim(self) -> int:
-        return int(self.num_points * self.local_context_dim)
+        return self.num_points * self.local_context_dim

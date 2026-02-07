@@ -1,7 +1,14 @@
 import argparse, torch, pathlib, numpy as np
 import os
 from src.utils.common import load_cfg, get_device, set_seed
-from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM
+from src.models import (
+    build_model,
+    PointAutoencoder,
+    LionAutoencoder,
+    LionAutoencoderMLP,
+    LionAutoencoderLegacy,
+    LionTwoPriorsDDM,
+)
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler
 from src.utils.checkpoint import load_ckpt, load_ckpt_config
@@ -14,6 +21,8 @@ def _load_autoencoder(cfg, device, ae_ckpt: str):
     ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
     num_points = int(cfg["train"]["num_points"])
 
+    lion_ae_types = {"lion", "lion_pvcnn", "lion_mlp", "lion_simple", "lion_legacy", "lion_vendored", "lion_optimized"}
+
     ckpt_cfg = load_ckpt_config(ae_ckpt)
     if ckpt_cfg is not None:
         ckpt_train = ckpt_cfg.get("train", {})
@@ -24,7 +33,7 @@ def _load_autoencoder(cfg, device, ae_ckpt: str):
                 f"AE num_points mismatch: ckpt={ckpt_num_points} cfg={num_points}. "
                 "Use the same num_points for AE and priors."
             )
-        if ae_type == "lion":
+        if ae_type in lion_ae_types:
             ckpt_g = ckpt_ae.get("global_latent_dim", None)
             ckpt_l = ckpt_ae.get("local_latent_dim", None)
             if ckpt_g is not None and int(ckpt_g) != int(ae_cfg.get("global_latent_dim", 128)):
@@ -36,7 +45,31 @@ def _load_autoencoder(cfg, device, ae_ckpt: str):
                     f"AE local_latent_dim mismatch: ckpt={ckpt_l} cfg={ae_cfg.get('local_latent_dim', 16)}."
                 )
 
-    if ae_type == "lion":
+    if ae_type in {"lion", "lion_pvcnn"}:
+        global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
+        local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
+        log_sigma_clip = None
+        if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
+            clip_cfg = ae_cfg["log_sigma_clip"]
+            if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
+                log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
+            elif isinstance(clip_cfg, dict):
+                log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
+        ae = LionAutoencoder(
+            num_points=num_points,
+            input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
+            global_latent_dim=global_latent_dim,
+            local_latent_dim=local_latent_dim,
+            hidden_dim=int(ae_cfg.get("hidden_dim", 128)),
+            resolution=int(ae_cfg.get("resolution", 32)),
+            enc_blocks=int(ae_cfg.get("enc_blocks", 3)),
+            local_enc_blocks=int(ae_cfg.get("local_enc_blocks", 2)),
+            dec_blocks=int(ae_cfg.get("dec_blocks", 3)),
+            log_sigma_clip=log_sigma_clip,
+            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
+            pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
+        ).to(device)
+    elif ae_type in {"lion_mlp", "lion_simple"}:
         global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
         local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
         dropout = float(ae_cfg.get("dropout", 0.1))
@@ -49,13 +82,40 @@ def _load_autoencoder(cfg, device, ae_ckpt: str):
                 log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
             else:
                 raise ValueError("autoencoder.log_sigma_clip must be [min,max] or {min:..., max:...}")
-        ae = LionAutoencoder(
+        ae = LionAutoencoderMLP(
+            num_points=num_points,
+            input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
+            global_latent_dim=global_latent_dim,
+            local_latent_dim=local_latent_dim,
+            hidden_dim=int(ae_cfg.get("hidden_dim", 256)),
+            dropout=dropout,
+            log_sigma_clip=log_sigma_clip,
+            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
+            pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
+        ).to(device)
+    elif ae_type in {"lion_legacy", "lion_vendored", "lion_optimized"}:
+        global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
+        local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
+        dropout = float(ae_cfg.get("dropout", 0.1))
+        log_sigma_clip = None
+        if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
+            clip_cfg = ae_cfg["log_sigma_clip"]
+            if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
+                log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
+            elif isinstance(clip_cfg, dict):
+                log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
+            else:
+                raise ValueError("autoencoder.log_sigma_clip must be [min,max] or {min:..., max:...}")
+        if LionAutoencoderLegacy is None:
+            raise ValueError("LionAutoencoderLegacy is unavailable in this environment")
+        ae = LionAutoencoderLegacy(
             num_points=num_points,
             input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
             global_latent_dim=global_latent_dim,
             local_latent_dim=local_latent_dim,
             dropout=dropout,
             log_sigma_clip=log_sigma_clip,
+            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
         ).to(device)
     elif ae_type == "point_mlp":
         latent_dim = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
@@ -144,8 +204,9 @@ def main():
             ae = _load_autoencoder(cfg, device, ae_ckpt)
 
             if isinstance(model, LionTwoPriorsDDM):
-                if not isinstance(ae, LionAutoencoder):
-                    raise ValueError("lion_priors requires autoencoder.type='lion'")
+                ae_ok_types = tuple(t for t in (LionAutoencoder, LionAutoencoderMLP, LionAutoencoderLegacy) if t is not None)
+                if not isinstance(ae, ae_ok_types):
+                    raise ValueError("lion_priors requires an autoencoder compatible with LionTwoPriorsDDM")
                 style_dim = int(ae.global_latent_dim)
                 local_dim = int(ae.local_flat_dim)
             else:
@@ -198,12 +259,8 @@ def main():
                 else:
                     raise ValueError(f"Sampler no soportado para modo latente: {sampler_name}")
 
-                if hasattr(ae, "global2style"):
-                    z_t_cond = ae.global2style(z_t)
-                else:
-                    z_t_cond = z_t
-
-                h_model = _HCondWrapper(model, z_t_cond)
+                z0 = z_t
+                h_model = _HCondWrapper(model, z0)
 
                 if sampler_name == 'ddpm':
                     for t in reversed(range(T)):
@@ -219,7 +276,7 @@ def main():
                 else:
                     raise ValueError(f"Sampler no soportado para modo latente: {sampler_name}")
 
-                pcs = ae.decode_split(z_t, h_t)
+                pcs = ae.decode_split(z0, h_t)
             else:
                 if noise_type is not None:
                     z_t = noise_type.sample((num_samples, latent_dim), device)

@@ -15,14 +15,13 @@ from contextlib import nullcontext
 
 from src.data import build_datasets_from_config
 from src.losses import build_loss
-from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM
+from src.models import build_model, PointAutoencoder, LionAutoencoder, LionAutoencoderLegacy, LionTwoPriorsDDM, LionAutoencoderMLP
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_config
 from src.utils.common import load_cfg, set_seed, get_device
 from src.utils.lr import build_optimizer_and_scheduler
 from src.utils.ema import build_ema_model
-
 
 def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
     ae_cfg = cfg.get("autoencoder", {})
@@ -55,7 +54,7 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
                 f"AE num_points mismatch: ckpt={ckpt_num_points} cfg={num_points}. "
                 "Use the same num_points for AE and priors."
             )
-        if ae_type == "lion":
+        if ae_type in {"lion", "lion_simple", "lion_legacy", "lion_vendored", "lion_optimized"}:
             ckpt_g = ckpt_ae.get("global_latent_dim", None)
             ckpt_l = ckpt_ae.get("local_latent_dim", None)
             if ckpt_g is not None and int(ckpt_g) != int(ae_cfg.get("global_latent_dim", 128)):
@@ -67,7 +66,31 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
                     f"AE local_latent_dim mismatch: ckpt={ckpt_l} cfg={ae_cfg.get('local_latent_dim', 16)}."
                 )
 
-    if ae_type == "lion":
+    if ae_type in {"lion", "lion_pvcnn"}:
+        global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
+        local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
+        log_sigma_clip = None
+        if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
+            clip_cfg = ae_cfg["log_sigma_clip"]
+            if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
+                log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
+            elif isinstance(clip_cfg, dict):
+                log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
+        ae = LionAutoencoder(
+            num_points=num_points,
+            input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
+            global_latent_dim=global_latent_dim,
+            local_latent_dim=local_latent_dim,
+            hidden_dim=int(ae_cfg.get("hidden_dim", 128)),
+            resolution=int(ae_cfg.get("resolution", 32)),
+            enc_blocks=int(ae_cfg.get("enc_blocks", 3)),
+            local_enc_blocks=int(ae_cfg.get("local_enc_blocks", 2)),
+            dec_blocks=int(ae_cfg.get("dec_blocks", 3)),
+            log_sigma_clip=log_sigma_clip,
+            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
+            pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
+        ).to(device)
+    elif ae_type in {"lion_mlp", "lion_simple"}:
         global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
         local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
         dropout = float(ae_cfg.get("dropout", 0.1))
@@ -81,7 +104,7 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
                 log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
             else:
                 raise ValueError("autoencoder.log_sigma_clip must be [min,max] or {min:..., max:...}")
-        ae = LionAutoencoder(
+        ae = LionAutoencoderLegacy(
             num_points=num_points,
             input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
             global_latent_dim=global_latent_dim,
@@ -207,7 +230,8 @@ def main() -> None:
             persistent_workers=persistent_workers,
         )
 
-    use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, LionAutoencoder))
+    ae_ok_types = tuple(t for t in (LionAutoencoder, LionAutoencoderMLP, LionAutoencoderLegacy) if t is not None)
+    use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, ae_ok_types))
     loss_fn = None if use_two_priors else build_loss(cfg)
     steps_per_epoch = math.ceil(len(ds) / cfg["train"]["batch_size"]) if len(ds) > 0 else 0
     opt, scheduler, total_steps = build_optimizer_and_scheduler(cfg, model, steps_per_epoch)
@@ -277,15 +301,14 @@ def main() -> None:
                     with torch.no_grad():
                         z0, h0 = autoencoder.encode_split(x0, sample=True)
 
-                    z_t, eps_z = forward.add_noise(z0, t)
-                    h_t, eps_h = forward.add_noise(h0, t)
+                    t_z = sample_timesteps(B, T, device)
+                    t_h = sample_timesteps(B, T, device)
 
-                    eps_pred_z = model.ddm_z(z_t, t)
-                    if hasattr(autoencoder, "global2style"):
-                        z0_cond = autoencoder.global2style(z0)
-                    else:
-                        z0_cond = z0
-                    eps_pred_h = model.ddm_h(h_t, z0_cond, t)
+                    z_t, eps_z = forward.add_noise(z0, t_z)
+                    h_t, eps_h = forward.add_noise(h0, t_h)
+
+                    eps_pred_z = model.ddm_z(z_t, t_z)
+                    eps_pred_h = model.ddm_h(h_t, z0, t_h)
 
                     mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
                     mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
@@ -372,14 +395,12 @@ def main() -> None:
                     with autocast_ctx():
                         if use_two_priors:
                             z0, h0 = autoencoder.encode_split(x0, sample=False)
-                            z_t, eps_z = forward.add_noise(z0, t)
-                            h_t, eps_h = forward.add_noise(h0, t)
-                            eps_pred_z = model_to_eval.ddm_z(z_t, t)
-                            if hasattr(autoencoder, "global2style"):
-                                z0_cond = autoencoder.global2style(z0)
-                            else:
-                                z0_cond = z0
-                            eps_pred_h = model_to_eval.ddm_h(h_t, z0_cond, t)
+                            t_z = torch.randint(0, T, (B,), generator=g_val, dtype=torch.long).to(device)
+                            t_h = torch.randint(0, T, (B,), generator=g_val, dtype=torch.long).to(device)
+                            z_t, eps_z = forward.add_noise(z0, t_z)
+                            h_t, eps_h = forward.add_noise(h0, t_h)
+                            eps_pred_z = model_to_eval.ddm_z(z_t, t_z)
+                            eps_pred_h = model_to_eval.ddm_h(h_t, z0, t_h)
                             mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
                             mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
                             w_z = float(cfg.get("loss", {}).get("w_z", 1.0))

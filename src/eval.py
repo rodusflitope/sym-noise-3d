@@ -8,7 +8,14 @@ import torch
 from typing import Optional
 
 from src.utils.common import load_cfg, get_device, set_seed
-from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM
+from src.models import (
+    build_model,
+    PointAutoencoder,
+    LionAutoencoder,
+    LionAutoencoderMLP,
+    LionAutoencoderLegacy,
+    LionTwoPriorsDDM,
+)
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler
 from src.data import ShapeNetDataset
@@ -186,7 +193,7 @@ def evaluate(
 
             ae_cfg = cfg.get("autoencoder", {})
             ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
-            if ae_type == "lion":
+            if ae_type in {"lion", "lion_simple"}:
                 global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
                 local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
                 dropout = float(ae_cfg.get("dropout", 0.1))
@@ -206,6 +213,30 @@ def evaluate(
                     local_latent_dim=local_latent_dim,
                     dropout=dropout,
                     log_sigma_clip=log_sigma_clip,
+                    skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
+                    pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
+                ).to(device)
+            elif ae_type in {"lion_legacy", "lion_vendored", "lion_optimized"}:
+                global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
+                local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
+                dropout = float(ae_cfg.get("dropout", 0.1))
+                log_sigma_clip = None
+                if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
+                    clip_cfg = ae_cfg["log_sigma_clip"]
+                    if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
+                        log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
+                    elif isinstance(clip_cfg, dict):
+                        log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
+                    else:
+                        raise ValueError("autoencoder.log_sigma_clip must be [min,max] or {min:..., max:...}")
+                ae = LionAutoencoderLegacy(
+                    num_points=num_points,
+                    input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
+                    global_latent_dim=global_latent_dim,
+                    local_latent_dim=local_latent_dim,
+                    dropout=dropout,
+                    log_sigma_clip=log_sigma_clip,
+                    skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
                 ).to(device)
             elif ae_type == "point_mlp":
                 latent_dim_cfg = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
@@ -218,8 +249,10 @@ def evaluate(
             ae.eval()
 
             is_lion_two_priors = bool(isinstance(model, LionTwoPriorsDDM))
-            if is_lion_two_priors and not isinstance(ae, LionAutoencoder):
-                raise ValueError("lion_priors requiere autoencoder.type='lion' y usar LionAutoencoder")
+            if is_lion_two_priors:
+                ae_ok_types = tuple(t for t in (LionAutoencoder, LionAutoencoderMLP, LionAutoencoderLegacy) if t is not None)
+                if not isinstance(ae, ae_ok_types):
+                    raise ValueError("lion_priors requiere un autoencoder compatible con LionTwoPriorsDDM")
 
             if not is_lion_two_priors:
                 if hasattr(ae, "latent_dim_total"):
@@ -277,7 +310,8 @@ def evaluate(
                 else:
                     raise ValueError(f"Sampler no soportado: {sampler_name}")
 
-                h_model = _HCondWrapper(model, z_t)
+                z0 = z_t
+                h_model = _HCondWrapper(model, z0)
 
                 if sampler_name == "ddpm":
                     for t in reversed(range(T)):
@@ -293,7 +327,7 @@ def evaluate(
                 else:
                     raise ValueError(f"Sampler no soportado: {sampler_name}")
 
-                samples = ae.decode_split(z_t, h_t).detach().cpu()
+                samples = ae.decode_split(z0, h_t).detach().cpu()
             else:
                 if noise_type is not None:
                     z_t = noise_type.sample((num_samples, latent_dim), device)

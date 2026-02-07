@@ -6,7 +6,7 @@ use_latent_diffusion: true
 
 data:
   root_dir: "data/ShapeNetCore"
-  max_models: 2000
+  max_models: 1000
   augment: false
   val_frac: 0.1
   test_frac: 0.1
@@ -17,27 +17,34 @@ model:
   input_dim: 3
   time_dim: 64
   hidden_dim_z: 512
-  hidden_dim_style: 512
+  hidden_dim_h: 128
+  resolution: 32
+  num_blocks_z: 4
+  num_blocks_h: 4
   dropout: 0.1
-  width_multiplier: 0.6
-  voxel_resolution_multiplier: 0.6
 
 autoencoder:
   type: "lion"
   global_latent_dim: 128
   local_latent_dim: 16
-  dropout: 0.1
+  hidden_dim: 128
+  resolution: 32
+  enc_blocks: 3
+  local_enc_blocks: 2
+  dec_blocks: 3
+  skip_weight: 0.01
+  pts_sigma_offset: 2.0
   log_sigma_clip: [-10.0, 2.0]
-  kl_weight_global: 0.001
-  kl_weight_local: 0.001
-  epochs: 200
 
 loss:
   w_z: 1.0
   w_h: 1.0
 
 train:
-  batch_size: 32
+  batch_size: 4
+  grad_accum_steps: 8
+  amp: true
+  amp_dtype: "fp16"
   epochs: 100
   log_every: 50
   num_points: 1024
@@ -65,5 +72,5 @@ ema:
 lr_scheduler:
   name: "cosine_warmup"
   warmup_steps: 1000
-  base_lr: 0.0002
-  min_lr: 0.00001
+  base_lr: 2.0e-4
+  min_lr: 1.0e-5
