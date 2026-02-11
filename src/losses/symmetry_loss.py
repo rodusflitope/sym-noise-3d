@@ -1,9 +1,20 @@
+import warnings
+
 import torch
 import torch.nn.functional as F
 from src.metrics.metrics import chamfer_distance
 
+
 class SymmetricLoss:
+    """Deprecated: use ReflectionSymmetryProperty via structural_properties instead."""
+
     def __init__(self, base_loss_fn, weight: float, warmup_steps: int, axis: int = 0):
+        warnings.warn(
+            "SymmetricLoss is deprecated. Use ReflectionSymmetryProperty from "
+            "src.structural_properties.reflection_symmetry instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.base_loss_fn = base_loss_fn
         self.weight = weight
         self.warmup_steps = warmup_steps

@@ -329,7 +329,7 @@ def main() -> None:
                     x_t, eps = forward.add_noise(x0, t)
                     eps_pred = model(x_t, t)
                     assert loss_fn is not None
-                    loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+                    loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step, x_t=x_t)
 
 
             opt.zero_grad(set_to_none=True)

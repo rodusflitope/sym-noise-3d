@@ -11,3 +11,4 @@ ninja
 geomloss
 loguru
 einops
+pytest

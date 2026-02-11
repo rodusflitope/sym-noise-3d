@@ -42,7 +42,7 @@ def build_loss(cfg):
     else:
          raise ValueError(f"Unknown weighting type: {weighting}")
 
-    def composed_loss(pred, target, alpha_bar_t=None, current_step=None):
+    def composed_loss(pred, target, alpha_bar_t=None, current_step=None, **kwargs):
         raw_loss = base_loss_fn(pred, target)
         
         style_weight = loss_cfg.get("style_weight", 1.0)

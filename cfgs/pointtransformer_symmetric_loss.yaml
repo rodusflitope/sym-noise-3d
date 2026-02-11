@@ -22,6 +22,8 @@ loss:
   symmetry:
     weight: 0.02
     warmup_steps: 2000
+    metric: "cd"
+    axis: 0
 
 train:
   batch_size: 64

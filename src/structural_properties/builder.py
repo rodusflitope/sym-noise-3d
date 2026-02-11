@@ -31,6 +31,7 @@ def build_structural_properties(cfg: dict) -> list[StructuralProperty]:
                     noise_active_dims=params.get("noise_active_dims", None),
                     loss_weight=float(params.get("loss_weight", 0.0)),
                     loss_warmup_steps=int(params.get("loss_warmup_steps", 0)),
+                    metric=str(params.get("metric", "cd")),
                     voxel_stages=params.get("voxel_stages", []),
                     voxel_reduce=str(params.get("voxel_reduce", "avg")),
                 )
@@ -59,6 +60,7 @@ def build_structural_properties(cfg: dict) -> list[StructuralProperty]:
                 noise_mode=None,
                 loss_weight=float(sym_loss_cfg.get("weight", 0.1)),
                 loss_warmup_steps=int(sym_loss_cfg.get("warmup_steps", 0)),
+                metric=str(sym_loss_cfg.get("metric", "cd")),
             )
         )
 
