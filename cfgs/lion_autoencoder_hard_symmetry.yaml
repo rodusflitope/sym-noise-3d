@@ -1,4 +1,4 @@
-exp_name: "lion-ae-train"
+exp_name: "lion-ae-train-hard-symmetry"
 seed: 10
 device: "auto"
 
@@ -44,7 +44,7 @@ autoencoder:
     axis: 0
     metric: "chamfer"
     hard:
-      enabled: false
+      enabled: true
     soft:
       recon_weight: 0.0
       latent_weight: 0.0

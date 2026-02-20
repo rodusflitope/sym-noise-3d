@@ -8,6 +8,10 @@ This repo supports two main training workflows:
 
 Below are concise instructions to run each stage end-to-end.
 
+Workspace note:
+- In this thesis workspace, run commands from the workspace root (`Tesis`) and prefix script/config paths with `sym-noise-3d/`.
+- Example: `python sym-noise-3d/src/train.py --cfg sym-noise-3d/cfgs/pointnet.yaml`.
+
 ## 1. Setup
 
 1. Create and activate a virtual environment (example using PowerShell):

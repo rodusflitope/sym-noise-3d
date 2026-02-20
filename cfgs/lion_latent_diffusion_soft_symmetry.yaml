@@ -1,0 +1,76 @@
+exp_name: "lion-latent-diffusion-soft-symmetry"
+seed: 10
+device: "auto"
+
+use_latent_diffusion: true
+
+data:
+  root_dir: "data/ShapeNetCore"
+  max_models: 1000
+  augment: false
+  val_frac: 0.1
+  test_frac: 0.1
+  categories: ["02691156"]
+
+model:
+  name: "lion_priors"
+  input_dim: 3
+  time_dim: 64
+  hidden_dim_z: 512
+  hidden_dim_h: 128
+  resolution: 32
+  num_blocks_z: 4
+  num_blocks_h: 4
+  dropout: 0.1
+
+autoencoder:
+  type: "lion"
+  global_latent_dim: 96
+  local_latent_dim: 8
+  hidden_dim: 96
+  resolution: 24
+  enc_blocks: 2
+  local_enc_blocks: 1
+  dec_blocks: 2
+  skip_weight: 0.01
+  pts_sigma_offset: 2.0
+  log_sigma_clip: [-10.0, 2.0]
+
+loss:
+  w_z: 1.0
+  w_h: 1.0
+
+train:
+  batch_size: 4
+  grad_accum_steps: 8
+  amp: true
+  amp_dtype: "fp16"
+  epochs: 100
+  log_every: 50
+  num_points: 512
+  num_workers: 8
+  out_dir: "runs"
+
+diffusion:
+  T: 1000
+  beta_start: 0.0001
+  beta_end: 0.01
+  schedule: "scaled_linear"
+  noise_type: "gaussian"
+
+sampler:
+  name: "ddpm"
+  eta: 1.0
+  num_samples: 4
+  save_dir: "samples"
+  save_format: "npy"
+
+ema:
+  use: true
+  beta: 0.999
+
+lr_scheduler:
+  name: "cosine_warmup"
+  warmup_steps: 1000
+  base_lr: 2.0e-4
+  min_lr: 1.0e-5

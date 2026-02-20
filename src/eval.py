@@ -12,14 +12,12 @@ from src.models import (
     build_model,
     PointAutoencoder,
     LionAutoencoder,
-    LionAutoencoderMLP,
-    LionAutoencoderLegacy,
     LionTwoPriorsDDM,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler
 from src.data import ShapeNetDataset
-from src.metrics import chamfer_distance, earth_movers_distance, compute_all_metrics
+from src.metrics import chamfer_distance, earth_movers_distance, reflection_symmetry_distance, compute_all_metrics
 from src.utils.checkpoint import load_ckpt_config
 
 
@@ -193,10 +191,9 @@ def evaluate(
 
             ae_cfg = cfg.get("autoencoder", {})
             ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
-            if ae_type in {"lion", "lion_simple"}:
+            if ae_type in {"lion", "lion_pvcnn"}:
                 global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
                 local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
-                dropout = float(ae_cfg.get("dropout", 0.1))
                 log_sigma_clip = None
                 if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
                     clip_cfg = ae_cfg["log_sigma_clip"]
@@ -211,32 +208,16 @@ def evaluate(
                     input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
                     global_latent_dim=global_latent_dim,
                     local_latent_dim=local_latent_dim,
-                    dropout=dropout,
+                    hidden_dim=int(ae_cfg.get("hidden_dim", 128)),
+                    resolution=int(ae_cfg.get("resolution", 32)),
+                    enc_blocks=int(ae_cfg.get("enc_blocks", 3)),
+                    local_enc_blocks=int(ae_cfg.get("local_enc_blocks", 2)),
+                    dec_blocks=int(ae_cfg.get("dec_blocks", 3)),
                     log_sigma_clip=log_sigma_clip,
                     skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
                     pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
-                ).to(device)
-            elif ae_type in {"lion_legacy", "lion_vendored", "lion_optimized"}:
-                global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
-                local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
-                dropout = float(ae_cfg.get("dropout", 0.1))
-                log_sigma_clip = None
-                if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
-                    clip_cfg = ae_cfg["log_sigma_clip"]
-                    if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
-                        log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
-                    elif isinstance(clip_cfg, dict):
-                        log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
-                    else:
-                        raise ValueError("autoencoder.log_sigma_clip must be [min,max] or {min:..., max:...}")
-                ae = LionAutoencoderLegacy(
-                    num_points=num_points,
-                    input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
-                    global_latent_dim=global_latent_dim,
-                    local_latent_dim=local_latent_dim,
-                    dropout=dropout,
-                    log_sigma_clip=log_sigma_clip,
-                    skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
+                    hard_symmetry_enabled=bool(((ae_cfg.get("symmetry", {}) or {}).get("hard", {}) or {}).get("enabled", False)),
+                    symmetry_axis=int((ae_cfg.get("symmetry", {}) or {}).get("axis", 0)),
                 ).to(device)
             elif ae_type == "point_mlp":
                 latent_dim_cfg = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
@@ -250,7 +231,7 @@ def evaluate(
 
             is_lion_two_priors = bool(isinstance(model, LionTwoPriorsDDM))
             if is_lion_two_priors:
-                ae_ok_types = tuple(t for t in (LionAutoencoder, LionAutoencoderMLP, LionAutoencoderLegacy) if t is not None)
+                ae_ok_types = (LionAutoencoder,)
                 if not isinstance(ae, ae_ok_types):
                     raise ValueError("lion_priors requiere un autoencoder compatible con LionTwoPriorsDDM")
 
@@ -378,11 +359,20 @@ def evaluate(
     cd_vals = chamfer_distance(gen, gt)
     emd_vals = earth_movers_distance(gen, gt, max_points=max_points)
 
+    sym_axis = int(cfg.get("symmetry", {}).get("axis", 0))
+    rsd_gen_vals = reflection_symmetry_distance(gen, axis=sym_axis, per_sample=True)
+    rsd_gt_vals = reflection_symmetry_distance(gt, axis=sym_axis, per_sample=True)
+
     mean_cd = cd_vals.mean().item() if cd_vals.numel() > 0 else float("nan")
     mean_emd = emd_vals.mean().item() if emd_vals.numel() > 0 else float("nan")
+    mean_rsd_gen = rsd_gen_vals.mean().item()
+    mean_rsd_gt = rsd_gt_vals.mean().item()
 
     print(f"Chamfer Distance (mean over {n_eval} samples): {mean_cd:.6f}")
     print(f"Earth Mover's Distance (mean, over {n_eval} samples): {mean_emd:.6f}")
+    print(f"Reflection Symmetry Distance - Generated (mean): {mean_rsd_gen:.6f}")
+    print(f"Reflection Symmetry Distance - Ground Truth (mean): {mean_rsd_gt:.6f}")
+    print(f"RSD ratio (gen/gt, closer to 1.0 = better): {mean_rsd_gen / max(mean_rsd_gt, 1e-10):.4f}")
 
     print("[eval] Computing advanced metrics (CD & EMD)...")
     
@@ -418,6 +408,17 @@ def evaluate(
                 "mean": float(mean_emd),
                 "values": [float(v) for v in emd_vals.detach().cpu().tolist()],
             },
+            "rsd_gen": {
+                "mean": float(mean_rsd_gen),
+                "axis": sym_axis,
+                "values": [float(v) for v in rsd_gen_vals.detach().cpu().tolist()],
+            },
+            "rsd_gt": {
+                "mean": float(mean_rsd_gt),
+                "axis": sym_axis,
+                "values": [float(v) for v in rsd_gt_vals.detach().cpu().tolist()],
+            },
+            "rsd_ratio": float(mean_rsd_gen / max(mean_rsd_gt, 1e-10)),
             **adv_metrics 
         },
     }

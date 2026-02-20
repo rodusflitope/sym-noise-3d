@@ -25,6 +25,12 @@ def _ensure_bnc3(x: torch.Tensor) -> torch.Tensor:
     raise ValueError(f"Expected [B,N,3] or [B,3,N], got shape={tuple(x.shape)}")
 
 
+def _reflect_points(points_bnc3: torch.Tensor, axis: int) -> torch.Tensor:
+    reflected = points_bnc3.clone()
+    reflected[:, :, axis] = -reflected[:, :, axis]
+    return reflected
+
+
 class _PVConv(nn.Module):
     def __init__(self, c_in: int, c_out: int, resolution: int):
         super().__init__()
@@ -154,6 +160,8 @@ class LionAutoencoder(nn.Module):
         log_sigma_clip: tuple[float, float] | None = None,
         skip_weight: float = 0.01,
         pts_sigma_offset: float = 2.0,
+        hard_symmetry_enabled: bool = False,
+        symmetry_axis: int = 0,
     ) -> None:
         super().__init__()
         self.input_dim = int(input_dim)
@@ -164,6 +172,13 @@ class LionAutoencoder(nn.Module):
         self.log_sigma_clip = log_sigma_clip
         self.skip_weight = float(skip_weight)
         self.pts_sigma_offset = float(pts_sigma_offset)
+        self.hard_symmetry_enabled = bool(hard_symmetry_enabled)
+        self.symmetry_axis = int(symmetry_axis)
+
+        if self.symmetry_axis < 0 or self.symmetry_axis > 2:
+            raise ValueError(f"symmetry_axis must be one of [0,1,2], got {self.symmetry_axis}")
+        if self.hard_symmetry_enabled and (self.num_points % 2 != 0):
+            raise ValueError("hard_symmetry_enabled requires an even num_points")
 
         self.global_encoder = _PVCNNEncoder(
             in_ch=self.input_dim,
@@ -230,7 +245,14 @@ class LionAutoencoder(nn.Module):
     def _decode_impl(self, z_global: torch.Tensor, z_local_flat: torch.Tensor) -> torch.Tensor:
         B = z_global.shape[0]
         z_local = z_local_flat.view(B, self.num_points, self.local_context_dim)
-        return self.decoder(z_local, z_global)
+        if not self.hard_symmetry_enabled:
+            return self.decoder(z_local, z_global)
+
+        half_points = self.num_points // 2
+        z_local_half = z_local[:, :half_points, :]
+        x_half = self.decoder(z_local_half, z_global)
+        x_reflected = _reflect_points(x_half, self.symmetry_axis)
+        return torch.cat([x_half, x_reflected], dim=1)
 
     def split_latent(self, z: torch.Tensor):
         z_g = z[:, :self.global_latent_dim]

@@ -93,6 +93,22 @@ def earth_movers_distance(
     return torch.tensor(emd_vals, device=x.device, dtype=x.dtype)
 
 
+def reflection_symmetry_distance(
+    x: torch.Tensor,
+    axis: int = 0,
+    per_sample: bool = False,
+) -> torch.Tensor:
+    x = _ensure_bnc3(x, name="x")
+    centroid = x.mean(dim=1, keepdim=True)
+    x_centered = x - centroid
+    x_reflected = x_centered.clone()
+    x_reflected[:, :, axis] = -x_reflected[:, :, axis]
+    cd = chamfer_distance(x_centered, x_reflected)
+    if per_sample:
+        return cd
+    return cd.mean()
+
+
 def compute_pairwise_dist_batch(
     x: torch.Tensor, 
     y: torch.Tensor, 

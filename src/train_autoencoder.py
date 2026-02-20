@@ -16,12 +16,8 @@ except Exception:
         return x
 
 from src.data import build_datasets_from_config
-from src.metrics import chamfer_distance, earth_movers_distance
-from src.models import LionAutoencoder, LionAutoencoderMLP, PointAutoencoder
-try:
-    from src.models import LionAutoencoderLegacy
-except Exception:
-    LionAutoencoderLegacy = None
+from src.metrics import chamfer_distance, earth_movers_distance, reflection_symmetry_distance
+from src.models import LionAutoencoder, PointAutoencoder
 from src.utils.common import load_cfg, set_seed, get_device, kl_coeff
 from src.utils.lr import build_optimizer_and_scheduler
 from src.utils.checkpoint import save_ckpt, save_training_history
@@ -85,6 +81,33 @@ def main() -> None:
     emd_max_points = ae_cfg.get("emd_max_points")
     emd_max_points = int(emd_max_points) if emd_max_points is not None else None
 
+    symmetry_cfg = ae_cfg.get("symmetry", {}) or {}
+    symmetry_axis = int(symmetry_cfg.get("axis", 0))
+    if symmetry_axis not in {0, 1, 2}:
+        raise ValueError("autoencoder.symmetry.axis must be one of [0,1,2]")
+    symmetry_metric = str(symmetry_cfg.get("metric", "chamfer")).lower()
+    symmetry_hard_enabled = bool((symmetry_cfg.get("hard", {}) or {}).get("enabled", False))
+    symmetry_soft_cfg = symmetry_cfg.get("soft", {}) or {}
+    symmetry_recon_weight = float(symmetry_soft_cfg.get("recon_weight", 0.0))
+    symmetry_latent_weight = float(symmetry_soft_cfg.get("latent_weight", 0.0))
+    symmetry_log_cfg = symmetry_cfg.get("log", {}) or {}
+    symmetry_log_reflection = bool(symmetry_log_cfg.get("use_reflection_metric", True))
+    symmetry_log_reflection_max_points = int(symmetry_log_cfg.get("reflection_max_points", 256))
+
+    def reflect_points(x: torch.Tensor, axis: int) -> torch.Tensor:
+        y = x.clone()
+        y[:, :, axis] = -y[:, :, axis]
+        return y
+
+    def maybe_subsample_points(x: torch.Tensor, max_points: int | None) -> torch.Tensor:
+        if max_points is None or max_points <= 0:
+            return x
+        n_points = x.shape[1]
+        if n_points <= max_points:
+            return x
+        idx = torch.randperm(n_points, device=x.device)[:max_points]
+        return x[:, idx, :]
+
     def compute_recon_loss(x_recon: torch.Tensor, x_gt: torch.Tensor) -> torch.Tensor:
         if recon_loss_name in {"cd", "chamfer"}:
             d = chamfer_distance(x_recon, x_gt)
@@ -97,6 +120,27 @@ def main() -> None:
                 raise ValueError(f"L1 recon requires same shape, got {tuple(x_recon.shape)} and {tuple(x_gt.shape)}")
             return F.l1_loss(x_recon, x_gt, reduction="mean")
         raise ValueError(f"Unknown autoencoder.recon_loss: {recon_loss_name}")
+
+    def compute_symmetry_recon_loss(x_recon: torch.Tensor) -> torch.Tensor:
+        x_recon_reflected = reflect_points(x_recon, symmetry_axis)
+        if symmetry_metric in {"cd", "chamfer"}:
+            return chamfer_distance(x_recon, x_recon_reflected).mean()
+        if symmetry_metric == "emd":
+            d = earth_movers_distance(x_recon, x_recon_reflected, max_points=emd_max_points)
+            return d.mean() if hasattr(d, "ndim") and d.ndim > 0 else d
+        raise ValueError("autoencoder.symmetry.metric must be 'chamfer'/'cd' or 'emd'")
+
+    def compute_latent_symmetry_loss(x_input: torch.Tensor) -> torch.Tensor:
+        x_reflected = reflect_points(x_input, symmetry_axis)
+        _, mu, _ = autoencoder._encode_global(x_input, sample=False)
+        _, mu_reflected, _ = autoencoder._encode_global(x_reflected, sample=False)
+        return F.mse_loss(mu, mu_reflected, reduction="mean")
+
+    def compute_reflection_log_metric(x_recon: torch.Tensor) -> torch.Tensor:
+        if not symmetry_log_reflection:
+            return torch.tensor(0.0, device=x_recon.device)
+        x_small = maybe_subsample_points(x_recon, symmetry_log_reflection_max_points)
+        return reflection_symmetry_distance(x_small, axis=symmetry_axis, per_sample=False)
 
     def kl_normal_logsigma(mu: torch.Tensor, log_sigma: torch.Tensor) -> torch.Tensor:
         if mu.shape != log_sigma.shape:
@@ -126,29 +170,8 @@ def main() -> None:
             log_sigma_clip=log_sigma_clip,
             skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
             pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
-        ).to(device)
-    elif ae_type in {"lion_mlp", "lion_simple"}:
-        print(f"[ae] LionAutoencoder(MLP): global_dim={global_latent_dim} local_dim={local_latent_dim}")
-        autoencoder = LionAutoencoderMLP(
-            num_points=cfg["train"]["num_points"],
-            input_dim=3,
-            global_latent_dim=global_latent_dim,
-            local_latent_dim=local_latent_dim,
-            dropout=float(ae_cfg.get("dropout", 0.1)),
-            log_sigma_clip=log_sigma_clip,
-            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
-            pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
-        ).to(device)
-    elif ae_type in {"lion_legacy", "lion_vendored", "lion_optimized"}:
-        print(f"[ae] LionAutoencoder(legacy): global_dim={global_latent_dim} local_dim={local_latent_dim}")
-        autoencoder = LionAutoencoderLegacy(
-            num_points=cfg["train"]["num_points"],
-            input_dim=3,
-            global_latent_dim=global_latent_dim,
-            local_latent_dim=local_latent_dim,
-            dropout=float(ae_cfg.get("dropout", 0.1)),
-            log_sigma_clip=log_sigma_clip,
-            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
+            hard_symmetry_enabled=symmetry_hard_enabled,
+            symmetry_axis=symmetry_axis,
         ).to(device)
     elif ae_type == "point_mlp":
         latent_dim = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
@@ -204,7 +227,7 @@ def main() -> None:
 
     opt, scheduler, total_steps = build_optimizer_and_scheduler(cfg, autoencoder, steps_per_epoch)
 
-    lion_types = {"lion", "lion_pvcnn", "lion_mlp", "lion_simple", "lion_legacy", "lion_vendored", "lion_optimized"}
+    lion_types = {"lion", "lion_pvcnn"}
     if kl_anneal_enabled and ae_type in lion_types:
         print(
             "[ae] KL anneal enabled: "
@@ -242,7 +265,13 @@ def main() -> None:
         epoch_kl_g = 0.0
         epoch_kl_l_xyz = 0.0
         epoch_kl_l_feat = 0.0
+        epoch_sym_recon_raw = 0.0
+        epoch_sym_recon_weighted = 0.0
+        epoch_sym_latent_raw = 0.0
+        epoch_sym_latent_weighted = 0.0
+        epoch_reflection_metric = 0.0
         steps = 0
+        last_kl_weight = 1.0
 
         opt.zero_grad(set_to_none=True)
         
@@ -260,6 +289,7 @@ def main() -> None:
                 )
             else:
                 kl_weight = 1.0
+            last_kl_weight = float(kl_weight)
 
             try:
                 with torch.amp.autocast('cuda', enabled=(use_amp and amp_forward)):
@@ -268,6 +298,12 @@ def main() -> None:
                     else:
                         x_recon, _ = autoencoder(x0)
                         posterior = None
+
+                sym_recon_raw = torch.tensor(0.0, device=device)
+                sym_recon_weighted = torch.tensor(0.0, device=device)
+                sym_latent_raw = torch.tensor(0.0, device=device)
+                sym_latent_weighted = torch.tensor(0.0, device=device)
+                reflection_metric = torch.tensor(0.0, device=device)
 
                 if loss_fp32 and use_amp:
                     with torch.amp.autocast('cuda', enabled=False):
@@ -308,6 +344,16 @@ def main() -> None:
 
                             kl_local = (lambda_h_xyz * kl_l_xyz) + (lambda_h_feat * kl_l_feat)
                             loss = recon_loss + float(kl_weight) * ((lambda_z * kl_global) + kl_local)
+
+                            if symmetry_recon_weight > 0:
+                                sym_recon_raw = compute_symmetry_recon_loss(x_recon_c)
+                                sym_recon_weighted = float(symmetry_recon_weight) * sym_recon_raw
+                                loss = loss + sym_recon_weighted
+                            if symmetry_latent_weight > 0:
+                                sym_latent_raw = compute_latent_symmetry_loss(x0_c)
+                                sym_latent_weighted = float(symmetry_latent_weight) * sym_latent_raw
+                                loss = loss + sym_latent_weighted
+                            reflection_metric = compute_reflection_log_metric(x_recon_c)
                         else:
                             kl_global = torch.tensor(0.0, device=device)
                             kl_l_xyz = torch.tensor(0.0, device=device)
@@ -350,6 +396,16 @@ def main() -> None:
 
                         kl_local = (lambda_h_xyz * kl_l_xyz) + (lambda_h_feat * kl_l_feat)
                         loss = recon_loss + float(kl_weight) * ((lambda_z * kl_global) + kl_local)
+
+                        if symmetry_recon_weight > 0:
+                            sym_recon_raw = compute_symmetry_recon_loss(x_recon)
+                            sym_recon_weighted = float(symmetry_recon_weight) * sym_recon_raw
+                            loss = loss + sym_recon_weighted
+                        if symmetry_latent_weight > 0:
+                            sym_latent_raw = compute_latent_symmetry_loss(x0)
+                            sym_latent_weighted = float(symmetry_latent_weight) * sym_latent_raw
+                            loss = loss + sym_latent_weighted
+                        reflection_metric = compute_reflection_log_metric(x_recon)
                     else:
                         kl_global = torch.tensor(0.0, device=device)
                         kl_l_xyz = torch.tensor(0.0, device=device)
@@ -421,6 +477,11 @@ def main() -> None:
                 if ae_type in lion_types:
                     epoch_kl_l_xyz += float(kl_l_xyz.detach().item())
                     epoch_kl_l_feat += float(kl_l_feat.detach().item())
+                    epoch_sym_recon_raw += float(sym_recon_raw.detach().item())
+                    epoch_sym_recon_weighted += float(sym_recon_weighted.detach().item())
+                    epoch_sym_latent_raw += float(sym_latent_raw.detach().item())
+                    epoch_sym_latent_weighted += float(sym_latent_weighted.detach().item())
+                    epoch_reflection_metric += float(reflection_metric.detach().item())
                 steps += 1
                 pbar_batch.set_postfix({"loss": f"{report_loss:.4f}"})
             except torch.cuda.OutOfMemoryError:
@@ -447,11 +508,24 @@ def main() -> None:
         avg_kl_g = epoch_kl_g / max(1, steps)
         avg_kl_l_xyz = epoch_kl_l_xyz / max(1, steps)
         avg_kl_l_feat = epoch_kl_l_feat / max(1, steps)
+        avg_sym_recon_raw = epoch_sym_recon_raw / max(1, steps)
+        avg_sym_recon_weighted = epoch_sym_recon_weighted / max(1, steps)
+        avg_sym_latent_raw = epoch_sym_latent_raw / max(1, steps)
+        avg_sym_latent_weighted = epoch_sym_latent_weighted / max(1, steps)
+        avg_reflection_metric = epoch_reflection_metric / max(1, steps)
         pbar_epochs.set_postfix({"avg_loss": f"{avg_loss:.4f}", "best": f"{best_loss:.4f}"})
         val_loss = None
+        val_sym_recon_raw = None
+        val_sym_recon_weighted = None
+        val_sym_latent_raw = None
+        val_sym_latent_weighted = None
+        val_reflection_metric = None
         if dl_val is not None:
             autoencoder.eval()
             v_sum = 0.0
+            v_sym_recon = 0.0
+            v_sym_latent = 0.0
+            v_reflect = 0.0
             v_steps = 0
             with torch.no_grad():
                 for x0 in dl_val:
@@ -459,8 +533,21 @@ def main() -> None:
                     x_recon, _ = autoencoder(x0)
                     loss = compute_recon_loss(x_recon, x0)
                     v_sum += loss.item()
+                    if ae_type in lion_types:
+                        s_recon = compute_symmetry_recon_loss(x_recon)
+                        s_latent = compute_latent_symmetry_loss(x0)
+                        s_reflect = compute_reflection_log_metric(x_recon)
+                        v_sym_recon += float(s_recon.item())
+                        v_sym_latent += float(s_latent.item())
+                        v_reflect += float(s_reflect.item())
                     v_steps += 1
             val_loss = v_sum / max(1, v_steps)
+            if ae_type in lion_types:
+                val_sym_recon_raw = v_sym_recon / max(1, v_steps)
+                val_sym_recon_weighted = float(symmetry_recon_weight) * val_sym_recon_raw
+                val_sym_latent_raw = v_sym_latent / max(1, v_steps)
+                val_sym_latent_weighted = float(symmetry_latent_weight) * val_sym_latent_raw
+                val_reflection_metric = v_reflect / max(1, v_steps)
             autoencoder.train()
             
         ckpt_metadata = {
@@ -494,7 +581,17 @@ def main() -> None:
             "avg_kl_global": avg_kl_g,
             "avg_kl_local_xyz": avg_kl_l_xyz,
             "avg_kl_local_feat": avg_kl_l_feat,
-            "kl_weight": float(kl_weight),
+            "avg_sym_recon_raw": avg_sym_recon_raw,
+            "avg_sym_recon_weighted": avg_sym_recon_weighted,
+            "avg_sym_latent_raw": avg_sym_latent_raw,
+            "avg_sym_latent_weighted": avg_sym_latent_weighted,
+            "avg_reflection_symmetry": avg_reflection_metric,
+            "val_sym_recon_raw": val_sym_recon_raw,
+            "val_sym_recon_weighted": val_sym_recon_weighted,
+            "val_sym_latent_raw": val_sym_latent_raw,
+            "val_sym_latent_weighted": val_sym_latent_weighted,
+            "val_reflection_symmetry": val_reflection_metric,
+            "kl_weight": float(last_kl_weight),
         }
         training_history["epochs"].append(epoch_metadata)
         save_training_history(cfg["train"]["out_dir"], exp_name, training_history)
@@ -502,7 +599,10 @@ def main() -> None:
             f"[ae] epoch {epoch} avg_loss={avg_loss:.6f} avg_recon={avg_recon:.6f} "
             + (f"| val_loss(recon)={val_loss:.6f}" if val_loss is not None else "")
             + f" | kl_g={avg_kl_g:.6f} kl_l_xyz={avg_kl_l_xyz:.6f} kl_l_feat={avg_kl_l_feat:.6f}"
-            + f" | kl_w={kl_weight:.6g}"
+            + f" | sym_recon={avg_sym_recon_raw:.6f}/{avg_sym_recon_weighted:.6f}"
+            + f" | sym_latent={avg_sym_latent_raw:.6f}/{avg_sym_latent_weighted:.6f}"
+            + f" | sym_metric={avg_reflection_metric:.6f}"
+            + f" | kl_w={last_kl_weight:.6g}"
         )
         
     total_time = None

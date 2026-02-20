@@ -15,7 +15,7 @@ from contextlib import nullcontext
 
 from src.data import build_datasets_from_config
 from src.losses import build_loss
-from src.models import build_model, PointAutoencoder, LionAutoencoder, LionAutoencoderLegacy, LionTwoPriorsDDM, LionAutoencoderMLP
+from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_config
@@ -54,7 +54,7 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
                 f"AE num_points mismatch: ckpt={ckpt_num_points} cfg={num_points}. "
                 "Use the same num_points for AE and priors."
             )
-        if ae_type in {"lion", "lion_simple", "lion_legacy", "lion_vendored", "lion_optimized"}:
+        if ae_type in {"lion", "lion_pvcnn"}:
             ckpt_g = ckpt_ae.get("global_latent_dim", None)
             ckpt_l = ckpt_ae.get("local_latent_dim", None)
             if ckpt_g is not None and int(ckpt_g) != int(ae_cfg.get("global_latent_dim", 128)):
@@ -89,29 +89,8 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
             log_sigma_clip=log_sigma_clip,
             skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
             pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
-        ).to(device)
-    elif ae_type in {"lion_mlp", "lion_simple"}:
-        global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
-        local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
-        dropout = float(ae_cfg.get("dropout", 0.1))
-        skip_weight = float(ae_cfg.get("skip_weight", 0.01))
-        log_sigma_clip = None
-        if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
-            clip_cfg = ae_cfg["log_sigma_clip"]
-            if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
-                log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
-            elif isinstance(clip_cfg, dict):
-                log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
-            else:
-                raise ValueError("autoencoder.log_sigma_clip must be [min,max] or {min:..., max:...}")
-        ae = LionAutoencoderLegacy(
-            num_points=num_points,
-            input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
-            global_latent_dim=global_latent_dim,
-            local_latent_dim=local_latent_dim,
-            dropout=dropout,
-            log_sigma_clip=log_sigma_clip,
-            skip_weight=skip_weight,
+            hard_symmetry_enabled=bool(((ae_cfg.get("symmetry", {}) or {}).get("hard", {}) or {}).get("enabled", False)),
+            symmetry_axis=int((ae_cfg.get("symmetry", {}) or {}).get("axis", 0)),
         ).to(device)
     elif ae_type == "point_mlp":
         latent_dim = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
@@ -230,7 +209,7 @@ def main() -> None:
             persistent_workers=persistent_workers,
         )
 
-    ae_ok_types = tuple(t for t in (LionAutoencoder, LionAutoencoderMLP, LionAutoencoderLegacy) if t is not None)
+    ae_ok_types = (LionAutoencoder,)
     use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, ae_ok_types))
     loss_fn = None if use_two_priors else build_loss(cfg)
     steps_per_epoch = math.ceil(len(ds) / cfg["train"]["batch_size"]) if len(ds) > 0 else 0

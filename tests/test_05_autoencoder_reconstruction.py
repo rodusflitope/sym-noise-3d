@@ -34,10 +34,9 @@ def _load_autoencoder(cfg, device, ae_ckpt: str):
 
     num_points = int(cfg["train"]["num_points"])
 
-    if ae_type == "lion":
+    if ae_type in {"lion", "lion_pvcnn"}:
         global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
         local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
-        dropout = float(ae_cfg.get("dropout", 0.1))
         log_sigma_clip = None
         if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
             clip_cfg = ae_cfg["log_sigma_clip"]
@@ -50,8 +49,16 @@ def _load_autoencoder(cfg, device, ae_ckpt: str):
             input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
             global_latent_dim=global_latent_dim,
             local_latent_dim=local_latent_dim,
-            dropout=dropout,
+            hidden_dim=int(ae_cfg.get("hidden_dim", 128)),
+            resolution=int(ae_cfg.get("resolution", 32)),
+            enc_blocks=int(ae_cfg.get("enc_blocks", 3)),
+            local_enc_blocks=int(ae_cfg.get("local_enc_blocks", 2)),
+            dec_blocks=int(ae_cfg.get("dec_blocks", 3)),
             log_sigma_clip=log_sigma_clip,
+            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
+            pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
+            hard_symmetry_enabled=bool(((ae_cfg.get("symmetry", {}) or {}).get("hard", {}) or {}).get("enabled", False)),
+            symmetry_axis=int((ae_cfg.get("symmetry", {}) or {}).get("axis", 0)),
         ).to(device)
     elif ae_type == "point_mlp":
         latent_dim = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
