@@ -13,6 +13,7 @@ from src.models import (
     PointAutoencoder,
     LionAutoencoder,
     LionTwoPriorsDDM,
+    PVCNNSymLearnedPlane,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler
@@ -182,7 +183,49 @@ def evaluate(
         raise ValueError("[eval] num_samples inválido o no hay datos para evaluar.")
 
     with torch.no_grad():
-        if not use_latent:
+        if isinstance(model, PVCNNSymLearnedPlane) and not use_latent:
+            sqrt_alpha_bars = torch.sqrt(alpha_bars)
+            sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
+            T = betas.shape[0]
+
+            if noise_type is not None:
+                x_t = noise_type.sample((num_samples, num_points, 3), device)
+            else:
+                x_t = torch.randn(num_samples, num_points, 3, device=device)
+
+            for t in reversed(range(T)):
+                B = x_t.shape[0]
+                t_batch = torch.full((B,), t, dtype=torch.long, device=device)
+
+                result = model(x_t, t_batch)
+                eps_half = result["eps_pred_half"]
+                indices = result["indices"]
+                n_plane, d_plane = result["n"], result["d"]
+
+                idx_exp = indices.unsqueeze(-1).expand(-1, -1, 3)
+                X_half = torch.gather(x_t, 1, idx_exp)
+
+                s_ab = sqrt_alpha_bars[t]
+                s_1m = sqrt_one_minus_alpha_bars[t]
+                x0_half = (X_half - s_1m * eps_half) / s_ab
+                x0_half = x0_half.clamp(-2, 2)
+
+                x0_other = PVCNNSymLearnedPlane.reflect(x0_half, n_plane, d_plane)
+                x0_full = torch.cat([x0_half, x0_other], dim=1)
+
+                if t == 0:
+                    x_t = x0_full
+                else:
+                    s_ab_prev = sqrt_alpha_bars[t - 1]
+                    s_1m_prev = sqrt_one_minus_alpha_bars[t - 1]
+                    if noise_type is not None:
+                        z = noise_type.sample(x0_full.shape, device)
+                    else:
+                        z = torch.randn_like(x0_full)
+                    x_t = s_ab_prev * x0_full + s_1m_prev * z
+
+            samples = x_t.detach().cpu()
+        elif not use_latent:
             samples = sampler.sample(model, num_samples, num_points).detach().cpu()
         else:
             ae_ckpt = ae_ckpt or os.getenv("AE_CHECKPOINT", None)

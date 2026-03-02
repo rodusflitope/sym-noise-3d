@@ -4,6 +4,7 @@ from .pointtransformer_eps import PointTransformerEpsilon
 from .latent_eps import LatentEpsilonMLP
 from .autoencoder import PointAutoencoder
 from .lion_ae import LionAutoencoder
+from .pvcnn_sym_learned_plane import PVCNNSymLearnedPlane
 from .builder import build_model
 
 try:
@@ -18,6 +19,7 @@ __all__ = [
     "LatentEpsilonMLP",
     "PointAutoencoder",
     "LionAutoencoder",
+    "PVCNNSymLearnedPlane",
     "build_model",
     "LionTwoPriorsDDM",
 ]

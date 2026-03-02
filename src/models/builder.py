@@ -85,6 +85,24 @@ def build_model(cfg):
             num_blocks=num_blocks,
             cfg=cfg,
         )
+    elif name == "pvcnn_sym_learned_plane":
+        from .pvcnn_sym_learned_plane import PVCNNSymLearnedPlane
+
+        plane_hidden_dim = int(cfg["model"].get("plane_hidden_dim", 64))
+        backbone_hidden_dim = int(cfg["model"].get("hidden_dim", 128))
+        time_dim = int(cfg["model"].get("time_dim", 64))
+        resolution = int(cfg["model"].get("resolution", 16))
+        num_blocks = int(cfg["model"].get("num_blocks", 2))
+        tau = float(cfg["model"].get("tau", 0.1))
+
+        return PVCNNSymLearnedPlane(
+            plane_hidden_dim=plane_hidden_dim,
+            backbone_hidden_dim=backbone_hidden_dim,
+            time_dim=time_dim,
+            resolution=resolution,
+            num_blocks=num_blocks,
+            tau=tau,
+        )
     elif name in {"legacy_pvcnn", "pvcnn_legacy"}:
         from .legacy_pvcnn import LegacyPVCNNEpsilon
 
