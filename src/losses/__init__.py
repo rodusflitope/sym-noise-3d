@@ -9,8 +9,6 @@ from .builder import build_loss
 from .sym_plane import (
     SymLearnedPlaneLoss,
     build_sym_learned_plane_loss,
-    SymLearnedPlaneReconstructLoss,
-    build_sym_plane_reconstruct_loss,
 )
 
 __all__ = [
@@ -22,6 +20,4 @@ __all__ = [
     "build_loss",
     "SymLearnedPlaneLoss",
     "build_sym_learned_plane_loss",
-    "SymLearnedPlaneReconstructLoss",
-    "build_sym_plane_reconstruct_loss",
 ]

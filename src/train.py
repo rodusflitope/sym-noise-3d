@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from contextlib import nullcontext
 
 from src.data import build_datasets_from_config
-from src.losses import build_loss, build_sym_learned_plane_loss, build_sym_plane_reconstruct_loss
+from src.losses import build_loss, build_sym_learned_plane_loss
 from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
@@ -214,16 +214,9 @@ def main() -> None:
     use_sym_plane = isinstance(model, PVCNNSymLearnedPlane)
     
     sym_plane_loss_fn = None
-    is_sym_plane_recon = False
     if use_sym_plane:
-        loss_name = str(cfg.get("loss", {}).get("name", "sym_plane")).lower()
-        if loss_name == "sym_plane_reconstruct":
-            sym_plane_loss_fn = build_sym_plane_reconstruct_loss(cfg)
-            is_sym_plane_recon = True
-            print("[train] MODE: PVCNN Symmetric Learned Plane (Reconstruct Loss)")
-        else:
-            sym_plane_loss_fn = build_sym_learned_plane_loss(cfg)
-            print("[train] MODE: PVCNN Symmetric Learned Plane")
+        sym_plane_loss_fn = build_sym_learned_plane_loss(cfg)
+        print("[train] MODE: PVCNN Symmetric Learned Plane")
 
     loss_fn = None if (use_two_priors or use_sym_plane) else build_loss(cfg)
     steps_per_epoch = math.ceil(len(ds) / cfg["train"]["batch_size"]) if len(ds) > 0 else 0
@@ -383,19 +376,12 @@ def main() -> None:
                         f"| lr={current_lr:.6f}"
                     )
                 elif use_sym_plane:
-                    if is_sym_plane_recon:
-                        print(
-                            f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} "
-                            f"| loss_recon={float(loss_sym.detach().item()):.6f} "
-                            f"| lr={current_lr:.6f}"
-                        )
-                    else:
-                        print(
-                            f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} "
-                            f"| loss_diff={float(loss_diff.detach().item()):.6f} "
-                            f"| loss_sym={float(loss_sym.detach().item()):.6f} "
-                            f"| lr={current_lr:.6f}"
-                        )
+                    print(
+                        f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} "
+                        f"| loss_diff={float(loss_diff.detach().item()):.6f} "
+                        f"| loss_sym={float(loss_sym.detach().item()):.6f} "
+                        f"| lr={current_lr:.6f}"
+                    )
                 else:
                     print(
                         f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} | lr={current_lr:.6f}"
@@ -489,20 +475,12 @@ def main() -> None:
                     f"| Time: {epoch_time:.2f}s =="
                 )
             elif use_sym_plane and val_loss_diff is not None and val_loss_sym is not None:
-                if is_sym_plane_recon:
-                    print(
-                        f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} "
-                        f"(recon={avg_epoch_loss_sym:.6f}) "
-                        f"| Val loss: {val_loss:.6f} (recon={val_loss_sym:.6f}) "
-                        f"| Time: {epoch_time:.2f}s =="
-                    )
-                else:
-                    print(
-                        f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} "
-                        f"(diff={avg_epoch_loss_diff:.6f}, sym={avg_epoch_loss_sym:.6f}) "
-                        f"| Val loss: {val_loss:.6f} (diff={val_loss_diff:.6f}, sym={val_loss_sym:.6f}) "
-                        f"| Time: {epoch_time:.2f}s =="
-                    )
+                print(
+                    f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} "
+                    f"(diff={avg_epoch_loss_diff:.6f}, sym={avg_epoch_loss_sym:.6f}) "
+                    f"| Val loss: {val_loss:.6f} (diff={val_loss_diff:.6f}, sym={val_loss_sym:.6f}) "
+                    f"| Time: {epoch_time:.2f}s =="
+                )
             else:
                 print(
                     f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} | Val loss: {val_loss:.6f} | Time: {epoch_time:.2f}s =="
