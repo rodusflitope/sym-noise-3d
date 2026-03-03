@@ -515,7 +515,10 @@ def main() -> None:
         }
 
         ema_state = ema.module.state_dict() if ema is not None else None
-        save_ckpt(model, cfg["train"]["out_dir"], exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata, ema_state=ema_state)
+        
+        if epoch % 10 == 0:
+            save_ckpt(model, cfg["train"]["out_dir"], exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata, ema_state=ema_state)
+            
         save_ckpt(model, cfg["train"]["out_dir"], exp_name, "last.pt", metadata=ckpt_metadata, ema_state=ema_state)
 
         sel = val_loss if val_loss is not None else avg_epoch_loss
