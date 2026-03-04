@@ -310,7 +310,7 @@ def main() -> None:
                     x_t, eps = forward.add_noise(x0, t)
                     result = model(x_t, t)
                     loss, loss_diff, loss_sym = sym_plane_loss_fn(
-                        result, eps, x_t, x0, alpha_bars[t]
+                        result, eps, x_t, x0, alpha_bars[t], current_step=global_step
                     )
                 elif use_latent:
                     with torch.no_grad():
@@ -431,7 +431,7 @@ def main() -> None:
                             x_t, eps = forward.add_noise(x0, t)
                             result = model_to_eval(x_t, t)
                             l, ld, ls = sym_plane_loss_fn(
-                                result, eps, x_t, x0, alpha_bars[t]
+                                result, eps, x_t, x0, alpha_bars[t], current_step=global_step
                             )
                             v_loss_diff_sum += float(ld.item())
                             v_loss_sym_sum += float(ls.item())

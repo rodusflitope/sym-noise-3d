@@ -7,10 +7,11 @@ from src.metrics.metrics import chamfer_distance, earth_movers_distance
 
 
 class SymLearnedPlaneLoss:
-    def __init__(self, lambda_sym: float = 1.0, lambda_diff: float = 1.0, metric: str = "cd"):
-        self.lambda_sym = lambda_sym
+    def __init__(self, lambda_sym: float = 1.0, lambda_diff: float = 1.0, metric: str = "cd", warmup_steps: int = 1000):
+        self.lambda_sym_max = lambda_sym
         self.lambda_diff = lambda_diff
         self.metric = metric.lower()
+        self.warmup_steps = warmup_steps
 
     @staticmethod
     def _reflect(points: torch.Tensor, n: torch.Tensor, d: torch.Tensor):
@@ -24,6 +25,7 @@ class SymLearnedPlaneLoss:
         x_t: torch.Tensor,
         x0: torch.Tensor,
         alpha_bar_t: torch.Tensor,
+        current_step: int = None,
         **kwargs,
     ):
         eps_pred_half = model_output["eps_pred_half"]
@@ -49,7 +51,12 @@ class SymLearnedPlaneLoss:
         else:
             loss_sym = chamfer_distance(x0_reconstructed, x0).mean()
 
-        loss = self.lambda_diff * loss_diff + self.lambda_sym * loss_sym
+        current_lambda_sym = self.lambda_sym_max
+        if self.warmup_steps > 0 and current_step is not None:
+            warmup_factor = min(1.0, current_step / self.warmup_steps)
+            current_lambda_sym = self.lambda_sym_max * warmup_factor
+
+        loss = self.lambda_diff * loss_diff + current_lambda_sym * loss_sym
         return loss, loss_diff, loss_sym
 
 
@@ -57,4 +64,5 @@ def build_sym_learned_plane_loss(cfg: dict) -> SymLearnedPlaneLoss:
     lambda_sym = float(cfg.get("loss", {}).get("lambda_sym", 1.0))
     lambda_diff = float(cfg.get("loss", {}).get("lambda_diff", 1.0))
     metric = str(cfg.get("loss", {}).get("metric", "cd")).lower()
-    return SymLearnedPlaneLoss(lambda_sym=lambda_sym, lambda_diff=lambda_diff, metric=metric)
+    warmup_steps = int(cfg.get("loss", {}).get("warmup_steps", 1000))
+    return SymLearnedPlaneLoss(lambda_sym=lambda_sym, lambda_diff=lambda_diff, metric=metric, warmup_steps=warmup_steps)

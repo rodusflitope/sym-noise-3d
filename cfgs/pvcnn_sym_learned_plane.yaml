@@ -19,9 +19,9 @@ model:
   tau: 0.1
 
 loss:
-  name: "sym_plane"
   lambda_sym: 1.0
   lambda_diff: 1.0
+  metric: "cd"
 
 train:
   batch_size: 32

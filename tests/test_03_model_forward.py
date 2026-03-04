@@ -161,26 +161,42 @@ def main():
         with torch.no_grad():
             eps_pred = model(x_t, t)
 
-    mse = torch.mean((eps_pred - eps) ** 2).item()
-    
-    eps_pred_mean = eps_pred.mean().item()
-    eps_pred_std = eps_pred.std().item()
-    eps_true_mean = eps.mean().item()
-    eps_true_std = eps.std().item()
-
-    loss_fn = build_loss(cfg)
-    loss_name = cfg["loss"]["name"]
-    if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
-        alpha_bar_t = alpha_bars[t]
-        train_loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t).item()
+    if isinstance(eps_pred, dict) and "eps_pred_half" in eps_pred:
+        eps_real_half = torch.gather(eps, 1, eps_pred["indices"].unsqueeze(-1).expand(-1, -1, 3))
+        mse = torch.mean((eps_pred["eps_pred_half"] - eps_real_half) ** 2).item()
+        eps_pred_tensor = eps_pred["eps_pred_half"]
+        eps_true_tensor = eps_real_half
     else:
-        train_loss = loss_fn(eps_pred, eps).item()
+        mse = torch.mean((eps_pred - eps) ** 2).item()
+        eps_pred_tensor = eps_pred
+        eps_true_tensor = eps
+    
+    eps_pred_mean = eps_pred_tensor.mean().item()
+    eps_pred_std = eps_pred_tensor.std().item()
+    eps_true_mean = eps_true_tensor.mean().item()
+    eps_true_std = eps_true_tensor.std().item()
+
+    from src.models import PVCNNSymLearnedPlane
+    if isinstance(model, PVCNNSymLearnedPlane):
+        from src.losses import build_sym_learned_plane_loss
+        loss_fn = build_sym_learned_plane_loss(cfg)
+        train_loss, _, _ = loss_fn(eps_pred, eps, x_t, x0, alpha_bar_t=alpha_bars[t])
+        train_loss = train_loss.item()
+        loss_name = "sym_learned_plane"
+    else:
+        loss_fn = build_loss(cfg)
+        loss_name = cfg["loss"]["name"]
+        if loss_name in ["snr_weighted", "min_snr", "p2_weighted", "truncated_snr"]:
+            alpha_bar_t = alpha_bars[t]
+            train_loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bar_t).item()
+        else:
+            train_loss = loss_fn(eps_pred, eps).item()
 
     metrics = {
         "x0_shape": list(x0.shape),
         "x_t_shape": list(x_t.shape),
         "eps_shape": list(eps.shape),
-        "eps_pred_shape": list(eps_pred.shape),
+        "eps_pred_shape": list(eps_pred_tensor.shape),
         "eps_pred_mean": float(eps_pred_mean),
         "eps_pred_std": float(eps_pred_std),
         "eps_true_mean": float(eps_true_mean),

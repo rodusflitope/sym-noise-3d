@@ -21,7 +21,7 @@ class MiniPointNet(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(hidden_dim + time_dim, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 4),
+            nn.Linear(hidden_dim, 3),
         )
 
     def forward(self, x_t: torch.Tensor, t: torch.LongTensor):
@@ -29,8 +29,11 @@ class MiniPointNet(nn.Module):
         global_feat = feats.max(dim=1)[0]
         t_emb = self.time_embed(t)
         out = self.head(torch.cat([global_feat, t_emb], dim=-1))
-        n = F.normalize(out[:, :3], dim=-1)
-        d = torch.tanh(out[:, 3:])
+        n = F.normalize(out, dim=-1)
+        
+        proj = torch.bmm(x_t, n.unsqueeze(2)).squeeze(2)
+        d = torch.median(proj, dim=1, keepdim=True).values
+        
         return n, d
 
 
