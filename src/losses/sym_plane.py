@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 
@@ -14,6 +16,11 @@ class SymLearnedPlaneLoss:
         self.warmup_steps = warmup_steps
 
     @staticmethod
+    def _compute_plane_offset(points: torch.Tensor, n: torch.Tensor):
+        proj = torch.bmm(points, n.unsqueeze(2)).squeeze(2)
+        return torch.median(proj, dim=1, keepdim=True).values
+
+    @staticmethod
     def _reflect(points: torch.Tensor, n: torch.Tensor, d: torch.Tensor):
         dist = torch.bmm(points, n.unsqueeze(2)).squeeze(2) - d
         return points - 2.0 * dist.unsqueeze(-1) * n.unsqueeze(1)
@@ -25,13 +32,13 @@ class SymLearnedPlaneLoss:
         x_t: torch.Tensor,
         x0: torch.Tensor,
         alpha_bar_t: torch.Tensor,
-        current_step: int = None,
+        current_step: Optional[int] = None,
         **kwargs,
     ):
         eps_pred_half = model_output["eps_pred_half"]
         indices = model_output["indices"]
         n = model_output["n"]
-        d = model_output["d"]
+        d = self._compute_plane_offset(x_t, n)
 
         B = eps.shape[0]
         idx_exp = indices.unsqueeze(-1).expand(-1, -1, 3)

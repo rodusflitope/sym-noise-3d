@@ -200,7 +200,8 @@ def evaluate(
                 result = model(x_t, t_batch)
                 eps_half = result["eps_pred_half"]
                 indices = result["indices"]
-                n_plane, d_plane = result["n"], result["d"]
+                n_plane = result["n"]
+                d_plane = model.compute_plane_offset(x_t, n_plane)
 
                 idx_exp = indices.unsqueeze(-1).expand(-1, -1, 3)
                 X_half = torch.gather(x_t, 1, idx_exp)

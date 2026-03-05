@@ -103,6 +103,28 @@ def build_model(cfg):
             num_blocks=num_blocks,
             tau=tau,
         )
+    elif name == "pt_sym_learned_plane":
+        from .pt_sym_learned_plane import PTSymLearnedPlane
+
+        plane_hidden_dim = int(cfg["model"].get("plane_hidden_dim", 64))
+        backbone_hidden_dim = int(cfg["model"].get("hidden_dim", 128))
+        time_dim = int(cfg["model"].get("time_dim", 64))
+        num_heads = int(cfg["model"].get("num_heads", 4))
+        num_layers = int(cfg["model"].get("num_layers", 2))
+        use_fourier_features = bool(cfg["model"].get("use_fourier_features", False))
+        use_symmetric_attention = bool(cfg["model"].get("use_symmetric_attention", False))
+        tau = float(cfg["model"].get("tau", 0.1))
+
+        return PTSymLearnedPlane(
+            plane_hidden_dim=plane_hidden_dim,
+            backbone_hidden_dim=backbone_hidden_dim,
+            time_dim=time_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            use_fourier_features=use_fourier_features,
+            use_symmetric_attention=use_symmetric_attention,
+            tau=tau,
+        )
     elif name in {"legacy_pvcnn", "pvcnn_legacy"}:
         from .legacy_pvcnn import LegacyPVCNNEpsilon
 

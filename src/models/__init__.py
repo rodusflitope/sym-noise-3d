@@ -5,6 +5,7 @@ from .latent_eps import LatentEpsilonMLP
 from .autoencoder import PointAutoencoder
 from .lion_ae import LionAutoencoder
 from .pvcnn_sym_learned_plane import PVCNNSymLearnedPlane
+from .pt_sym_learned_plane import PTSymLearnedPlane
 from .builder import build_model
 
 try:
@@ -20,6 +21,7 @@ __all__ = [
     "PointAutoencoder",
     "LionAutoencoder",
     "PVCNNSymLearnedPlane",
+    "PTSymLearnedPlane",
     "build_model",
     "LionTwoPriorsDDM",
 ]

@@ -7,6 +7,7 @@ from src.models import (
     LionAutoencoder,
     LionTwoPriorsDDM,
     PVCNNSymLearnedPlane,
+    PTSymLearnedPlane,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler
@@ -147,7 +148,7 @@ def main():
     use_latent = bool(cfg.get("use_latent_diffusion", False))
 
     with torch.no_grad():
-        if isinstance(model, PVCNNSymLearnedPlane) and not use_latent:
+        if isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane)) and not use_latent:
             print("[sample] MODE: Symmetric Diffusion (predict x0, reflect, re-noise)")
             sqrt_alpha_bars = torch.sqrt(alpha_bars)
             sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
@@ -164,7 +165,8 @@ def main():
                 result = model(x_t, t_batch)
                 eps_half = result["eps_pred_half"]
                 indices = result["indices"]
-                n_plane, d_plane = result["n"], result["d"]
+                n_plane = result["n"]
+                d_plane = model.compute_plane_offset(x_t, n_plane)
 
                 idx_exp = indices.unsqueeze(-1).expand(-1, -1, 3)
                 X_half = torch.gather(x_t, 1, idx_exp)
@@ -174,7 +176,7 @@ def main():
                 x0_half = (X_half - s_1m * eps_half) / s_ab
                 x0_half = x0_half.clamp(-2, 2)
 
-                x0_other = PVCNNSymLearnedPlane.reflect(x0_half, n_plane, d_plane)
+                x0_other = model.reflect(x0_half, n_plane, d_plane)
                 x0_full = torch.cat([x0_half, x0_other], dim=1)
 
                 if t == 0:

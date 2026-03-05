@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.models.time_embedding import SinusoidalTimeEmbed
-from src.models.pvcnn import PVCNNEpsilon
+from src.models.pointtransformer_eps import PointTransformerEpsilon
 
 
 class MiniPointNet(nn.Module):
@@ -33,27 +33,30 @@ class MiniPointNet(nn.Module):
         return n
 
 
-class PVCNNSymLearnedPlane(nn.Module):
+class PTSymLearnedPlane(nn.Module):
     def __init__(
         self,
         *,
         plane_hidden_dim: int = 64,
         backbone_hidden_dim: int = 128,
         time_dim: int = 64,
-        resolution: int = 16,
-        num_blocks: int = 2,
+        num_heads: int = 4,
+        num_layers: int = 2,
+        use_fourier_features: bool = False,
+        use_symmetric_attention: bool = False,
         tau: float = 0.1,
     ):
         super().__init__()
         self.plane_estimator = MiniPointNet(
             hidden_dim=plane_hidden_dim, time_dim=time_dim
         )
-        self.pvcnn = PVCNNEpsilon(
+        self.backbone = PointTransformerEpsilon(
             hidden_dim=backbone_hidden_dim,
             time_dim=time_dim,
-            resolution=resolution,
-            num_blocks=num_blocks,
-            cfg=None,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            use_fourier_features=use_fourier_features,
+            use_symmetric_attention=use_symmetric_attention,
         )
         self.tau = tau
 
@@ -87,12 +90,12 @@ class PVCNNSymLearnedPlane(nn.Module):
     def forward(self, x_t: torch.Tensor, t: torch.LongTensor):
         if x_t.ndim != 3 or x_t.shape[-1] != 3:
             raise ValueError(
-                f"PVCNNSymLearnedPlane expects x_t [B,N,3], got {tuple(x_t.shape)}"
+                f"PTSymLearnedPlane expects x_t [B,N,3], got {tuple(x_t.shape)}"
             )
 
         n = self.plane_estimator(x_t, t)
         X_half, indices = self._select_half(x_t, n)
-        eps_pred_half = self.pvcnn(X_half, t)
+        eps_pred_half = self.backbone(X_half, t)
 
         return {
             "eps_pred_half": eps_pred_half,

@@ -15,7 +15,7 @@ from contextlib import nullcontext
 
 from src.data import build_datasets_from_config
 from src.losses import build_loss, build_sym_learned_plane_loss
-from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane
+from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane, PTSymLearnedPlane
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_config
@@ -211,12 +211,12 @@ def main() -> None:
 
     ae_ok_types = (LionAutoencoder,)
     use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, ae_ok_types))
-    use_sym_plane = isinstance(model, PVCNNSymLearnedPlane)
+    use_sym_plane = isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane))
     
     sym_plane_loss_fn = None
     if use_sym_plane:
         sym_plane_loss_fn = build_sym_learned_plane_loss(cfg)
-        print("[train] MODE: PVCNN Symmetric Learned Plane")
+        print("[train] MODE: Symmetric Learned Plane")
 
     loss_fn = None if (use_two_priors or use_sym_plane) else build_loss(cfg)
     steps_per_epoch = math.ceil(len(ds) / cfg["train"]["batch_size"]) if len(ds) > 0 else 0
