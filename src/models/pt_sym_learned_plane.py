@@ -29,7 +29,7 @@ class MiniPointNet(nn.Module):
         global_feat = feats.max(dim=1)[0]
         t_emb = self.time_embed(t)
         out = self.head(torch.cat([global_feat, t_emb], dim=-1))
-        n = F.normalize(out, dim=-1)
+        n = F.normalize(out, dim=-1, eps=1e-6)
         return n
 
 
@@ -58,25 +58,21 @@ class PTSymLearnedPlane(nn.Module):
             use_fourier_features=use_fourier_features,
             use_symmetric_attention=use_symmetric_attention,
         )
-        self.tau = tau
+        self.tau = max(float(tau), 1e-4)
 
     @staticmethod
     def compute_plane_offset(points: torch.Tensor, n: torch.Tensor):
         proj = torch.bmm(points, n.unsqueeze(2)).squeeze(2)
-        return torch.median(proj, dim=1, keepdim=True).values
+        return proj.mean(dim=1, keepdim=True)
 
     def _select_half(self, x_t: torch.Tensor, n: torch.Tensor):
-        B, N, _ = x_t.shape
+        _, N, _ = x_t.shape
         K = N // 2
 
         d = self.compute_plane_offset(x_t, n)
 
         distances = torch.bmm(x_t, n.unsqueeze(2)).squeeze(2) - d
-        mask_soft = torch.sigmoid(distances / self.tau)
-        mask_hard = (mask_soft > 0.5).float()
-        mask_ste = mask_hard.detach() - mask_soft.detach() + mask_soft
-
-        scores = mask_ste * distances
+        scores = distances / self.tau
         _, indices = torch.topk(scores, K, dim=1)
 
         X_half = torch.gather(x_t, 1, indices.unsqueeze(-1).expand(-1, -1, 3))
