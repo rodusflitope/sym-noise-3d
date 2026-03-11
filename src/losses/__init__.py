@@ -10,6 +10,10 @@ from .sym_plane import (
     SymLearnedPlaneLoss,
     build_sym_learned_plane_loss,
 )
+from .joint_sym_plane import (
+    JointSymmetryPlaneLoss,
+    build_joint_symmetry_plane_loss,
+)
 
 __all__ = [
     "compute_snr",
@@ -20,4 +24,6 @@ __all__ = [
     "build_loss",
     "SymLearnedPlaneLoss",
     "build_sym_learned_plane_loss",
+    "JointSymmetryPlaneLoss",
+    "build_joint_symmetry_plane_loss",
 ]

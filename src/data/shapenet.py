@@ -3,9 +3,15 @@ from __future__ import annotations
 import torch
 from torch.utils.data import Dataset, Subset
 from pathlib import Path
-import trimesh
 from typing import Any
 from src.utils.symmetry import order_point_cloud_for_symmetry
+from src.utils.symmetry_planes import (
+    load_symmetry_plane_cache,
+    normalize_plane,
+    sample_normalized_point_cloud,
+    stable_mesh_seed,
+    symmetry_plane_cache_key,
+)
 
 
 class ShapeNetDataset(Dataset):
@@ -22,6 +28,9 @@ class ShapeNetDataset(Dataset):
         enforce_symmetry: bool = False,
         symmetry_axis: int = 0,
         sample_symmetric: bool = False,
+        use_symmetry_plane_labels: bool = False,
+        symmetry_plane_cache_path: str | None = None,
+        symmetry_plane_cache_required: bool = False,
     ) -> None:
         super().__init__()
         self.root_dir = Path(root_dir)
@@ -33,6 +42,11 @@ class ShapeNetDataset(Dataset):
         self.enforce_symmetry = enforce_symmetry
         self.symmetry_axis = symmetry_axis
         self.sample_symmetric = sample_symmetric
+        self.use_symmetry_plane_labels = use_symmetry_plane_labels
+        self.symmetry_plane_cache_required = symmetry_plane_cache_required
+        self.symmetry_plane_cache = None
+        if symmetry_plane_cache_path:
+            self.symmetry_plane_cache = load_symmetry_plane_cache(symmetry_plane_cache_path)
 
         if categories is None or len(categories) == 0:
             categories = ["02691156"]
@@ -73,31 +87,13 @@ class ShapeNetDataset(Dataset):
             base_points = self._cache[idx]
         else:
             obj_path = self.obj_paths[idx]
-            mesh = trimesh.load(str(obj_path), force="mesh")
-            
-            if self.sample_symmetric:
-                n_half = self.num_points // 2
-                points_half = mesh.sample(n_half)
-                points_tensor_half = torch.from_numpy(points_half).float()
-
-                points_tensor_reflected = points_tensor_half.clone()
-                points_tensor_reflected[:, self.symmetry_axis] *= -1
-
-                points_tensor = torch.cat([points_tensor_half, points_tensor_reflected], dim=0)
-                
-                if self.num_points % 2 != 0:
-                    extra = mesh.sample(1)
-                    extra_tensor = torch.from_numpy(extra).float()
-                    points_tensor = torch.cat([points_tensor, extra_tensor], dim=0)
-            else:
-                points = mesh.sample(self.num_points)
-                points_tensor = torch.from_numpy(points).float()
-            
-            centroid = points_tensor.mean(dim=0, keepdim=True)
-            points_tensor = points_tensor - centroid
-            max_dist = torch.sqrt((points_tensor**2).sum(dim=1)).max()
-            if max_dist > 0:
-                points_tensor = points_tensor / max_dist
+            points_tensor = sample_normalized_point_cloud(
+                obj_path,
+                self.num_points,
+                sample_symmetric=self.sample_symmetric,
+                symmetry_axis=self.symmetry_axis,
+                deterministic_seed=stable_mesh_seed(obj_path, self.num_points),
+            )
             
             if self.enforce_symmetry:
                 points_tensor = order_point_cloud_for_symmetry(points_tensor, axis=self.symmetry_axis)
@@ -123,7 +119,23 @@ class ShapeNetDataset(Dataset):
             if self.jitter_sigma > 0.0:
                 noise = torch.randn_like(points_tensor) * self.jitter_sigma
                 points_tensor = points_tensor + noise
-        return points_tensor
+        if not self.use_symmetry_plane_labels:
+            return points_tensor
+        obj_path = self.obj_paths[idx]
+        cache_key = symmetry_plane_cache_key(self.root_dir, obj_path)
+        plane_tensor = None
+        if self.symmetry_plane_cache is not None:
+            entry = self.symmetry_plane_cache.get("planes", {}).get(cache_key)
+            if entry is not None:
+                plane_tensor = normalize_plane(entry["plane"].float())
+        if plane_tensor is None and self.symmetry_plane_cache_required:
+            raise KeyError(f"Missing symmetry plane label for {cache_key}")
+        if plane_tensor is None:
+            plane_tensor = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=points_tensor.dtype)
+        return {
+            "points": points_tensor,
+            "symmetry_plane": plane_tensor,
+        }
 
 
 def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[int] | dict[str, list[int]]]:
@@ -139,6 +151,9 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         enforce_symmetry=data_cfg.get("enforce_symmetry", False),
         symmetry_axis=data_cfg.get("symmetry_axis", 0),
         sample_symmetric=data_cfg.get("sample_symmetric", False),
+        use_symmetry_plane_labels=data_cfg.get("use_symmetry_plane_labels", False),
+        symmetry_plane_cache_path=data_cfg.get("symmetry_plane_cache_path", None),
+        symmetry_plane_cache_required=data_cfg.get("symmetry_plane_cache_required", False),
     )
 
     n = len(base_ds)
@@ -169,6 +184,9 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         enforce_symmetry=data_cfg.get("enforce_symmetry", False),
         symmetry_axis=data_cfg.get("symmetry_axis", 0),
         sample_symmetric=data_cfg.get("sample_symmetric", False),
+        use_symmetry_plane_labels=data_cfg.get("use_symmetry_plane_labels", False),
+        symmetry_plane_cache_path=data_cfg.get("symmetry_plane_cache_path", None),
+        symmetry_plane_cache_required=data_cfg.get("symmetry_plane_cache_required", False),
     )
 
     eval_ds_full = base_ds

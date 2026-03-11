@@ -7,6 +7,7 @@ import os
 import pathlib
 import time
 from datetime import datetime
+from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -14,14 +15,134 @@ from torch.utils.data import DataLoader
 from contextlib import nullcontext
 
 from src.data import build_datasets_from_config
-from src.losses import build_loss, build_sym_learned_plane_loss
-from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane, PTSymLearnedPlane
+from src.losses import build_joint_symmetry_plane_loss, build_loss, build_sym_learned_plane_loss
+from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane, PTSymLearnedPlane, PVCNNJointSymPlane, PTJointSymPlane
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_config
 from src.utils.common import load_cfg, set_seed, get_device
 from src.utils.lr import build_optimizer_and_scheduler
 from src.utils.ema import build_ema_model
+from src.utils.symmetry_planes import normalize_plane
+
+
+def unpack_batch(batch, device: torch.device):
+    if isinstance(batch, dict):
+        x0 = batch["points"].to(device)
+        plane0 = batch.get("symmetry_plane")
+        if plane0 is not None:
+            plane0 = plane0.to(device)
+        return x0, plane0
+    return batch.to(device), None
+
+
+def select_curriculum_plane(plane0: torch.Tensor | None, cfg: dict, current_step: int):
+    if plane0 is None:
+        return None
+    loss_cfg = cfg.get("loss", {}) or {}
+    start_prob = float(loss_cfg.get("selection_gt_prob_start", 1.0))
+    end_prob = float(loss_cfg.get("selection_gt_prob_end", 0.0))
+    warmup_steps = int(loss_cfg.get("selection_warmup_steps", loss_cfg.get("warmup_steps", 1000)))
+    if warmup_steps <= 0:
+        gt_prob = end_prob
+    else:
+        progress = min(1.0, float(current_step) / float(warmup_steps))
+        gt_prob = start_prob + ((end_prob - start_prob) * progress)
+    if gt_prob <= 0.0:
+        return None
+    if gt_prob >= 1.0:
+        return plane0
+    if torch.rand(1, device=plane0.device).item() < gt_prob:
+        return plane0
+    return None
+
+
+def _format_plane(plane: torch.Tensor) -> str:
+    values = [float(v) for v in plane.detach().cpu().tolist()]
+    return "[{:.4f}, {:.4f}, {:.4f}, {:.4f}]".format(*values)
+
+
+def _prepare_debug_batch(ds, device: torch.device, batch_size: int) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+    if ds is None:
+        return None
+    items = []
+    for idx in range(min(int(batch_size), len(ds))):
+        item = ds[idx]
+        if not isinstance(item, dict):
+            return None
+        if "points" not in item or "symmetry_plane" not in item:
+            return None
+        items.append(item)
+    if not items:
+        return None
+    x0 = torch.stack([item["points"] for item in items], dim=0).to(device)
+    plane0 = torch.stack([item["symmetry_plane"] for item in items], dim=0).to(device)
+    return x0, plane0
+
+
+def _joint_debug_cfg(cfg: dict) -> dict:
+    debug_cfg = cfg.get("debug", {}) or {}
+    plane_cfg = debug_cfg.get("joint_plane_monitor", {}) or {}
+    return {
+        "enabled": bool(plane_cfg.get("enabled", False)),
+        "source": str(plane_cfg.get("source", "val")).lower(),
+        "batch_size": int(plane_cfg.get("batch_size", 4)),
+        "timestep": plane_cfg.get("timestep", "mid"),
+        "print_every": int(plane_cfg.get("print_every", 1)),
+    }
+
+
+def _resolve_debug_timestep(spec, T: int) -> int:
+    if isinstance(spec, str):
+        s = spec.lower()
+        if s == "mid":
+            return max(0, min(T - 1, T // 2))
+        if s == "low":
+            return max(0, min(T - 1, T // 10))
+        if s == "high":
+            return max(0, min(T - 1, (9 * T) // 10))
+        return max(0, min(T - 1, int(s)))
+    return max(0, min(T - 1, int(spec)))
+
+
+def run_joint_plane_debug_snapshot(
+    model: torch.nn.Module,
+    forward: ForwardDiffusion,
+    alpha_bars: torch.Tensor,
+    debug_batch: Optional[tuple[torch.Tensor, torch.Tensor]],
+    *,
+    timestep: int,
+    global_step: int,
+    epoch: int,
+) -> Optional[dict[str, float | int | list[float]]]:
+    if debug_batch is None:
+        return None
+    x0, plane0 = debug_batch
+    batch_size = x0.shape[0]
+    t = torch.full((batch_size,), int(timestep), dtype=torch.long, device=x0.device)
+    with torch.no_grad():
+        x_t, _ = forward.add_noise(x0, t)
+        plane_t, _ = forward.add_noise(plane0, t)
+        result = model(x_t, plane_t, t, alpha_bars[t], selection_plane=None)
+        plane_pred = normalize_plane(result["plane_x0_pred"])
+    cos = torch.nn.functional.cosine_similarity(plane_pred[:, :3], plane0[:, :3], dim=-1)
+    offset_abs = (plane_pred[:, 3] - plane0[:, 3]).abs()
+    metrics = {
+        "epoch": int(epoch),
+        "global_step": int(global_step),
+        "timestep": int(timestep),
+        "mean_cos": float(cos.mean().item()),
+        "mean_abs_offset": float(offset_abs.mean().item()),
+        "gt_plane_0": [float(v) for v in plane0[0].detach().cpu().tolist()],
+        "pred_plane_0": [float(v) for v in plane_pred[0].detach().cpu().tolist()],
+    }
+    print(
+        f"[joint-plane-debug] epoch={epoch} step={global_step} t={timestep} | "
+        f"mean_cos={metrics['mean_cos']:.6f} | mean_abs_offset={metrics['mean_abs_offset']:.6f}"
+    )
+    print(f"[joint-plane-debug] gt_plane_0={_format_plane(plane0[0])}")
+    print(f"[joint-plane-debug] pred_plane_0={_format_plane(plane_pred[0])}")
+    return metrics
 
 def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
     ae_cfg = cfg.get("autoencoder", {})
@@ -212,13 +333,29 @@ def main() -> None:
     ae_ok_types = (LionAutoencoder,)
     use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, ae_ok_types))
     use_sym_plane = isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane))
+    use_joint_sym_plane = isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane))
+    joint_debug_cfg = _joint_debug_cfg(cfg)
+    debug_batch = None
+    debug_history_path = pathlib.Path(cfg["train"]["out_dir"]) / exp_name / "joint_plane_debug.jsonl"
+    if use_joint_sym_plane and joint_debug_cfg["enabled"]:
+        debug_source = ds_val if joint_debug_cfg["source"] == "val" and ds_val is not None else ds
+        debug_batch = _prepare_debug_batch(debug_source, device, joint_debug_cfg["batch_size"])
+        print(
+            f"[train] Joint plane debug enabled: source={joint_debug_cfg['source']} "
+            f"batch_size={joint_debug_cfg['batch_size']} timestep={joint_debug_cfg['timestep']} "
+            f"print_every={joint_debug_cfg['print_every']}"
+        )
     
     sym_plane_loss_fn = None
+    joint_sym_plane_loss_fn = None
     if use_sym_plane:
         sym_plane_loss_fn = build_sym_learned_plane_loss(cfg)
         print("[train] MODE: Symmetric Learned Plane")
+    if use_joint_sym_plane:
+        joint_sym_plane_loss_fn = build_joint_symmetry_plane_loss(cfg)
+        print("[train] MODE: Joint Symmetric Plane Diffusion")
 
-    loss_fn = None if (use_two_priors or use_sym_plane) else build_loss(cfg)
+    loss_fn = None if (use_two_priors or use_sym_plane or use_joint_sym_plane) else build_loss(cfg)
     steps_per_epoch = math.ceil(len(ds) / cfg["train"]["batch_size"]) if len(ds) > 0 else 0
     opt, scheduler, total_steps = build_optimizer_and_scheduler(cfg, model, steps_per_epoch)
 
@@ -277,13 +414,19 @@ def main() -> None:
 
         epoch_loss_diff_sum = 0.0
         epoch_loss_sym_sum = 0.0
+        epoch_loss_plane_sum = 0.0
+        epoch_loss_recon_sum = 0.0
+        epoch_loss_plane_cons_sum = 0.0
 
-        for x0 in dl:
-            x0 = x0.to(device)
+        for batch in dl:
+            x0, plane0 = unpack_batch(batch, device)
             mse_z = torch.tensor(0.0, device=device)
             mse_h = torch.tensor(0.0, device=device)
             loss_diff = torch.tensor(0.0, device=device)
             loss_sym = torch.tensor(0.0, device=device)
+            loss_plane = torch.tensor(0.0, device=device)
+            loss_recon = torch.tensor(0.0, device=device)
+            loss_plane_cons = torch.tensor(0.0, device=device)
             B = x0.shape[0]
             t = sample_timesteps(B, T, device)
             
@@ -311,6 +454,23 @@ def main() -> None:
                     result = model(x_t, t)
                     loss, loss_diff, loss_sym = sym_plane_loss_fn(
                         result, eps, x_t, x0, alpha_bars[t], current_step=global_step
+                    )
+                elif use_joint_sym_plane:
+                    if plane0 is None:
+                        raise ValueError("Joint symmetry plane training requires batch['symmetry_plane']")
+                    x_t, eps = forward.add_noise(x0, t)
+                    plane_t, eps_plane = forward.add_noise(plane0, t)
+                    selection_plane = select_curriculum_plane(plane0, cfg, global_step)
+                    result = model(x_t, plane_t, t, alpha_bars[t], selection_plane=selection_plane)
+                    loss, loss_diff, loss_plane, loss_recon, loss_plane_cons = joint_sym_plane_loss_fn(
+                        result,
+                        eps,
+                        eps_plane,
+                        x_t,
+                        x0,
+                        plane0,
+                        alpha_bars[t],
+                        current_step=global_step,
                     )
                 elif use_latent:
                     with torch.no_grad():
@@ -366,6 +526,11 @@ def main() -> None:
             if use_sym_plane:
                 epoch_loss_diff_sum += float(loss_diff.detach().item())
                 epoch_loss_sym_sum += float(loss_sym.detach().item())
+            if use_joint_sym_plane:
+                epoch_loss_diff_sum += float(loss_diff.detach().item())
+                epoch_loss_plane_sum += float(loss_plane.detach().item())
+                epoch_loss_recon_sum += float(loss_recon.detach().item())
+                epoch_loss_plane_cons_sum += float(loss_plane_cons.detach().item())
 
             if global_step % cfg["train"]["log_every"] == 0:
                 current_lr = opt.param_groups[0]["lr"]
@@ -382,6 +547,15 @@ def main() -> None:
                         f"| loss_sym={float(loss_sym.detach().item()):.6f} "
                         f"| lr={current_lr:.6f}"
                     )
+                elif use_joint_sym_plane:
+                    print(
+                        f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} "
+                        f"| loss_diff={float(loss_diff.detach().item()):.6f} "
+                        f"| loss_plane={float(loss_plane.detach().item()):.6f} "
+                        f"| loss_recon={float(loss_recon.detach().item()):.6f} "
+                        f"| loss_plane_cons={float(loss_plane_cons.detach().item()):.6f} "
+                        f"| lr={current_lr:.6f}"
+                    )
                 else:
                     print(
                         f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} | lr={current_lr:.6f}"
@@ -392,6 +566,9 @@ def main() -> None:
         val_mse_h = None
         val_loss_diff = None
         val_loss_sym = None
+        val_loss_plane = None
+        val_loss_recon = None
+        val_loss_plane_cons = None
         if dl_val is not None and len(splits["val"]) > 0:
             model_to_eval = ema.module if ema is not None else model
             model_to_eval.eval()
@@ -402,12 +579,15 @@ def main() -> None:
             v_mse_h_sum = 0.0
             v_loss_diff_sum = 0.0
             v_loss_sym_sum = 0.0
+            v_loss_plane_sum = 0.0
+            v_loss_recon_sum = 0.0
+            v_loss_plane_cons_sum = 0.0
             seed_val = int(cfg.get("seed", 0) or 0) + 12345
             g_val = torch.Generator()
             g_val.manual_seed(seed_val)
             with torch.no_grad():
-                for x0 in dl_val:
-                    x0 = x0.to(device)
+                for batch in dl_val:
+                    x0, plane0 = unpack_batch(batch, device)
                     B = x0.shape[0]
                     t = torch.randint(low=0, high=T, size=(B,), generator=g_val, dtype=torch.long).to(device)
 
@@ -435,6 +615,26 @@ def main() -> None:
                             )
                             v_loss_diff_sum += float(ld.item())
                             v_loss_sym_sum += float(ls.item())
+                        elif use_joint_sym_plane:
+                            if plane0 is None:
+                                raise ValueError("Joint symmetry plane validation requires batch['symmetry_plane']")
+                            x_t, eps = forward.add_noise(x0, t)
+                            plane_t, eps_plane = forward.add_noise(plane0, t)
+                            result = model_to_eval(x_t, plane_t, t, alpha_bars[t], selection_plane=plane0)
+                            l, ld, lp, lr, lc = joint_sym_plane_loss_fn(
+                                result,
+                                eps,
+                                eps_plane,
+                                x_t,
+                                x0,
+                                plane0,
+                                alpha_bars[t],
+                                current_step=global_step,
+                            )
+                            v_loss_diff_sum += float(ld.item())
+                            v_loss_plane_sum += float(lp.item())
+                            v_loss_recon_sum += float(lr.item())
+                            v_loss_plane_cons_sum += float(lc.item())
                         elif use_latent:
                             z0 = autoencoder.encode(x0)
                             z_t, eps = forward.add_noise(z0, t)
@@ -456,6 +656,11 @@ def main() -> None:
             if use_sym_plane:
                 val_loss_diff = v_loss_diff_sum / max(1, v_steps)
                 val_loss_sym = v_loss_sym_sum / max(1, v_steps)
+            if use_joint_sym_plane:
+                val_loss_diff = v_loss_diff_sum / max(1, v_steps)
+                val_loss_plane = v_loss_plane_sum / max(1, v_steps)
+                val_loss_recon = v_loss_recon_sum / max(1, v_steps)
+                val_loss_plane_cons = v_loss_plane_cons_sum / max(1, v_steps)
             model.train()
             if ema is not None:
                 ema.module.train()
@@ -464,8 +669,11 @@ def main() -> None:
         avg_epoch_loss = epoch_loss_sum / epoch_steps
         avg_epoch_mse_z = (epoch_mse_z_sum / max(1, epoch_steps)) if use_two_priors else None
         avg_epoch_mse_h = (epoch_mse_h_sum / max(1, epoch_steps)) if use_two_priors else None
-        avg_epoch_loss_diff = (epoch_loss_diff_sum / max(1, epoch_steps)) if use_sym_plane else None
+        avg_epoch_loss_diff = (epoch_loss_diff_sum / max(1, epoch_steps)) if (use_sym_plane or use_joint_sym_plane) else None
         avg_epoch_loss_sym = (epoch_loss_sym_sum / max(1, epoch_steps)) if use_sym_plane else None
+        avg_epoch_loss_plane = (epoch_loss_plane_sum / max(1, epoch_steps)) if use_joint_sym_plane else None
+        avg_epoch_loss_recon = (epoch_loss_recon_sum / max(1, epoch_steps)) if use_joint_sym_plane else None
+        avg_epoch_loss_plane_cons = (epoch_loss_plane_cons_sum / max(1, epoch_steps)) if use_joint_sym_plane else None
         if val_loss is not None:
             if use_two_priors and val_mse_z is not None and val_mse_h is not None:
                 print(
@@ -479,6 +687,13 @@ def main() -> None:
                     f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} "
                     f"(diff={avg_epoch_loss_diff:.6f}, sym={avg_epoch_loss_sym:.6f}) "
                     f"| Val loss: {val_loss:.6f} (diff={val_loss_diff:.6f}, sym={val_loss_sym:.6f}) "
+                    f"| Time: {epoch_time:.2f}s =="
+                )
+            elif use_joint_sym_plane and val_loss_diff is not None and val_loss_plane is not None:
+                print(
+                    f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} "
+                    f"(diff={avg_epoch_loss_diff:.6f}, plane={avg_epoch_loss_plane:.6f}, recon={avg_epoch_loss_recon:.6f}, plane_cons={avg_epoch_loss_plane_cons:.6f}) "
+                    f"| Val loss: {val_loss:.6f} (diff={val_loss_diff:.6f}, plane={val_loss_plane:.6f}, recon={val_loss_recon:.6f}, plane_cons={val_loss_plane_cons:.6f}) "
                     f"| Time: {epoch_time:.2f}s =="
                 )
             else:
@@ -505,6 +720,15 @@ def main() -> None:
             epoch_metadata["avg_loss_sym"] = avg_epoch_loss_sym
             epoch_metadata["val_loss_diff"] = val_loss_diff
             epoch_metadata["val_loss_sym"] = val_loss_sym
+        if use_joint_sym_plane:
+            epoch_metadata["avg_loss_diff"] = avg_epoch_loss_diff
+            epoch_metadata["avg_loss_plane"] = avg_epoch_loss_plane
+            epoch_metadata["avg_loss_recon"] = avg_epoch_loss_recon
+            epoch_metadata["avg_loss_plane_cons"] = avg_epoch_loss_plane_cons
+            epoch_metadata["val_loss_diff"] = val_loss_diff
+            epoch_metadata["val_loss_plane"] = val_loss_plane
+            epoch_metadata["val_loss_recon"] = val_loss_recon
+            epoch_metadata["val_loss_plane_cons"] = val_loss_plane_cons
         training_history["epochs"].append(epoch_metadata)
 
         ckpt_metadata: dict[str, object] = {
@@ -532,6 +756,26 @@ def main() -> None:
             print(f"Mejor modelo guardado en: {ckpt_path} (loss={best_loss:.6f})")
 
         save_training_history(cfg["train"]["out_dir"], exp_name, training_history)
+
+        if use_joint_sym_plane and joint_debug_cfg["enabled"] and (epoch % max(1, joint_debug_cfg["print_every"]) == 0):
+            model_to_debug = ema.module if ema is not None else model
+            model_to_debug.eval()
+            debug_metrics = run_joint_plane_debug_snapshot(
+                model_to_debug,
+                forward,
+                alpha_bars,
+                debug_batch,
+                timestep=_resolve_debug_timestep(joint_debug_cfg["timestep"], T),
+                global_step=global_step,
+                epoch=epoch,
+            )
+            if debug_metrics is not None:
+                debug_history_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(debug_history_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(debug_metrics) + "\n")
+            model.train()
+            if ema is not None:
+                ema.module.train()
 
     total_time = time.time() - train_start_time
     training_history["total_time"] = total_time

@@ -8,12 +8,15 @@ from src.models import (
     LionTwoPriorsDDM,
     PVCNNSymLearnedPlane,
     PTSymLearnedPlane,
+    PVCNNJointSymPlane,
+    PTJointSymPlane,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler
 from src.utils.checkpoint import load_ckpt, load_ckpt_config
 from src.utils.io import save_npy, save_ply
-from src.vis_samples import plot_pc
+from src.vis_samples import plot_joint_plane_debug, plot_pc
+from src.utils.symmetry_planes import gather_points
 
 
 def _load_autoencoder(cfg, device, ae_ckpt: str):
@@ -148,6 +151,7 @@ def main():
     use_latent = bool(cfg.get("use_latent_diffusion", False))
 
     with torch.no_grad():
+        joint_debug = None
         if isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane)) and not use_latent:
             print("[sample] MODE: Symmetric Diffusion (predict x0, reflect, re-noise)")
             sqrt_alpha_bars = torch.sqrt(alpha_bars)
@@ -189,6 +193,59 @@ def main():
                     else:
                         z = torch.randn_like(x0_full)
                     x_t = s_ab_prev * x0_full + s_1m_prev * z
+
+            pcs = x_t
+        elif isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane)) and not use_latent:
+            print("[sample] MODE: Joint Symmetric Plane Diffusion")
+            sqrt_alpha_bars = torch.sqrt(alpha_bars)
+            sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
+
+            if noise_type is not None:
+                x_t = noise_type.sample((num_samples, num_points, 3), device)
+            else:
+                x_t = torch.randn(num_samples, num_points, 3, device=device)
+            plane_t = torch.randn(num_samples, 4, device=device)
+
+            for t in reversed(range(T)):
+                batch_size = x_t.shape[0]
+                t_batch = torch.full((batch_size,), t, dtype=torch.long, device=device)
+
+                result = model(x_t, plane_t, t_batch, alpha_bars[t_batch])
+                eps_half = result["eps_pred_half"]
+                plane_eps = result["plane_eps_pred"]
+                indices = result["indices"]
+                plane_x0 = result["plane_x0_pred"]
+                x_half = gather_points(x_t, indices)
+
+                s_ab = sqrt_alpha_bars[t]
+                s_1m = sqrt_one_minus_alpha_bars[t]
+                x0_half = (x_half - s_1m * eps_half) / s_ab.clamp(min=1e-8)
+                x0_half = x0_half.clamp(-2, 2)
+                x0_other = model.reflect(x0_half, plane_x0)
+                x0_full = torch.cat([x0_half, x0_other], dim=1)
+                plane_x0 = plane_x0.clamp(-2, 2)
+
+                if t == 0:
+                    joint_debug = {
+                        "source_pc": x_t.detach().cpu().numpy().astype(np.float32),
+                        "selected_pc": x_half.detach().cpu().numpy().astype(np.float32),
+                        "reconstructed_pc": x0_full.detach().cpu().numpy().astype(np.float32),
+                        "plane": plane_x0.detach().cpu().numpy().astype(np.float32),
+                    }
+
+                if t == 0:
+                    x_t = x0_full
+                    plane_t = plane_x0
+                else:
+                    s_ab_prev = sqrt_alpha_bars[t - 1]
+                    s_1m_prev = sqrt_one_minus_alpha_bars[t - 1]
+                    if noise_type is not None:
+                        z = noise_type.sample(x0_full.shape, device)
+                    else:
+                        z = torch.randn_like(x0_full)
+                    plane_z = torch.randn_like(plane_t)
+                    x_t = s_ab_prev * x0_full + s_1m_prev * z
+                    plane_t = s_ab_prev * plane_x0 + s_1m_prev * plane_z
 
             pcs = x_t
         elif not use_latent:
@@ -313,6 +370,15 @@ def main():
             
         out_vis = out.with_suffix(".png")
         plot_pc(pcs_np[i], str(out_vis))
+        if joint_debug is not None:
+            out_joint_vis = out.with_name(f"{out.stem}_joint_plane_debug.png")
+            plot_joint_plane_debug(
+                joint_debug["source_pc"][i],
+                joint_debug["selected_pc"][i],
+                joint_debug["reconstructed_pc"][i],
+                joint_debug["plane"][i],
+                str(out_joint_vis),
+            )
         
     print(f"[sample] saved {num_samples} samples and visualizations in: {save_dir}")
 

@@ -4,7 +4,7 @@ device: "auto"
 
 data:
   root_dir: "data/ShapeNetCore"
-  max_models: 200
+  max_models: 1000
 
 model:
   name: "epsilon_mlp"

@@ -44,7 +44,6 @@ class PTSymLearnedPlane(nn.Module):
         num_layers: int = 2,
         use_fourier_features: bool = False,
         use_symmetric_attention: bool = False,
-        tau: float = 0.1,
     ):
         super().__init__()
         self.plane_estimator = MiniPointNet(
@@ -58,7 +57,6 @@ class PTSymLearnedPlane(nn.Module):
             use_fourier_features=use_fourier_features,
             use_symmetric_attention=use_symmetric_attention,
         )
-        self.tau = max(float(tau), 1e-4)
 
     @staticmethod
     def compute_plane_offset(points: torch.Tensor, n: torch.Tensor):
@@ -72,8 +70,7 @@ class PTSymLearnedPlane(nn.Module):
         d = self.compute_plane_offset(x_t, n)
 
         distances = torch.bmm(x_t, n.unsqueeze(2)).squeeze(2) - d
-        scores = distances / self.tau
-        _, indices = torch.topk(scores, K, dim=1)
+        _, indices = torch.topk(distances, K, dim=1)
 
         X_half = torch.gather(x_t, 1, indices.unsqueeze(-1).expand(-1, -1, 3))
         return X_half, indices

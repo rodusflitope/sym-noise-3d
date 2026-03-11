@@ -16,7 +16,6 @@ model:
   time_dim: 64
   resolution: 16
   num_blocks: 2
-  tau: 0.1
 
 loss:
   lambda_sym: 1.0

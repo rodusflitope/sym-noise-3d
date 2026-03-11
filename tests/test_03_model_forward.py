@@ -8,8 +8,8 @@ from src.utils.common import load_cfg, get_device, set_seed
 from src.data import ShapeNetDataset
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
-from src.models import build_model, PointAutoencoder, LionAutoencoder
-from src.losses import build_loss
+from src.models import build_model, PointAutoencoder, LionAutoencoder, PVCNNJointSymPlane, PTJointSymPlane
+from src.losses import build_joint_symmetry_plane_loss, build_loss
 from src.utils.checkpoint import load_ckpt, load_ckpt_config
 
 
@@ -19,6 +19,12 @@ def ensure_dir(p):
 
 def sample_timesteps(batch_size, T, device):
     return torch.randint(low=0, high=T, size=(batch_size,), device=device, dtype=torch.long)
+
+
+def _extract_points_and_plane(item):
+    if isinstance(item, dict):
+        return item["points"], item.get("symmetry_plane")
+    return item, None
 
 
 def _load_autoencoder(cfg, device, ae_ckpt: str):
@@ -113,9 +119,12 @@ def main():
             root_dir=cfg["data"]["root_dir"],
             num_points=num_points,
             max_models=cfg["data"].get("max_models", None),
+            use_symmetry_plane_labels=cfg.get("data", {}).get("use_symmetry_plane_labels", False),
+            symmetry_plane_cache_path=cfg.get("data", {}).get("symmetry_plane_cache_path", None),
+            symmetry_plane_cache_required=cfg.get("data", {}).get("symmetry_plane_cache_required", False),
         )
         idxs = torch.arange(min(len(ds), args.batch)).tolist()
-        pcs = [ds[i].unsqueeze(0) for i in idxs]
+        pcs = [_extract_points_and_plane(ds[i])[0].unsqueeze(0) for i in idxs]
         x0 = torch.cat(pcs, dim=0).to(device)
 
         ae = _load_autoencoder(cfg, device, ae_ckpt)
@@ -145,11 +154,21 @@ def main():
             root_dir=cfg["data"]["root_dir"],
             num_points=num_points,
             max_models=cfg["data"].get("max_models", None),
+            use_symmetry_plane_labels=cfg.get("data", {}).get("use_symmetry_plane_labels", False),
+            symmetry_plane_cache_path=cfg.get("data", {}).get("symmetry_plane_cache_path", None),
+            symmetry_plane_cache_required=cfg.get("data", {}).get("symmetry_plane_cache_required", False),
         )
 
         idxs = torch.arange(min(len(ds), args.batch)).tolist()
-        pcs = [ds[i].unsqueeze(0) for i in idxs]
+        planes = []
+        pcs = []
+        for i in idxs:
+            points_i, plane_i = _extract_points_and_plane(ds[i])
+            pcs.append(points_i.unsqueeze(0))
+            if plane_i is not None:
+                planes.append(plane_i.unsqueeze(0))
         x0 = torch.cat(pcs, dim=0).to(device)
+        plane0 = torch.cat(planes, dim=0).to(device) if len(planes) == len(pcs) and len(planes) > 0 else None
 
         t = sample_timesteps(x0.shape[0], T, device)
         x_t, eps = forward.add_noise(x0, t)
@@ -159,7 +178,13 @@ def main():
             model = load_ckpt(model, ckpt, map_location=device)
         model.eval()
         with torch.no_grad():
-            eps_pred = model(x_t, t)
+            if isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane)):
+                if plane0 is None:
+                    raise ValueError("Joint symmetry plane test requires symmetry_plane labels in the dataset")
+                plane_t, eps_plane = forward.add_noise(plane0, t)
+                eps_pred = model(x_t, plane_t, t, alpha_bars[t], selection_plane=plane0)
+            else:
+                eps_pred = model(x_t, t)
 
     if isinstance(eps_pred, dict) and "eps_pred_half" in eps_pred:
         eps_real_half = torch.gather(eps, 1, eps_pred["indices"].unsqueeze(-1).expand(-1, -1, 3))
@@ -176,8 +201,23 @@ def main():
     eps_true_mean = eps_true_tensor.mean().item()
     eps_true_std = eps_true_tensor.std().item()
 
-    from src.models import PVCNNSymLearnedPlane
-    if isinstance(model, PVCNNSymLearnedPlane):
+    from src.models import PVCNNSymLearnedPlane, PTSymLearnedPlane
+    if isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane)):
+        if plane0 is None:
+            raise ValueError("Joint symmetry plane loss requires plane labels")
+        loss_fn = build_joint_symmetry_plane_loss(cfg)
+        train_loss, _, _, _, _ = loss_fn(
+            eps_pred,
+            eps,
+            eps_plane,
+            x_t,
+            x0,
+            plane0,
+            alpha_bar_t=alpha_bars[t],
+        )
+        train_loss = train_loss.item()
+        loss_name = "joint_symmetry_plane"
+    elif isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane)):
         from src.losses import build_sym_learned_plane_loss
         loss_fn = build_sym_learned_plane_loss(cfg)
         train_loss, _, _ = loss_fn(eps_pred, eps, x_t, x0, alpha_bar_t=alpha_bars[t])

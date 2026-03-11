@@ -1,4 +1,4 @@
-exp_name: "pt-sym-learned-plane"
+exp_name: "pt-joint-sym-plane"
 seed: 10
 device: "auto"
 
@@ -8,11 +8,14 @@ data:
   augment: false
   val_frac: 0.1
   test_frac: 0.1
+  use_symmetry_plane_labels: true
+  symmetry_plane_cache_path: "data/symmetry_cache.pt"
+  symmetry_plane_cache_required: true
 
 model:
-  name: "pt_sym_learned_plane"
+  name: "pt_joint_sym_plane"
   hidden_dim: 128
-  plane_hidden_dim: 64
+  plane_hidden_dim: 128
   time_dim: 64
   num_heads: 4
   num_layers: 2
@@ -20,17 +23,24 @@ model:
   use_symmetric_attention: false
 
 loss:
-  lambda_sym: 1.0
   lambda_diff: 1.0
+  lambda_plane: 1.0
+  lambda_recon: 0.1
+  lambda_plane_consistency: 0.25
+  plane_normal_weight: 1.0
+  plane_offset_weight: 1.0
   metric: "cd"
   warmup_steps: 1000
+  selection_warmup_steps: 1000
+  selection_gt_prob_start: 1.0
+  selection_gt_prob_end: 0.0
 
 train:
   batch_size: 32
   epochs: 100
   log_every: 50
   num_points: 2048
-  num_workers: 4
+  num_workers: 0
   out_dir: "runs"
   save_every: 10
   amp: true
@@ -56,3 +66,11 @@ lr_scheduler:
   base_lr: 2.0e-4
   min_lr: 1.0e-6
   warmup_steps: 500
+
+debug:
+  joint_plane_monitor:
+    enabled: true
+    source: "val"
+    batch_size: 4
+    timestep: "mid"
+    print_every: 1

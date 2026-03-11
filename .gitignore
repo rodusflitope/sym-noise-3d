@@ -25,3 +25,6 @@ tests/outputs
 
 #Builds
 build/
+
+#Debug
+debug/
