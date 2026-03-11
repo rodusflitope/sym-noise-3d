@@ -1,5 +1,6 @@
 import argparse, torch, pathlib, numpy as np
 import os
+from src.data import build_datasets_from_config
 from src.utils.common import load_cfg, get_device, set_seed
 from src.models import (
     build_model,
@@ -12,11 +13,12 @@ from src.models import (
     PTJointSymPlane,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
+from src.schedulers.forward import ForwardDiffusion
 from src.samplers import build_sampler
 from src.utils.checkpoint import load_ckpt, load_ckpt_config
 from src.utils.io import save_npy, save_ply
 from src.vis_samples import plot_joint_plane_debug, plot_pc
-from src.utils.symmetry_planes import gather_points
+from src.utils.symmetry_planes import gather_points, select_signed_half
 
 
 def _load_autoencoder(cfg, device, ae_ckpt: str):
@@ -96,6 +98,78 @@ def parse_args():
     return p.parse_args()
 
 
+def _prepare_joint_test_debug_batch(cfg, device, num_samples: int):
+    datasets = build_datasets_from_config(cfg)
+    ds_test = datasets.get("test")
+    if ds_test is None or len(ds_test) == 0:
+        print("[sample] joint test debug skipped: no test split available")
+        return None
+    items = []
+    count = min(int(num_samples), len(ds_test))
+    for idx in range(count):
+        item = ds_test[idx]
+        if not isinstance(item, dict) or "points" not in item or "symmetry_plane" not in item:
+            print("[sample] joint test debug skipped: test split does not provide point/plane pairs")
+            return None
+        items.append(item)
+    x0 = torch.stack([item["points"] for item in items], dim=0).to(device)
+    plane0 = torch.stack([item["symmetry_plane"] for item in items], dim=0).to(device)
+    return x0, plane0
+
+
+def _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples: int, T: int):
+    batch = _prepare_joint_test_debug_batch(cfg, device, num_samples)
+    if batch is None:
+        return None
+    x0_ref, plane0_ref = batch
+    sample_count = x0_ref.shape[0]
+    t_init = torch.full((sample_count,), T - 1, dtype=torch.long, device=device)
+    x_t, _ = forward.add_noise(x0_ref, t_init)
+    plane_t, _ = forward.add_noise(plane0_ref, t_init)
+    sqrt_alpha_bars = torch.sqrt(alpha_bars)
+    sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
+    payload = None
+
+    for t in reversed(range(T)):
+        t_batch = torch.full((sample_count,), t, dtype=torch.long, device=device)
+        result = model(x_t, plane_t, t_batch, alpha_bars[t_batch])
+        eps_half = result["eps_pred_half"]
+        indices = result["indices"]
+        plane_x0 = result["plane_x0_pred"].clamp(-2, 2)
+        x_half = gather_points(x_t, indices)
+
+        s_ab = sqrt_alpha_bars[t]
+        s_1m = sqrt_one_minus_alpha_bars[t]
+        x0_half = (x_half - s_1m * eps_half) / s_ab.clamp(min=1e-8)
+        x0_half = x0_half.clamp(-2, 2)
+        x0_other = model.reflect(x0_half, plane_x0)
+        x0_full = torch.cat([x0_half, x0_other], dim=1)
+
+        if t == 0:
+            original_selected, _ = select_signed_half(x0_ref, plane_x0)
+            payload = {
+                "original_pc": x0_ref.detach().cpu().numpy().astype(np.float32),
+                "selected_pc": original_selected.detach().cpu().numpy().astype(np.float32),
+                "reconstructed_pc": x0_full.detach().cpu().numpy().astype(np.float32),
+                "plane": plane_x0.detach().cpu().numpy().astype(np.float32),
+            }
+            x_t = x0_full
+            plane_t = plane_x0
+        else:
+            s_ab_prev = sqrt_alpha_bars[t - 1]
+            s_1m_prev = sqrt_one_minus_alpha_bars[t - 1]
+            if forward.noise_type is not None:
+                x_noise = forward.noise_type.sample(x0_full.shape, device)
+                plane_noise = forward.noise_type.sample(plane_t.shape, device)
+            else:
+                x_noise = torch.randn_like(x0_full)
+                plane_noise = torch.randn_like(plane_t)
+            x_t = s_ab_prev * x0_full + s_1m_prev * x_noise
+            plane_t = s_ab_prev * plane_x0 + s_1m_prev * plane_noise
+
+    return payload
+
+
 def main():
     args = parse_args()
     
@@ -139,6 +213,7 @@ def main():
     T = cfg["diffusion"]["T"]
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
     noise_type = build_noise_type(cfg)
+    forward = ForwardDiffusion(betas, alphas, alpha_bars, noise_type=noise_type)
     
     print(f"[sample] schedule={cfg['diffusion']['schedule']}, noise_type={cfg['diffusion'].get('noise_type', 'gaussian')}")
 
@@ -226,14 +301,6 @@ def main():
                 plane_x0 = plane_x0.clamp(-2, 2)
 
                 if t == 0:
-                    joint_debug = {
-                        "source_pc": x_t.detach().cpu().numpy().astype(np.float32),
-                        "selected_pc": x_half.detach().cpu().numpy().astype(np.float32),
-                        "reconstructed_pc": x0_full.detach().cpu().numpy().astype(np.float32),
-                        "plane": plane_x0.detach().cpu().numpy().astype(np.float32),
-                    }
-
-                if t == 0:
                     x_t = x0_full
                     plane_t = plane_x0
                 else:
@@ -248,6 +315,7 @@ def main():
                     plane_t = s_ab_prev * plane_x0 + s_1m_prev * plane_z
 
             pcs = x_t
+            joint_debug = _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples, T)
         elif not use_latent:
             pcs = sampler.sample(model, num_samples=num_samples, num_points=num_points)
         else:
@@ -370,10 +438,10 @@ def main():
             
         out_vis = out.with_suffix(".png")
         plot_pc(pcs_np[i], str(out_vis))
-        if joint_debug is not None:
-            out_joint_vis = out.with_name(f"{out.stem}_joint_plane_debug.png")
+        if joint_debug is not None and i < len(joint_debug["original_pc"]):
+            out_joint_vis = save_dir / f"test_{i:03d}_joint_plane_debug.png"
             plot_joint_plane_debug(
-                joint_debug["source_pc"][i],
+                joint_debug["original_pc"][i],
                 joint_debug["selected_pc"][i],
                 joint_debug["reconstructed_pc"][i],
                 joint_debug["plane"][i],

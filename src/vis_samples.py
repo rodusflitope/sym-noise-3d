@@ -2,6 +2,8 @@ import argparse, pathlib, numpy as np, matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 
 def _set_axes_style(ax, title, hide_ticks=False, elev=None, azim=None):
@@ -10,9 +12,13 @@ def _set_axes_style(ax, title, hide_ticks=False, elev=None, azim=None):
     ax.set_xlabel("x")
     ax.set_ylabel("z")
     ax.set_zlabel("y")
+    ax.xaxis.labelpad = 8
+    ax.yaxis.labelpad = 8
+    ax.zaxis.labelpad = 8
     ax.set_xlim(-1.5, 1.5)
     ax.set_ylim(-1.5, 1.5)
     ax.set_zlim(-1.5, 1.5)
+    ax.tick_params(axis="both", which="major", pad=2, labelsize=8)
     if hide_ticks:
         ax.set_xticklabels([])
         ax.set_yticklabels([])
@@ -45,38 +51,49 @@ def _scatter_pc(ax, pc, color="#1f77b4", size=1.0, alpha=0.9):
     ax.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=size, c=color, alpha=alpha)
 
 
-def _draw_plane(ax, plane, color="#ff7f0e"):
+def _draw_plane(ax, plane, color="#2ec4b6"):
     plane_x, plane_y, plane_z = _plane_patch_points(plane)
-    ax.plot_surface(plane_x, plane_z, plane_y, color=color, alpha=0.22, linewidth=0, shade=False)
+    ax.plot_surface(plane_x, plane_z, plane_y, color=color, alpha=0.18, linewidth=0, shade=False)
 
 
-def plot_joint_plane_debug(source_pc, selected_pc, reconstructed_pc, plane, path):
+def plot_joint_plane_debug(original_pc, selected_pc, reconstructed_pc, plane, path):
     fig = plt.figure(figsize=(16, 12))
+    original_color = "#111111"
+    selected_color = "#ff006e"
+    reconstructed_color = "#00b4d8"
+    plane_color = "#2ec4b6"
+    legend_handles = [
+        Line2D([0], [0], marker='o', color='w', label='Original test sample', markerfacecolor=original_color, markersize=8),
+        Line2D([0], [0], marker='o', color='w', label='Selected half', markerfacecolor=selected_color, markersize=8),
+        Line2D([0], [0], marker='o', color='w', label='Reconstructed sample', markerfacecolor=reconstructed_color, markersize=8),
+        Patch(facecolor=plane_color, edgecolor=plane_color, alpha=0.18, label='Predicted plane'),
+    ]
 
     ax1 = fig.add_subplot(2, 2, 1, projection='3d')
-    _scatter_pc(ax1, source_pc, color="#4c78a8", size=1.2, alpha=0.65)
-    _draw_plane(ax1, plane)
-    _set_axes_style(ax1, "Source + Predicted Plane", elev=24, azim=-60)
+    _scatter_pc(ax1, original_pc, color=original_color, size=1.2, alpha=0.72)
+    _draw_plane(ax1, plane, color=plane_color)
+    _set_axes_style(ax1, "Original Test Sample + Predicted Plane", elev=24, azim=-60)
 
     ax2 = fig.add_subplot(2, 2, 2, projection='3d')
-    _scatter_pc(ax2, source_pc, color="#d3d3d3", size=0.8, alpha=0.18)
-    _scatter_pc(ax2, selected_pc, color="#e45756", size=2.2, alpha=0.95)
-    _draw_plane(ax2, plane)
-    _set_axes_style(ax2, "Selected Half + Plane", elev=24, azim=-60)
+    _scatter_pc(ax2, original_pc, color=original_color, size=0.9, alpha=0.30)
+    _scatter_pc(ax2, selected_pc, color=selected_color, size=2.2, alpha=0.97)
+    _draw_plane(ax2, plane, color=plane_color)
+    _set_axes_style(ax2, "Original Sample Cut By Predicted Plane", elev=24, azim=-60)
 
     ax3 = fig.add_subplot(2, 2, 3, projection='3d')
-    _scatter_pc(ax3, reconstructed_pc, color="#54a24b", size=1.2, alpha=0.85)
-    _draw_plane(ax3, plane)
-    _set_axes_style(ax3, "Reconstructed Sample + Plane", elev=24, azim=-60)
+    _scatter_pc(ax3, reconstructed_pc, color=reconstructed_color, size=1.2, alpha=0.90)
+    _draw_plane(ax3, plane, color=plane_color)
+    _set_axes_style(ax3, "Reconstructed From x_t + Plane", elev=24, azim=-60)
 
     ax4 = fig.add_subplot(2, 2, 4, projection='3d')
-    _scatter_pc(ax4, source_pc, color="#d3d3d3", size=0.7, alpha=0.12)
-    _scatter_pc(ax4, selected_pc, color="#e45756", size=1.8, alpha=0.95)
-    _scatter_pc(ax4, reconstructed_pc, color="#4c78a8", size=1.0, alpha=0.55)
-    _draw_plane(ax4, plane)
-    _set_axes_style(ax4, "Overlay", elev=90, azim=-90)
+    _scatter_pc(ax4, original_pc, color=original_color, size=0.7, alpha=0.24)
+    _scatter_pc(ax4, selected_pc, color=selected_color, size=1.8, alpha=0.97)
+    _scatter_pc(ax4, reconstructed_pc, color=reconstructed_color, size=1.0, alpha=0.75)
+    _draw_plane(ax4, plane, color=plane_color)
+    _set_axes_style(ax4, "Overlay: Original / Selected / Reconstructed", hide_ticks=True, elev=90, azim=-90)
 
-    plt.subplots_adjust(left=0.04, right=0.96, top=0.95, bottom=0.05, wspace=0.2, hspace=0.22)
+    fig.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, 0.98), ncol=4, frameon=False)
+    plt.subplots_adjust(left=0.04, right=0.96, top=0.90, bottom=0.05, wspace=0.2, hspace=0.22)
     fig.savefig(path, dpi=150)
     plt.close(fig)
 

@@ -80,6 +80,18 @@ def _stratified_subsample(indices: torch.Tensor, scores: torch.Tensor, target_co
     return ordered[positions]
 
 
+def _resample_same_side(indices: torch.Tensor, scores: torch.Tensor, target_count: int) -> torch.Tensor:
+    if indices.numel() == 0:
+        raise ValueError("Cannot resample from an empty side")
+    if indices.numel() >= target_count:
+        return _stratified_subsample(indices, scores, target_count, descending=False)
+    order = torch.argsort(scores, descending=False)
+    ordered = indices[order]
+    positions = torch.linspace(0, ordered.numel() - 1, steps=target_count, device=ordered.device)
+    positions = positions.round().long().remainder(ordered.numel())
+    return ordered[positions]
+
+
 def select_topk_half(points: torch.Tensor, plane: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     _, num_points, _ = points.shape
     k = num_points // 2
@@ -102,14 +114,19 @@ def select_signed_half(points: torch.Tensor, plane: torch.Tensor) -> tuple[torch
         positive = all_indices[dist >= 0]
         negative = all_indices[dist < 0]
 
-        if positive.numel() >= k:
-            chosen = _stratified_subsample(positive, dist[positive], k, descending=False)
-        elif positive.numel() > 0 and negative.numel() > 0:
-            need = k - positive.numel()
-            fill = _stratified_subsample(negative, dist[negative].abs(), need, descending=False)
-            chosen = torch.cat([positive, fill], dim=0)
-        else:
+        if positive.numel() == 0 and negative.numel() == 0:
             _, chosen = torch.topk(dist, k, dim=0)
+        else:
+            if positive.numel() >= negative.numel() and positive.numel() > 0:
+                source = positive
+                source_scores = dist[positive]
+            elif negative.numel() > 0:
+                source = negative
+                source_scores = dist[negative].abs()
+            else:
+                source = positive
+                source_scores = dist[positive]
+            chosen = _resample_same_side(source, source_scores, k)
 
         batch_indices.append(chosen.sort().values)
 
