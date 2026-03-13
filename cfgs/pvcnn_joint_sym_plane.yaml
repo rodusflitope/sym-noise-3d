@@ -23,8 +23,8 @@ model:
 loss:
   lambda_diff: 1.0
   lambda_plane: 1.0
-  lambda_recon: 1.0
-  lambda_plane_consistency: 1.0
+  lambda_recon: 0.05
+  lambda_plane_consistency: 0.1
   plane_normal_weight: 1.0
   plane_offset_weight: 1.0
   metric: "cd"
@@ -53,6 +53,7 @@ diffusion:
 sampler:
   name: "ddpm"
   eta: 1.0
+  joint_selection_mode: "predicted"
   num_samples: 4
   save_dir: "samples"
   save_format: "npy"
@@ -70,5 +71,6 @@ debug:
     enabled: true
     source: "val"
     batch_size: 4
-    timestep: "mid"
+    timesteps: ["low", "mid", "high"]
+    metric: "cd"
     print_every: 1

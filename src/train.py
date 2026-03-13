@@ -16,6 +16,7 @@ from contextlib import nullcontext
 
 from src.data import build_datasets_from_config
 from src.losses import build_joint_symmetry_plane_loss, build_loss, build_sym_learned_plane_loss
+from src.metrics.metrics import chamfer_distance, earth_movers_distance
 from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane, PTSymLearnedPlane, PVCNNJointSymPlane, PTJointSymPlane
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
@@ -23,7 +24,7 @@ from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_con
 from src.utils.common import load_cfg, set_seed, get_device
 from src.utils.lr import build_optimizer_and_scheduler
 from src.utils.ema import build_ema_model
-from src.utils.symmetry_planes import normalize_plane
+from src.utils.symmetry_planes import gather_points, normalize_plane
 
 
 def unpack_batch(batch, device: torch.device):
@@ -87,7 +88,8 @@ def _joint_debug_cfg(cfg: dict) -> dict:
         "enabled": bool(plane_cfg.get("enabled", False)),
         "source": str(plane_cfg.get("source", "val")).lower(),
         "batch_size": int(plane_cfg.get("batch_size", 4)),
-        "timestep": plane_cfg.get("timestep", "mid"),
+        "timesteps": plane_cfg.get("timesteps", plane_cfg.get("timestep", "mid")),
+        "metric": str(plane_cfg.get("metric", "cd")).lower(),
         "print_every": int(plane_cfg.get("print_every", 1)),
     }
 
@@ -105,43 +107,161 @@ def _resolve_debug_timestep(spec, T: int) -> int:
     return max(0, min(T - 1, int(spec)))
 
 
+def _resolve_debug_timesteps(spec, T: int) -> list[int]:
+    if isinstance(spec, (list, tuple)):
+        raw = [_resolve_debug_timestep(item, T) for item in spec]
+    else:
+        raw = [_resolve_debug_timestep(spec, T)]
+    seen: set[int] = set()
+    out: list[int] = []
+    for item in raw:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    if not out:
+        out.append(max(0, min(T - 1, T // 2)))
+    return out
+
+
+def _batch_jaccard(indices_a: torch.Tensor, indices_b: torch.Tensor, num_points: int) -> torch.Tensor:
+    mask_a = torch.zeros(indices_a.shape[0], num_points, dtype=torch.bool, device=indices_a.device)
+    mask_b = torch.zeros(indices_b.shape[0], num_points, dtype=torch.bool, device=indices_b.device)
+    mask_a.scatter_(1, indices_a, True)
+    mask_b.scatter_(1, indices_b, True)
+    intersection = (mask_a & mask_b).sum(dim=1).float()
+    union = (mask_a | mask_b).sum(dim=1).float().clamp(min=1.0)
+    return intersection / union
+
+
+def _build_noisy_state(x0: torch.Tensor, plane0: torch.Tensor, eps_points: torch.Tensor, eps_plane: torch.Tensor, alpha_bar_t: torch.Tensor):
+    sqrt_ab_points = torch.sqrt(alpha_bar_t).view(1, 1, 1)
+    sqrt_1m_points = torch.sqrt((1.0 - alpha_bar_t).clamp(min=1e-8)).view(1, 1, 1)
+    x_t = (sqrt_ab_points * x0) + (sqrt_1m_points * eps_points)
+    sqrt_ab_plane = torch.sqrt(alpha_bar_t).view(1, 1)
+    sqrt_1m_plane = torch.sqrt((1.0 - alpha_bar_t).clamp(min=1e-8)).view(1, 1)
+    plane_t = (sqrt_ab_plane * plane0) + (sqrt_1m_plane * eps_plane)
+    return x_t, plane_t
+
+
 def run_joint_plane_debug_snapshot(
     model: torch.nn.Module,
     forward: ForwardDiffusion,
     alpha_bars: torch.Tensor,
     debug_batch: Optional[tuple[torch.Tensor, torch.Tensor]],
     *,
-    timestep: int,
+    timesteps: list[int],
+    recon_metric: str,
     global_step: int,
     epoch: int,
 ) -> Optional[dict[str, float | int | list[float]]]:
     if debug_batch is None:
         return None
     x0, plane0 = debug_batch
-    batch_size = x0.shape[0]
-    t = torch.full((batch_size,), int(timestep), dtype=torch.long, device=x0.device)
+    batch_size, num_points, _ = x0.shape
+    eps_points = torch.randn_like(x0)
+    eps_plane = torch.randn_like(plane0)
+    step_metrics: list[dict[str, float | int]] = []
+    first_plane_pred_0: torch.Tensor | None = None
+
     with torch.no_grad():
-        x_t, _ = forward.add_noise(x0, t)
-        plane_t, _ = forward.add_noise(plane0, t)
-        result = model(x_t, plane_t, t, alpha_bars[t], selection_plane=None)
-        plane_pred = normalize_plane(result["plane_x0_pred"])
-    cos = torch.nn.functional.cosine_similarity(plane_pred[:, :3], plane0[:, :3], dim=-1)
-    offset_abs = (plane_pred[:, 3] - plane0[:, 3]).abs()
+        for timestep in timesteps:
+            t = torch.full((batch_size,), int(timestep), dtype=torch.long, device=x0.device)
+            alpha_t = alpha_bars[t]
+            x_t, plane_t = _build_noisy_state(x0, plane0, eps_points, eps_plane, alpha_t[0])
+            result = model(x_t, plane_t, t, alpha_t, selection_plane=None)
+            plane_pred = normalize_plane(result["plane_x0_pred"])
+            if first_plane_pred_0 is None:
+                first_plane_pred_0 = plane_pred[0].detach().clone()
+            active_plane = normalize_plane(result.get("selection_plane", plane_pred))
+
+            cos = torch.nn.functional.cosine_similarity(plane_pred[:, :3], plane0[:, :3], dim=-1).clamp(min=-1.0, max=1.0)
+            angle_deg = torch.rad2deg(torch.acos(cos))
+            offset_abs = (plane_pred[:, 3] - plane0[:, 3]).abs()
+
+            n = active_plane[:, :3]
+            d = active_plane[:, 3:4]
+            dist = torch.bmm(x_t, n.unsqueeze(2)).squeeze(2) - d
+            positive = (dist >= 0).sum(dim=1).float()
+            negative = (dist < 0).sum(dim=1).float()
+            side_imbalance = ((positive - negative).abs() / float(num_points)).mean()
+
+            indices = result["indices"]
+            eps_half = result["eps_pred_half"]
+            x_half = gather_points(x_t, indices)
+            abar = alpha_t.view(batch_size, 1, 1)
+            x0_half = (x_half - torch.sqrt((1.0 - abar).clamp(min=1e-8)) * eps_half) / torch.sqrt(abar.clamp(min=1e-8))
+            x0_reflected = model.reflect(x0_half, plane_pred)
+            x0_reconstructed = torch.cat([x0_half, x0_reflected], dim=1)
+
+            if recon_metric == "emd":
+                recon = earth_movers_distance(x0_reconstructed, x0).mean()
+            else:
+                recon = chamfer_distance(x0_reconstructed, x0).mean()
+            recon = torch.nan_to_num(recon, nan=0.0, posinf=0.0, neginf=0.0)
+
+            jaccard_mean = float("nan")
+            if timestep > 0:
+                t_prev = torch.full((batch_size,), int(timestep - 1), dtype=torch.long, device=x0.device)
+                alpha_prev = alpha_bars[t_prev]
+                x_prev, plane_prev = _build_noisy_state(x0, plane0, eps_points, eps_plane, alpha_prev[0])
+                result_prev = model(x_prev, plane_prev, t_prev, alpha_prev, selection_plane=None)
+                jaccard = _batch_jaccard(indices, result_prev["indices"], num_points)
+                jaccard_mean = float(jaccard.mean().item())
+
+            step_metrics.append(
+                {
+                    "timestep": int(timestep),
+                    "mean_cos": float(cos.mean().item()),
+                    "mean_angle_deg": float(angle_deg.mean().item()),
+                    "mean_abs_offset": float(offset_abs.mean().item()),
+                    "mean_side_imbalance": float(side_imbalance.item()),
+                    "mean_recon": float(recon.item()),
+                    "mean_jaccard_t_to_t_minus_1": float(jaccard_mean),
+                }
+            )
+
+    if not step_metrics:
+        return None
+
+    mean_cos = sum(float(item["mean_cos"]) for item in step_metrics) / len(step_metrics)
+    mean_abs_offset = sum(float(item["mean_abs_offset"]) for item in step_metrics) / len(step_metrics)
+    mean_angle_deg = sum(float(item["mean_angle_deg"]) for item in step_metrics) / len(step_metrics)
+    mean_side_imbalance = sum(float(item["mean_side_imbalance"]) for item in step_metrics) / len(step_metrics)
+    mean_recon = sum(float(item["mean_recon"]) for item in step_metrics) / len(step_metrics)
+
+    valid_jaccard = [float(item["mean_jaccard_t_to_t_minus_1"]) for item in step_metrics if not math.isnan(float(item["mean_jaccard_t_to_t_minus_1"]))]
+    mean_jaccard = float(sum(valid_jaccard) / len(valid_jaccard)) if valid_jaccard else float("nan")
+
     metrics = {
         "epoch": int(epoch),
         "global_step": int(global_step),
-        "timestep": int(timestep),
-        "mean_cos": float(cos.mean().item()),
-        "mean_abs_offset": float(offset_abs.mean().item()),
+        "timesteps": [int(t) for t in timesteps],
+        "mean_cos": float(mean_cos),
+        "mean_angle_deg": float(mean_angle_deg),
+        "mean_abs_offset": float(mean_abs_offset),
+        "mean_side_imbalance": float(mean_side_imbalance),
+        "mean_recon": float(mean_recon),
+        "mean_jaccard_t_to_t_minus_1": float(mean_jaccard),
         "gt_plane_0": [float(v) for v in plane0[0].detach().cpu().tolist()],
-        "pred_plane_0": [float(v) for v in plane_pred[0].detach().cpu().tolist()],
+        "pred_plane_0": [float(v) for v in (first_plane_pred_0 if first_plane_pred_0 is not None else plane0[0]).detach().cpu().tolist()],
+        "steps": step_metrics,
     }
+    print(f"[joint-plane-debug] epoch={epoch} step={global_step} | timesteps={metrics['timesteps']}")
     print(
-        f"[joint-plane-debug] epoch={epoch} step={global_step} t={timestep} | "
-        f"mean_cos={metrics['mean_cos']:.6f} | mean_abs_offset={metrics['mean_abs_offset']:.6f}"
+        f"[joint-plane-debug] mean_cos={metrics['mean_cos']:.6f} | mean_angle_deg={metrics['mean_angle_deg']:.6f} "
+        f"| mean_abs_offset={metrics['mean_abs_offset']:.6f} | mean_side_imbalance={metrics['mean_side_imbalance']:.6f} "
+        f"| mean_recon={metrics['mean_recon']:.6f} | mean_jaccard={metrics['mean_jaccard_t_to_t_minus_1']:.6f}"
     )
+    for item in step_metrics:
+        print(
+            f"[joint-plane-debug] t={int(item['timestep'])} | cos={float(item['mean_cos']):.6f} "
+            f"| angle_deg={float(item['mean_angle_deg']):.6f} | abs_offset={float(item['mean_abs_offset']):.6f} "
+            f"| side_imbalance={float(item['mean_side_imbalance']):.6f} | recon={float(item['mean_recon']):.6f} "
+            f"| jaccard_prev={float(item['mean_jaccard_t_to_t_minus_1']):.6f}"
+        )
     print(f"[joint-plane-debug] gt_plane_0={_format_plane(plane0[0])}")
-    print(f"[joint-plane-debug] pred_plane_0={_format_plane(plane_pred[0])}")
+    if first_plane_pred_0 is not None:
+        print(f"[joint-plane-debug] pred_plane_0={_format_plane(first_plane_pred_0)}")
     return metrics
 
 def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
@@ -342,7 +462,7 @@ def main() -> None:
         debug_batch = _prepare_debug_batch(debug_source, device, joint_debug_cfg["batch_size"])
         print(
             f"[train] Joint plane debug enabled: source={joint_debug_cfg['source']} "
-            f"batch_size={joint_debug_cfg['batch_size']} timestep={joint_debug_cfg['timestep']} "
+            f"batch_size={joint_debug_cfg['batch_size']} timesteps={joint_debug_cfg['timesteps']} metric={joint_debug_cfg['metric']} "
             f"print_every={joint_debug_cfg['print_every']}"
         )
     
@@ -620,7 +740,8 @@ def main() -> None:
                                 raise ValueError("Joint symmetry plane validation requires batch['symmetry_plane']")
                             x_t, eps = forward.add_noise(x0, t)
                             plane_t, eps_plane = forward.add_noise(plane0, t)
-                            result = model_to_eval(x_t, plane_t, t, alpha_bars[t], selection_plane=plane0)
+                            selection_plane = select_curriculum_plane(plane0, cfg, global_step)
+                            result = model_to_eval(x_t, plane_t, t, alpha_bars[t], selection_plane=selection_plane)
                             l, ld, lp, lr, lc = joint_sym_plane_loss_fn(
                                 result,
                                 eps,
@@ -765,7 +886,8 @@ def main() -> None:
                 forward,
                 alpha_bars,
                 debug_batch,
-                timestep=_resolve_debug_timestep(joint_debug_cfg["timestep"], T),
+                timesteps=_resolve_debug_timesteps(joint_debug_cfg["timesteps"], T),
+                recon_metric=joint_debug_cfg["metric"],
                 global_step=global_step,
                 epoch=epoch,
             )

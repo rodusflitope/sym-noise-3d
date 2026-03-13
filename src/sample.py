@@ -18,7 +18,7 @@ from src.samplers import build_sampler
 from src.utils.checkpoint import load_ckpt, load_ckpt_config
 from src.utils.io import save_npy, save_ply
 from src.vis_samples import plot_joint_plane_debug, plot_pc
-from src.utils.symmetry_planes import gather_points, select_signed_half
+from src.utils.symmetry_planes import gather_points, normalize_plane, select_signed_half
 
 
 def _load_autoencoder(cfg, device, ae_ckpt: str):
@@ -117,7 +117,16 @@ def _prepare_joint_test_debug_batch(cfg, device, num_samples: int):
     return x0, plane0
 
 
-def _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples: int, T: int):
+def _resolve_joint_selection_plane(selection_mode: str, plane_t: torch.Tensor):
+    mode = selection_mode.lower()
+    if mode in {"pred", "predicted", "plane_x0_pred"}:
+        return None
+    if mode in {"plane_t", "noisy", "noisy_plane"}:
+        return normalize_plane(plane_t)
+    raise ValueError(f"Unsupported sampler.joint_selection_mode: {selection_mode}")
+
+
+def _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples: int, T: int, selection_mode: str):
     batch = _prepare_joint_test_debug_batch(cfg, device, num_samples)
     if batch is None:
         return None
@@ -132,10 +141,11 @@ def _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples: 
 
     for t in reversed(range(T)):
         t_batch = torch.full((sample_count,), t, dtype=torch.long, device=device)
-        result = model(x_t, plane_t, t_batch, alpha_bars[t_batch])
+        selection_plane = _resolve_joint_selection_plane(selection_mode, plane_t)
+        result = model(x_t, plane_t, t_batch, alpha_bars[t_batch], selection_plane=selection_plane)
         eps_half = result["eps_pred_half"]
         indices = result["indices"]
-        plane_x0 = result["plane_x0_pred"].clamp(-2, 2)
+        plane_x0 = normalize_plane(result["plane_x0_pred"])
         x_half = gather_points(x_t, indices)
 
         s_ab = sqrt_alpha_bars[t]
@@ -274,6 +284,7 @@ def main():
             print("[sample] MODE: Joint Symmetric Plane Diffusion")
             sqrt_alpha_bars = torch.sqrt(alpha_bars)
             sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
+            joint_selection_mode = str(cfg.get("sampler", {}).get("joint_selection_mode", "predicted"))
 
             if noise_type is not None:
                 x_t = noise_type.sample((num_samples, num_points, 3), device)
@@ -285,11 +296,11 @@ def main():
                 batch_size = x_t.shape[0]
                 t_batch = torch.full((batch_size,), t, dtype=torch.long, device=device)
 
-                result = model(x_t, plane_t, t_batch, alpha_bars[t_batch])
+                selection_plane = _resolve_joint_selection_plane(joint_selection_mode, plane_t)
+                result = model(x_t, plane_t, t_batch, alpha_bars[t_batch], selection_plane=selection_plane)
                 eps_half = result["eps_pred_half"]
-                plane_eps = result["plane_eps_pred"]
                 indices = result["indices"]
-                plane_x0 = result["plane_x0_pred"]
+                plane_x0 = normalize_plane(result["plane_x0_pred"])
                 x_half = gather_points(x_t, indices)
 
                 s_ab = sqrt_alpha_bars[t]
@@ -298,7 +309,6 @@ def main():
                 x0_half = x0_half.clamp(-2, 2)
                 x0_other = model.reflect(x0_half, plane_x0)
                 x0_full = torch.cat([x0_half, x0_other], dim=1)
-                plane_x0 = plane_x0.clamp(-2, 2)
 
                 if t == 0:
                     x_t = x0_full
@@ -315,7 +325,7 @@ def main():
                     plane_t = s_ab_prev * plane_x0 + s_1m_prev * plane_z
 
             pcs = x_t
-            joint_debug = _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples, T)
+            joint_debug = _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples, T, joint_selection_mode)
         elif not use_latent:
             pcs = sampler.sample(model, num_samples=num_samples, num_points=num_points)
         else:
