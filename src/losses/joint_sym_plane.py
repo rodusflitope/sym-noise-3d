@@ -61,7 +61,23 @@ class JointSymmetryPlaneLoss:
         x_half = gather_points(x_t, indices)
         abar = alpha_bar_t.view(batch_size, 1, 1)
         x0_half = (x_half - torch.sqrt((1.0 - abar).clamp(min=1e-8)) * eps_pred_half) / torch.sqrt(abar.clamp(min=1e-8))
-        x0_reflected = reflect_points(x0_half, plane_x0_pred)
+
+        warmup_progress = 1.0
+        if self.warmup_steps > 0 and current_step is not None:
+            warmup_progress = min(1.0, float(current_step) / float(self.warmup_steps))
+
+        recon_plane = plane_target
+        if warmup_progress >= 1.0:
+            recon_plane = plane_x0_pred
+        elif current_step is not None:
+            b = plane_target.shape[0]
+            with torch.no_grad():
+                prob = torch.rand(b, device=plane_target.device)
+                use_pred = prob < warmup_progress
+                recon_plane = torch.where(use_pred.view(-1, 1), plane_x0_pred, plane_target)
+                recon_plane = normalize_plane(recon_plane)
+
+        x0_reflected = reflect_points(x0_half, recon_plane)
         x0_reconstructed = torch.cat([x0_half, x0_reflected], dim=1)
 
         if self.metric == "emd":
