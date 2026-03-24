@@ -14,11 +14,16 @@ from src.models import (
 )
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
-from src.samplers import build_sampler
+from src.samplers import build_sampler, SymmetricDDPM_Sampler, JointSymmetricDDPM_Sampler
 from src.utils.checkpoint import load_ckpt, load_ckpt_config
 from src.utils.io import save_npy, save_ply
 from src.vis_samples import plot_joint_plane_debug, plot_pc
 from src.utils.symmetry_planes import gather_points, normalize_plane, select_signed_half
+from src.utils.joint_modes import (
+    get_joint_mode_config,
+    infer_plane_mode_enabled,
+    validate_joint_configuration,
+)
 
 
 def _load_autoencoder(cfg, device, ae_ckpt: str):
@@ -117,16 +122,21 @@ def _prepare_joint_test_debug_batch(cfg, device, num_samples: int):
     return x0, plane0
 
 
-def _resolve_joint_selection_plane(selection_mode: str, plane_t: torch.Tensor):
+def _resolve_joint_selection_plane(selection_mode: str, plane_t: torch.Tensor | None, fallback_plane: torch.Tensor | None):
     mode = selection_mode.lower()
     if mode in {"pred", "predicted", "plane_x0_pred"}:
-        return None
+        return fallback_plane
     if mode in {"plane_t", "noisy", "noisy_plane"}:
+        if plane_t is None:
+            raise ValueError("conditional_selection_mode='plane_t' requires plane_t")
         return normalize_plane(plane_t)
-    raise ValueError(f"Unsupported sampler.joint_selection_mode: {selection_mode}")
+    raise ValueError(f"Unsupported sampler selection mode: {selection_mode}. Use conditional_selection_mode or joint_selection_mode")
 
 
-def _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples: int, T: int, selection_mode: str):
+def _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples: int, T: int, selection_mode: str):
+    if not infer_plane_mode_enabled(cfg):
+        return None
+    geometry_mode = get_joint_mode_config(cfg).geometry_mode
     batch = _prepare_joint_test_debug_batch(cfg, device, num_samples)
     if batch is None:
         return None
@@ -135,28 +145,32 @@ def _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples: 
     t_init = torch.full((sample_count,), T - 1, dtype=torch.long, device=device)
     x_t, _ = forward.add_noise(x0_ref, t_init)
     plane_t, _ = forward.add_noise(plane0_ref, t_init)
-    sqrt_alpha_bars = torch.sqrt(alpha_bars)
-    sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
     payload = None
 
     for t in reversed(range(T)):
         t_batch = torch.full((sample_count,), t, dtype=torch.long, device=device)
-        selection_plane = _resolve_joint_selection_plane(selection_mode, plane_t)
+        selection_plane = _resolve_joint_selection_plane(selection_mode, plane_t, None)
         result = model(x_t, plane_t, t_batch, alpha_bars[t_batch], selection_plane=selection_plane)
         eps_half = result["eps_pred_half"]
         indices = result["indices"]
         plane_x0 = normalize_plane(result["plane_x0_pred"])
         x_half = gather_points(x_t, indices)
 
-        s_ab = sqrt_alpha_bars[t]
-        s_1m = sqrt_one_minus_alpha_bars[t]
+        s_ab = torch.sqrt(alpha_bars[t])
+        s_1m = torch.sqrt(1.0 - alpha_bars[t])
         x0_half = (x_half - s_1m * eps_half) / s_ab.clamp(min=1e-8)
         x0_half = x0_half.clamp(-2, 2)
-        x0_other = model.reflect(x0_half, plane_x0)
-        x0_full = torch.cat([x0_half, x0_other], dim=1)
+        if geometry_mode == "full":
+            x0_full = x0_half
+        else:
+            x0_other = model.reflect(x0_half, plane_x0)
+            x0_full = torch.cat([x0_half, x0_other], dim=1)
 
         if t == 0:
-            original_selected, _ = select_signed_half(x0_ref, plane_x0)
+            if geometry_mode == "full":
+                original_selected = x0_ref
+            else:
+                original_selected, _ = select_signed_half(x0_ref, plane_x0)
             payload = {
                 "original_pc": x0_ref.detach().cpu().numpy().astype(np.float32),
                 "selected_pc": original_selected.detach().cpu().numpy().astype(np.float32),
@@ -166,16 +180,13 @@ def _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples: 
             x_t = x0_full
             plane_t = plane_x0
         else:
-            s_ab_prev = sqrt_alpha_bars[t - 1]
-            s_1m_prev = sqrt_one_minus_alpha_bars[t - 1]
-            if forward.noise_type is not None:
-                x_noise = forward.noise_type.sample(x0_full.shape, device)
-                plane_noise = forward.noise_type.sample(plane_t.shape, device)
+            if geometry_mode == "full":
+                x_t_full_cur = x_t
             else:
-                x_noise = torch.randn_like(x0_full)
-                plane_noise = torch.randn_like(plane_t)
-            x_t = s_ab_prev * x0_full + s_1m_prev * x_noise
-            plane_t = s_ab_prev * plane_x0 + s_1m_prev * plane_noise
+                x_other = model.reflect(x_half, plane_x0)
+                x_t_full_cur = torch.cat([x_half, x_other], dim=1)
+            x_t = sampler.step_from_x0(x_t_full_cur, x0_full, t)
+            plane_t = sampler.step_from_x0(plane_t, plane_x0, t)
 
     return payload
 
@@ -239,93 +250,22 @@ def main():
         joint_debug = None
         if isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane)) and not use_latent:
             print("[sample] MODE: Symmetric Diffusion (predict x0, reflect, re-noise)")
-            sqrt_alpha_bars = torch.sqrt(alpha_bars)
-            sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
-
-            if noise_type is not None:
-                x_t = noise_type.sample((num_samples, num_points, 3), device)
-            else:
-                x_t = torch.randn(num_samples, num_points, 3, device=device)
-
-            for t in reversed(range(T)):
-                B = x_t.shape[0]
-                t_batch = torch.full((B,), t, dtype=torch.long, device=device)
-
-                result = model(x_t, t_batch)
-                eps_half = result["eps_pred_half"]
-                indices = result["indices"]
-                n_plane = result["n"]
-                d_plane = model.compute_plane_offset(x_t, n_plane)
-
-                idx_exp = indices.unsqueeze(-1).expand(-1, -1, 3)
-                X_half = torch.gather(x_t, 1, idx_exp)
-
-                s_ab = sqrt_alpha_bars[t]
-                s_1m = sqrt_one_minus_alpha_bars[t]
-                x0_half = (X_half - s_1m * eps_half) / s_ab
-                x0_half = x0_half.clamp(-2, 2)
-
-                x0_other = model.reflect(x0_half, n_plane, d_plane)
-                x0_full = torch.cat([x0_half, x0_other], dim=1)
-
-                if t == 0:
-                    x_t = x0_full
-                else:
-                    s_ab_prev = sqrt_alpha_bars[t - 1]
-                    s_1m_prev = sqrt_one_minus_alpha_bars[t - 1]
-                    if noise_type is not None:
-                        z = noise_type.sample(x0_full.shape, device)
-                    else:
-                        z = torch.randn_like(x0_full)
-                    x_t = s_ab_prev * x0_full + s_1m_prev * z
-
-            pcs = x_t
+            sym_sampler = SymmetricDDPM_Sampler(sampler)
+            pcs = sym_sampler.sample(model, num_samples=num_samples, num_points=num_points, device=device)
         elif isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane)) and not use_latent:
-            print("[sample] MODE: Joint Symmetric Plane Diffusion")
-            sqrt_alpha_bars = torch.sqrt(alpha_bars)
-            sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
-            joint_selection_mode = str(cfg.get("sampler", {}).get("joint_selection_mode", "predicted"))
-
-            if noise_type is not None:
-                x_t = noise_type.sample((num_samples, num_points, 3), device)
-            else:
-                x_t = torch.randn(num_samples, num_points, 3, device=device)
-            plane_t = torch.randn(num_samples, 4, device=device)
-
-            for t in reversed(range(T)):
-                batch_size = x_t.shape[0]
-                t_batch = torch.full((batch_size,), t, dtype=torch.long, device=device)
-
-                selection_plane = _resolve_joint_selection_plane(joint_selection_mode, plane_t)
-                result = model(x_t, plane_t, t_batch, alpha_bars[t_batch], selection_plane=selection_plane)
-                eps_half = result["eps_pred_half"]
-                indices = result["indices"]
-                plane_x0 = normalize_plane(result["plane_x0_pred"])
-                x_half = gather_points(x_t, indices)
-
-                s_ab = sqrt_alpha_bars[t]
-                s_1m = sqrt_one_minus_alpha_bars[t]
-                x0_half = (x_half - s_1m * eps_half) / s_ab.clamp(min=1e-8)
-                x0_half = x0_half.clamp(-2, 2)
-                x0_other = model.reflect(x0_half, plane_x0)
-                x0_full = torch.cat([x0_half, x0_other], dim=1)
-
-                if t == 0:
-                    x_t = x0_full
-                    plane_t = plane_x0
-                else:
-                    s_ab_prev = sqrt_alpha_bars[t - 1]
-                    s_1m_prev = sqrt_one_minus_alpha_bars[t - 1]
-                    if noise_type is not None:
-                        z = noise_type.sample(x0_full.shape, device)
-                    else:
-                        z = torch.randn_like(x0_full)
-                    plane_z = torch.randn_like(plane_t)
-                    x_t = s_ab_prev * x0_full + s_1m_prev * z
-                    plane_t = s_ab_prev * plane_x0 + s_1m_prev * plane_z
-
-            pcs = x_t
-            joint_debug = _run_joint_test_debug(model, cfg, device, forward, alpha_bars, num_samples, T, joint_selection_mode)
+            print("[sample] MODE: Conditional Symmetric Plane Diffusion")
+            validate_joint_configuration(cfg, context="sample")
+            joint_selection_mode = str(cfg.get("sampler", {}).get("conditional_selection_mode", cfg.get("sampler", {}).get("joint_selection_mode", "predicted")))
+            joint_sampler = JointSymmetricDDPM_Sampler(sampler)
+            pcs = joint_sampler.sample(
+                model,
+                cfg,
+                num_samples=num_samples,
+                num_points=num_points,
+                device=device,
+                alpha_bars=alpha_bars,
+            )
+            joint_debug = _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples, T, joint_selection_mode)
         elif not use_latent:
             pcs = sampler.sample(model, num_samples=num_samples, num_points=num_points)
         else:
@@ -449,7 +389,7 @@ def main():
         out_vis = out.with_suffix(".png")
         plot_pc(pcs_np[i], str(out_vis))
         if joint_debug is not None and i < len(joint_debug["original_pc"]):
-            out_joint_vis = save_dir / f"test_{i:03d}_joint_plane_debug.png"
+            out_joint_vis = save_dir / f"test_{i:03d}_conditional_plane_debug.png"
             plot_joint_plane_debug(
                 joint_debug["original_pc"][i],
                 joint_debug["selected_pc"][i],

@@ -45,6 +45,50 @@ class DDPM_Sampler:
         return mu + sigma_t * z
 
     @torch.no_grad()
+    def step_from_eps(self, x_t: torch.Tensor, eps_pred: torch.Tensor, t: int):
+
+        c1 = (1 - self.alphas[t]) / torch.sqrt(1 - self.alpha_bars[t])
+        mu = (x_t - c1 * eps_pred) / self.sqrt_alphas[t]
+
+        sigma_t = self.eta * torch.sqrt(self.beta_t_tilde[t])
+
+        if t == 0 or sigma_t.item() == 0.0:
+            return mu
+
+        if self.noise_type is not None:
+            z = self.noise_type.sample(x_t.shape, x_t.device)
+        else:
+            z = torch.randn_like(x_t)
+
+        return mu + sigma_t * z
+
+    @torch.no_grad()
+    def step_from_x0(self, x_t: torch.Tensor, x0_pred: torch.Tensor, t: int):
+        if t == 0:
+            return x0_pred
+
+        alpha_t = self.alphas[t]
+        alpha_bar_t = self.alpha_bars[t]
+        alpha_bar_t_prev = self.alpha_bars[t - 1]
+        beta_t = self.betas[t]
+
+        coef_x0 = (torch.sqrt(alpha_bar_t_prev) * beta_t) / (1.0 - alpha_bar_t)
+        coef_xt = (torch.sqrt(alpha_t) * (1.0 - alpha_bar_t_prev)) / (1.0 - alpha_bar_t)
+
+        mu = coef_x0 * x0_pred + coef_xt * x_t
+        sigma_t = self.eta * torch.sqrt(self.beta_t_tilde[t])
+
+        if sigma_t.item() == 0.0:
+            return mu
+
+        if self.noise_type is not None:
+            z = self.noise_type.sample(x_t.shape, x_t.device)
+        else:
+            z = torch.randn_like(x_t)
+
+        return mu + sigma_t * z
+
+    @torch.no_grad()
     def sample(self, model, num_samples: int, num_points: int):
 
         device = self.alpha_bars.device

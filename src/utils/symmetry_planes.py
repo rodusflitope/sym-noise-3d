@@ -101,7 +101,7 @@ def select_topk_half(points: torch.Tensor, plane: torch.Tensor) -> tuple[torch.T
     return gather_points(points, indices), indices
 
 
-def select_signed_half(points: torch.Tensor, plane: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def select_signed_half(points: torch.Tensor, plane: torch.Tensor, prefer_positive: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
     batch_size, num_points, _ = points.shape
     k = num_points // 2
     n, d = plane_to_normal_offset(plane)
@@ -117,7 +117,13 @@ def select_signed_half(points: torch.Tensor, plane: torch.Tensor) -> tuple[torch
         if positive.numel() == 0 and negative.numel() == 0:
             _, chosen = torch.topk(dist, k, dim=0)
         else:
-            if positive.numel() >= negative.numel() and positive.numel() > 0:
+            if prefer_positive and positive.numel() > 0:
+                source = positive
+                source_scores = dist[positive]
+            elif prefer_positive and negative.numel() > 0:
+                source = negative
+                source_scores = dist[negative].abs()
+            elif positive.numel() >= negative.numel() and positive.numel() > 0:
                 source = positive
                 source_scores = dist[positive]
             elif negative.numel() > 0:

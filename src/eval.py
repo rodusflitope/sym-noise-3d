@@ -14,12 +14,16 @@ from src.models import (
     LionAutoencoder,
     LionTwoPriorsDDM,
     PVCNNSymLearnedPlane,
+    PTSymLearnedPlane,
+    PVCNNJointSymPlane,
+    PTJointSymPlane,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
-from src.samplers import build_sampler
+from src.samplers import build_sampler, SymmetricDDPM_Sampler, JointSymmetricDDPM_Sampler
 from src.data import ShapeNetDataset
 from src.metrics import chamfer_distance, earth_movers_distance, reflection_symmetry_distance, compute_all_metrics
 from src.utils.checkpoint import load_ckpt_config
+from src.utils.joint_modes import validate_joint_configuration
 
 
 
@@ -183,49 +187,20 @@ def evaluate(
         raise ValueError("[eval] num_samples inválido o no hay datos para evaluar.")
 
     with torch.no_grad():
-        if isinstance(model, PVCNNSymLearnedPlane) and not use_latent:
-            sqrt_alpha_bars = torch.sqrt(alpha_bars)
-            sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
-            T = betas.shape[0]
-
-            if noise_type is not None:
-                x_t = noise_type.sample((num_samples, num_points, 3), device)
-            else:
-                x_t = torch.randn(num_samples, num_points, 3, device=device)
-
-            for t in reversed(range(T)):
-                B = x_t.shape[0]
-                t_batch = torch.full((B,), t, dtype=torch.long, device=device)
-
-                result = model(x_t, t_batch)
-                eps_half = result["eps_pred_half"]
-                indices = result["indices"]
-                n_plane = result["n"]
-                d_plane = model.compute_plane_offset(x_t, n_plane)
-
-                idx_exp = indices.unsqueeze(-1).expand(-1, -1, 3)
-                X_half = torch.gather(x_t, 1, idx_exp)
-
-                s_ab = sqrt_alpha_bars[t]
-                s_1m = sqrt_one_minus_alpha_bars[t]
-                x0_half = (X_half - s_1m * eps_half) / s_ab
-                x0_half = x0_half.clamp(-2, 2)
-
-                x0_other = PVCNNSymLearnedPlane.reflect(x0_half, n_plane, d_plane)
-                x0_full = torch.cat([x0_half, x0_other], dim=1)
-
-                if t == 0:
-                    x_t = x0_full
-                else:
-                    s_ab_prev = sqrt_alpha_bars[t - 1]
-                    s_1m_prev = sqrt_one_minus_alpha_bars[t - 1]
-                    if noise_type is not None:
-                        z = noise_type.sample(x0_full.shape, device)
-                    else:
-                        z = torch.randn_like(x0_full)
-                    x_t = s_ab_prev * x0_full + s_1m_prev * z
-
-            samples = x_t.detach().cpu()
+        if isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane)) and not use_latent:
+            sym_sampler = SymmetricDDPM_Sampler(sampler)
+            samples = sym_sampler.sample(model, num_samples=num_samples, num_points=num_points, device=device).detach().cpu()
+        elif isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane)) and not use_latent:
+            validate_joint_configuration(cfg, context="eval")
+            joint_sampler = JointSymmetricDDPM_Sampler(sampler)
+            samples = joint_sampler.sample(
+                model,
+                cfg,
+                num_samples=num_samples,
+                num_points=num_points,
+                device=device,
+                alpha_bars=alpha_bars,
+            ).detach().cpu()
         elif not use_latent:
             samples = sampler.sample(model, num_samples, num_points).detach().cpu()
         else:
@@ -379,7 +354,13 @@ def evaluate(
     if n_eval <= 0:
         raise ValueError("[eval] num_samples inválido o no hay datos para evaluar.")
 
-    gt = torch.stack([ds[i] for i in range(n_eval)], dim=0)
+    gt_items = [ds[i] for i in range(n_eval)]
+    if len(gt_items) == 0:
+        raise ValueError("[eval] No ground-truth items found")
+    if isinstance(gt_items[0], dict):
+        gt = torch.stack([item["points"] for item in gt_items], dim=0)
+    else:
+        gt = torch.stack(gt_items, dim=0)
     gen = samples[:n_eval]
 
     gen = _ensure_bnc3(gen, name="gen")

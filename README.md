@@ -8,9 +8,13 @@ This repo supports two main training workflows:
 
 Below are concise instructions to run each stage end-to-end.
 
-Workspace note:
-- In this thesis workspace, run commands from the workspace root (`Tesis`) and prefix script/config paths with `sym-noise-3d/`.
-- Example: `python sym-noise-3d/src/train.py --cfg sym-noise-3d/cfgs/pointnet.yaml`.
+## Naming note (conditional vs joint)
+
+The current conditional symmetry method appears as `joint` in some internal code names by naming mistake.
+
+Use the following meaning in experiments and reporting:
+- `joint` in legacy/internal symbols means the current conditional pipeline.
+- `joint_true` means a true joint formulation.
 
 ## 1. Setup
 
@@ -43,7 +47,7 @@ Run:
 
 ```pwsh
 & .venv/Scripts/Activate.ps1
-python -m src.train_autoencoder --cfg cfgs/latent_diffusion.yaml
+python src/train_autoencoder.py --cfg cfgs/latent_diffusion.yaml
 ```
 
 Outputs:

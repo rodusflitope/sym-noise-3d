@@ -25,6 +25,13 @@ from src.utils.common import load_cfg, set_seed, get_device
 from src.utils.lr import build_optimizer_and_scheduler
 from src.utils.ema import build_ema_model
 from src.utils.symmetry_planes import gather_points, normalize_plane
+from src.utils.joint_modes import (
+    get_joint_mode_config,
+    infer_plane_mode_enabled,
+    resolve_plane_target,
+    select_curriculum_plane,
+    validate_joint_configuration,
+)
 
 
 def unpack_batch(batch, device: torch.device):
@@ -35,27 +42,6 @@ def unpack_batch(batch, device: torch.device):
             plane0 = plane0.to(device)
         return x0, plane0
     return batch.to(device), None
-
-
-def select_curriculum_plane(plane0: torch.Tensor | None, cfg: dict, current_step: int):
-    if plane0 is None:
-        return None
-    loss_cfg = cfg.get("loss", {}) or {}
-    start_prob = float(loss_cfg.get("selection_gt_prob_start", 1.0))
-    end_prob = float(loss_cfg.get("selection_gt_prob_end", 0.0))
-    warmup_steps = int(loss_cfg.get("selection_warmup_steps", loss_cfg.get("warmup_steps", 1000)))
-    if warmup_steps <= 0:
-        gt_prob = end_prob
-    else:
-        progress = min(1.0, float(current_step) / float(warmup_steps))
-        gt_prob = start_prob + ((end_prob - start_prob) * progress)
-    if gt_prob <= 0.0:
-        return None
-    if gt_prob >= 1.0:
-        return plane0
-    if torch.rand(1, device=plane0.device).item() < gt_prob:
-        return plane0
-    return None
 
 
 def _format_plane(plane: torch.Tensor) -> str:
@@ -83,7 +69,7 @@ def _prepare_debug_batch(ds, device: torch.device, batch_size: int) -> Optional[
 
 def _joint_debug_cfg(cfg: dict) -> dict:
     debug_cfg = cfg.get("debug", {}) or {}
-    plane_cfg = debug_cfg.get("joint_plane_monitor", {}) or {}
+    plane_cfg = (debug_cfg.get("conditional_plane_monitor", {}) or debug_cfg.get("joint_plane_monitor", {}) or {})
     return {
         "enabled": bool(plane_cfg.get("enabled", False)),
         "source": str(plane_cfg.get("source", "val")).lower(),
@@ -454,9 +440,15 @@ def main() -> None:
     use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, ae_ok_types))
     use_sym_plane = isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane))
     use_joint_sym_plane = isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane))
+    if use_joint_sym_plane:
+        validate_joint_configuration(cfg, context="train")
     joint_debug_cfg = _joint_debug_cfg(cfg)
     debug_batch = None
-    debug_history_path = pathlib.Path(cfg["train"]["out_dir"]) / exp_name / "joint_plane_debug.jsonl"
+    debug_history_path = pathlib.Path(cfg["train"]["out_dir"]) / exp_name / "conditional_plane_debug.jsonl"
+    if use_joint_sym_plane and joint_debug_cfg["enabled"]:
+        if not infer_plane_mode_enabled(cfg):
+            joint_debug_cfg["enabled"] = False
+            print("[train] Joint plane debug disabled: plane_mode='conditioning' is active")
     if use_joint_sym_plane and joint_debug_cfg["enabled"]:
         debug_source = ds_val if joint_debug_cfg["source"] == "val" and ds_val is not None else ds
         debug_batch = _prepare_debug_batch(debug_source, device, joint_debug_cfg["batch_size"])
@@ -576,19 +568,42 @@ def main() -> None:
                         result, eps, x_t, x0, alpha_bars[t], current_step=global_step
                     )
                 elif use_joint_sym_plane:
-                    if plane0 is None:
-                        raise ValueError("Joint symmetry plane training requires batch['symmetry_plane']")
+                    joint_mode_cfg = get_joint_mode_config(cfg)
+                    plane_target = resolve_plane_target(
+                        cfg,
+                        batch_size=B,
+                        device=x0.device,
+                        dtype=x0.dtype,
+                        plane0=plane0,
+                    )
+                    if plane_target is None:
+                        raise ValueError("Joint symmetry training requires a plane target (dataset labels or fixed axis)")
                     x_t, eps = forward.add_noise(x0, t)
-                    plane_t, eps_plane = forward.add_noise(plane0, t)
-                    selection_plane = select_curriculum_plane(plane0, cfg, global_step)
-                    result = model(x_t, plane_t, t, alpha_bars[t], selection_plane=selection_plane)
+                    if infer_plane_mode_enabled(cfg):
+                        plane_t, eps_plane = forward.add_noise(plane_target, t)
+                        selection_plane = select_curriculum_plane(plane_target, cfg, global_step)
+                    else:
+                        plane_t, eps_plane = None, None
+                        selection_plane = plane_target
+                    if joint_mode_cfg.geometry_mode == "half":
+                        selection_reference_points = x0
+                    else:
+                        selection_reference_points = None
+                    result = model(
+                        x_t,
+                        plane_t,
+                        t,
+                        alpha_bars[t],
+                        selection_plane=selection_plane,
+                        selection_reference_points=selection_reference_points,
+                    )
                     loss, loss_diff, loss_plane, loss_recon, loss_plane_cons = joint_sym_plane_loss_fn(
                         result,
                         eps,
                         eps_plane,
                         x_t,
                         x0,
-                        plane0,
+                        plane_target,
                         alpha_bars[t],
                         current_step=global_step,
                     )
@@ -736,19 +751,42 @@ def main() -> None:
                             v_loss_diff_sum += float(ld.item())
                             v_loss_sym_sum += float(ls.item())
                         elif use_joint_sym_plane:
-                            if plane0 is None:
-                                raise ValueError("Joint symmetry plane validation requires batch['symmetry_plane']")
+                            joint_mode_cfg = get_joint_mode_config(cfg)
+                            plane_target = resolve_plane_target(
+                                cfg,
+                                batch_size=B,
+                                device=x0.device,
+                                dtype=x0.dtype,
+                                plane0=plane0,
+                            )
+                            if plane_target is None:
+                                raise ValueError("Joint symmetry validation requires a plane target (dataset labels or fixed axis)")
                             x_t, eps = forward.add_noise(x0, t)
-                            plane_t, eps_plane = forward.add_noise(plane0, t)
-                            selection_plane = select_curriculum_plane(plane0, cfg, global_step)
-                            result = model_to_eval(x_t, plane_t, t, alpha_bars[t], selection_plane=selection_plane)
+                            if infer_plane_mode_enabled(cfg):
+                                plane_t, eps_plane = forward.add_noise(plane_target, t)
+                                selection_plane = select_curriculum_plane(plane_target, cfg, global_step)
+                            else:
+                                plane_t, eps_plane = None, None
+                                selection_plane = plane_target
+                            if joint_mode_cfg.geometry_mode == "half":
+                                selection_reference_points = x0
+                            else:
+                                selection_reference_points = None
+                            result = model_to_eval(
+                                x_t,
+                                plane_t,
+                                t,
+                                alpha_bars[t],
+                                selection_plane=selection_plane,
+                                selection_reference_points=selection_reference_points,
+                            )
                             l, ld, lp, lr, lc = joint_sym_plane_loss_fn(
                                 result,
                                 eps,
                                 eps_plane,
                                 x_t,
                                 x0,
-                                plane0,
+                                plane_target,
                                 alpha_bars[t],
                                 current_step=global_step,
                             )

@@ -119,7 +119,7 @@ def build_model(cfg):
             use_fourier_features=use_fourier_features,
             use_symmetric_attention=use_symmetric_attention,
         )
-    elif name == "pvcnn_joint_sym_plane":
+    elif name in {"pvcnn_joint_sym_plane", "pvcnn_conditional_sym_plane"}:
         from .pvcnn_joint_sym_plane import PVCNNJointSymPlane
 
         plane_hidden_dim = int(cfg["model"].get("plane_hidden_dim", 128))
@@ -127,14 +127,21 @@ def build_model(cfg):
         time_dim = int(cfg["model"].get("time_dim", 64))
         resolution = int(cfg["model"].get("resolution", 16))
         num_blocks = int(cfg["model"].get("num_blocks", 2))
+        conditional_cfg = cfg.get("conditional_symmetry", {}) or {}
+        joint_cfg = cfg.get("joint_symmetry", {}) or {}
+        mode_cfg = conditional_cfg if conditional_cfg else joint_cfg
+        geometry_mode = str(mode_cfg.get("geometry_mode", cfg["model"].get("conditional_geometry_mode", cfg["model"].get("joint_geometry_mode", "half")))).lower()
+        plane_mode = str(mode_cfg.get("plane_mode", cfg["model"].get("conditional_plane_mode", cfg["model"].get("joint_plane_mode", "diffusion")))).lower()
         return PVCNNJointSymPlane(
             plane_hidden_dim=plane_hidden_dim,
             backbone_hidden_dim=backbone_hidden_dim,
             time_dim=time_dim,
             resolution=resolution,
             num_blocks=num_blocks,
+            geometry_mode=geometry_mode,
+            plane_mode=plane_mode,
         )
-    elif name == "pt_joint_sym_plane":
+    elif name in {"pt_joint_sym_plane", "pt_conditional_sym_plane"}:
         from .pt_joint_sym_plane import PTJointSymPlane
 
         plane_hidden_dim = int(cfg["model"].get("plane_hidden_dim", 128))
@@ -144,6 +151,11 @@ def build_model(cfg):
         num_layers = int(cfg["model"].get("num_layers", 2))
         use_fourier_features = bool(cfg["model"].get("use_fourier_features", False))
         use_symmetric_attention = bool(cfg["model"].get("use_symmetric_attention", False))
+        conditional_cfg = cfg.get("conditional_symmetry", {}) or {}
+        joint_cfg = cfg.get("joint_symmetry", {}) or {}
+        mode_cfg = conditional_cfg if conditional_cfg else joint_cfg
+        geometry_mode = str(mode_cfg.get("geometry_mode", cfg["model"].get("conditional_geometry_mode", cfg["model"].get("joint_geometry_mode", "half")))).lower()
+        plane_mode = str(mode_cfg.get("plane_mode", cfg["model"].get("conditional_plane_mode", cfg["model"].get("joint_plane_mode", "diffusion")))).lower()
         return PTJointSymPlane(
             plane_hidden_dim=plane_hidden_dim,
             backbone_hidden_dim=backbone_hidden_dim,
@@ -152,6 +164,8 @@ def build_model(cfg):
             num_layers=num_layers,
             use_fourier_features=use_fourier_features,
             use_symmetric_attention=use_symmetric_attention,
+            geometry_mode=geometry_mode,
+            plane_mode=plane_mode,
         )
     elif name in {"legacy_pvcnn", "pvcnn_legacy"}:
         from .legacy_pvcnn import LegacyPVCNNEpsilon

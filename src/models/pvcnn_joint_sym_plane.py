@@ -17,8 +17,12 @@ class PVCNNJointSymPlane(nn.Module, JointSymmetryPlaneMixin):
         time_dim: int = 64,
         resolution: int = 16,
         num_blocks: int = 2,
+        geometry_mode: str = "half",
+        plane_mode: str = "diffusion",
     ):
         super().__init__()
+        self.geometry_mode = str(geometry_mode).strip().lower()
+        self.plane_mode = str(plane_mode).strip().lower()
         self.plane_head = PlaneDiffusionHead(hidden_dim=plane_hidden_dim, time_dim=time_dim)
         self.pvcnn = PVCNNEpsilon(
             hidden_dim=backbone_hidden_dim,
@@ -43,20 +47,27 @@ class PVCNNJointSymPlane(nn.Module, JointSymmetryPlaneMixin):
     def forward(
         self,
         x_t: torch.Tensor,
-        plane_t: torch.Tensor,
+        plane_t: torch.Tensor | None,
         t: torch.LongTensor,
-        alpha_bar_t: torch.Tensor,
+        alpha_bar_t: torch.Tensor | None,
         selection_plane: torch.Tensor | None = None,
+        selection_reference_points: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if x_t.ndim != 3 or x_t.shape[-1] != 3:
             raise ValueError(f"PVCNNJointSymPlane expects x_t [B,N,3], got {tuple(x_t.shape)}")
-        if plane_t.ndim != 2 or plane_t.shape[-1] != 4:
-            raise ValueError(f"PVCNNJointSymPlane expects plane_t [B,4], got {tuple(plane_t.shape)}")
+        if self.plane_mode == "diffusion":
+            if plane_t is None:
+                raise ValueError("PVCNNJointSymPlane with plane_mode='diffusion' requires plane_t")
+            if plane_t.ndim != 2 or plane_t.shape[-1] != 4:
+                raise ValueError(f"PVCNNJointSymPlane expects plane_t [B,4], got {tuple(plane_t.shape)}")
         return self._joint_forward_impl(
             x_t=x_t,
             plane_t=plane_t,
             t=t,
             alpha_bar_t=alpha_bar_t,
             selection_plane=selection_plane,
+            selection_reference_points=selection_reference_points,
+            plane_diffusion_enabled=(self.plane_mode == "diffusion"),
+            geometry_mode=self.geometry_mode,
             point_backbone=self.pvcnn,
         )

@@ -1,4 +1,4 @@
-exp_name: "pvcnn-joint-sym-plane"
+exp_name: "pvcnn-conditional-sym-plane-half-conditioning-fixed-x"
 seed: 10
 device: "auto"
 
@@ -13,18 +13,23 @@ data:
   symmetry_plane_cache_required: true
 
 model:
-  name: "pvcnn_joint_sym_plane"
+  name: "pvcnn_conditional_sym_plane"
   hidden_dim: 128
   plane_hidden_dim: 128
   time_dim: 64
   resolution: 16
   num_blocks: 2
 
+conditional_symmetry:
+  geometry_mode: "half"
+  plane_mode: "conditioning"
+  fixed_plane_axis: "x"
+
 loss:
   lambda_diff: 1.0
-  lambda_plane: 1.0
-  lambda_recon: 0.05
-  lambda_plane_consistency: 0.1
+  lambda_plane: 0.0
+  lambda_recon: 0.0
+  lambda_plane_consistency: 0.0
   plane_normal_weight: 1.0
   plane_offset_weight: 1.0
   metric: "cd"
@@ -53,7 +58,7 @@ diffusion:
 sampler:
   name: "ddpm"
   eta: 1.0
-  joint_selection_mode: "predicted"
+  conditional_selection_mode: "predicted"
   num_samples: 4
   save_dir: "samples"
   save_format: "npy"
@@ -67,8 +72,8 @@ lr_scheduler:
   warmup_steps: 500
 
 debug:
-  joint_plane_monitor:
-    enabled: true
+  conditional_plane_monitor:
+    enabled: false
     source: "val"
     batch_size: 4
     timesteps: ["low", "mid", "high"]
