@@ -50,11 +50,26 @@ class JointSymmetryPlaneLoss:
         indices = model_output["indices"]
         plane_eps_pred = model_output.get("plane_eps_pred")
         plane_x0_pred = normalize_plane(model_output["plane_x0_pred"])
+        selection_method = str(model_output.get("selection_method", "hard")).lower()
 
         if self.geometry_mode == "full":
             eps_real = eps_points
+            x_half = x_t
         else:
-            eps_real = gather_points(eps_points, indices)
+            if selection_method == "soft":
+                selection_weights_selected = model_output.get("selection_weights_selected")
+                if selection_weights_selected is None:
+                    selection_weights = model_output.get("selection_weights")
+                    if selection_weights is None:
+                        raise ValueError("selection_method='soft' requires selection weights in model_output")
+                    selection_weights_selected = gather_points(selection_weights.unsqueeze(-1), indices).squeeze(-1)
+                eps_real = gather_points(eps_points, indices) * selection_weights_selected.unsqueeze(-1)
+                x_half = model_output.get("x_selected")
+                if x_half is None:
+                    x_half = gather_points(x_t, indices)
+            else:
+                eps_real = gather_points(eps_points, indices)
+                x_half = gather_points(x_t, indices)
         loss_diff = F.mse_loss(eps_pred_half, eps_real)
 
         if self.lambda_plane > 0.0:
@@ -79,10 +94,6 @@ class JointSymmetryPlaneLoss:
         loss_plane_consistency = (self.plane_normal_weight * loss_plane_normal) + (self.plane_offset_weight * loss_plane_offset)
 
         batch_size = x_t.shape[0]
-        if self.geometry_mode == "full":
-            x_half = x_t
-        else:
-            x_half = gather_points(x_t, indices)
         abar = alpha_bar_t.view(batch_size, 1, 1)
         x0_half = (x_half - torch.sqrt((1.0 - abar).clamp(min=1e-8)) * eps_pred_half) / torch.sqrt(abar.clamp(min=1e-8))
 
@@ -102,8 +113,11 @@ class JointSymmetryPlaneLoss:
                     recon_plane = torch.where(use_pred.view(-1, 1), plane_x0_pred, plane_target)
                     recon_plane = normalize_plane(recon_plane)
 
-        x0_reflected = reflect_points(x0_half, recon_plane)
-        x0_reconstructed = torch.cat([x0_half, x0_reflected], dim=1)
+        if self.geometry_mode == "full":
+            x0_reconstructed = x0_half
+        else:
+            x0_reflected = reflect_points(x0_half, recon_plane)
+            x0_reconstructed = torch.cat([x0_half, x0_reflected], dim=1)
 
         if self.metric == "emd":
             loss_recon = earth_movers_distance(x0_reconstructed, x0).mean()

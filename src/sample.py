@@ -21,6 +21,8 @@ from src.vis_samples import plot_joint_plane_debug, plot_pc
 from src.utils.symmetry_planes import gather_points, normalize_plane, select_signed_half
 from src.utils.joint_modes import (
     get_joint_mode_config,
+    get_sampler_selection_mode,
+    get_selection_reference_mode,
     infer_plane_mode_enabled,
     validate_joint_configuration,
 )
@@ -133,7 +135,7 @@ def _resolve_joint_selection_plane(selection_mode: str, plane_t: torch.Tensor | 
     raise ValueError(f"Unsupported sampler selection mode: {selection_mode}. Use conditional_selection_mode or joint_selection_mode")
 
 
-def _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples: int, T: int, selection_mode: str):
+def _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples: int, T: int, selection_mode: str, selection_reference_mode: str):
     if not infer_plane_mode_enabled(cfg):
         return None
     geometry_mode = get_joint_mode_config(cfg).geometry_mode
@@ -146,15 +148,31 @@ def _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_
     x_t, _ = forward.add_noise(x0_ref, t_init)
     plane_t, _ = forward.add_noise(plane0_ref, t_init)
     payload = None
+    selection_reference_points = None
 
     for t in reversed(range(T)):
         t_batch = torch.full((sample_count,), t, dtype=torch.long, device=device)
         selection_plane = _resolve_joint_selection_plane(selection_mode, plane_t, None)
-        result = model(x_t, plane_t, t_batch, alpha_bars[t_batch], selection_plane=selection_plane)
+        if geometry_mode == "half":
+            if selection_reference_mode in {"running_x0", "running_x0_full"}:
+                active_reference = selection_reference_points
+            elif selection_reference_mode in {"xt", "x_t"}:
+                active_reference = x_t
+            else:
+                raise ValueError("Invalid sampler.selection_reference_mode. Expected 'running_x0' or 'x_t'")
+        else:
+            active_reference = None
+        result = model(x_t, plane_t, t_batch, alpha_bars[t_batch], selection_plane=selection_plane, selection_reference_points=active_reference)
         eps_half = result["eps_pred_half"]
         indices = result["indices"]
         plane_x0 = normalize_plane(result["plane_x0_pred"])
-        x_half = gather_points(x_t, indices)
+        selection_method = str(result.get("selection_method", "hard")).lower()
+        if selection_method == "soft":
+            x_half = result.get("x_selected")
+            if x_half is None:
+                raise ValueError("selection_method='soft' requires x_selected in model output")
+        else:
+            x_half = gather_points(x_t, indices)
 
         s_ab = torch.sqrt(alpha_bars[t])
         s_1m = torch.sqrt(1.0 - alpha_bars[t])
@@ -187,6 +205,9 @@ def _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_
                 x_t_full_cur = torch.cat([x_half, x_other], dim=1)
             x_t = sampler.step_from_x0(x_t_full_cur, x0_full, t)
             plane_t = sampler.step_from_x0(plane_t, plane_x0, t)
+
+        if geometry_mode == "half" and selection_reference_mode in {"running_x0", "running_x0_full"}:
+            selection_reference_points = x0_full.detach()
 
     return payload
 
@@ -255,7 +276,8 @@ def main():
         elif isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane)) and not use_latent:
             print("[sample] MODE: Conditional Symmetric Plane Diffusion")
             validate_joint_configuration(cfg, context="sample")
-            joint_selection_mode = str(cfg.get("sampler", {}).get("conditional_selection_mode", cfg.get("sampler", {}).get("joint_selection_mode", "predicted")))
+            joint_selection_mode = get_sampler_selection_mode(cfg)
+            joint_selection_reference_mode = get_selection_reference_mode(cfg, context="sampler")
             joint_sampler = JointSymmetricDDPM_Sampler(sampler)
             pcs = joint_sampler.sample(
                 model,
@@ -265,7 +287,7 @@ def main():
                 device=device,
                 alpha_bars=alpha_bars,
             )
-            joint_debug = _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples, T, joint_selection_mode)
+            joint_debug = _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples, T, joint_selection_mode, joint_selection_reference_mode)
         elif not use_latent:
             pcs = sampler.sample(model, num_samples=num_samples, num_points=num_points)
         else:

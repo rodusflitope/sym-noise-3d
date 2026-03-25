@@ -1,6 +1,12 @@
 import torch
 
-from src.utils.joint_modes import get_joint_mode_config, infer_plane_mode_enabled, resolve_plane_target
+from src.utils.joint_modes import (
+    get_joint_mode_config,
+    get_sampler_selection_mode,
+    get_selection_reference_mode,
+    infer_plane_mode_enabled,
+    resolve_plane_target,
+)
 from src.utils.symmetry_planes import gather_points, normalize_plane
 
 
@@ -26,7 +32,7 @@ class JointSymmetricDDPM_Sampler:
         T = int(self.base.betas.shape[0])
         geometry_mode = get_joint_mode_config(cfg).geometry_mode
         plane_diffusion_enabled = infer_plane_mode_enabled(cfg)
-        selection_mode = str(cfg.get("sampler", {}).get("conditional_selection_mode", cfg.get("sampler", {}).get("joint_selection_mode", "predicted"))).lower()
+        selection_mode = get_sampler_selection_mode(cfg)
 
         sqrt_alpha_bars = torch.sqrt(alpha_bars)
         sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
@@ -52,6 +58,7 @@ class JointSymmetricDDPM_Sampler:
             plane_t = fixed_plane
 
         selection_reference_points = None
+        selection_reference_mode = get_selection_reference_mode(cfg, context="sampler")
 
         for t in reversed(range(T)):
             batch_size = x_t.shape[0]
@@ -60,7 +67,12 @@ class JointSymmetricDDPM_Sampler:
             if plane_diffusion_enabled:
                 selection_plane = self._resolve_selection_plane(selection_mode, plane_t)
                 if geometry_mode == "half":
-                    active_reference = selection_reference_points
+                    if selection_reference_mode in {"running_x0", "running_x0_full"}:
+                        active_reference = selection_reference_points
+                    elif selection_reference_mode in {"xt", "x_t"}:
+                        active_reference = x_t
+                    else:
+                        raise ValueError("Invalid sampler.selection_reference_mode. Expected 'running_x0' or 'x_t'")
                 else:
                     active_reference = None
                 result = model(
@@ -73,7 +85,12 @@ class JointSymmetricDDPM_Sampler:
                 )
             else:
                 if geometry_mode == "half":
-                    active_reference = selection_reference_points
+                    if selection_reference_mode in {"running_x0", "running_x0_full"}:
+                        active_reference = selection_reference_points
+                    elif selection_reference_mode in {"xt", "x_t"}:
+                        active_reference = x_t
+                    else:
+                        raise ValueError("Invalid sampler.selection_reference_mode. Expected 'running_x0' or 'x_t'")
                 else:
                     active_reference = None
                 result = model(
@@ -88,7 +105,13 @@ class JointSymmetricDDPM_Sampler:
             eps_half = result["eps_pred_half"]
             indices = result["indices"]
             plane_x0 = normalize_plane(result["plane_x0_pred"])
-            x_half = gather_points(x_t, indices)
+            selection_method = str(result.get("selection_method", "hard")).lower()
+            if selection_method == "soft":
+                x_half = result.get("x_selected")
+                if x_half is None:
+                    raise ValueError("selection_method='soft' requires x_selected in model output")
+            else:
+                x_half = gather_points(x_t, indices)
 
             s_ab = sqrt_alpha_bars[t]
             s_1m = sqrt_one_minus_alpha_bars[t]

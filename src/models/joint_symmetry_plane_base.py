@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from src.models.time_embedding import SinusoidalTimeEmbed
-from src.utils.symmetry_planes import reconstruct_plane_x0, select_signed_half
+from src.utils.symmetry_planes import plane_to_normal_offset, reconstruct_plane_x0, select_signed_half
 
 
 class PlaneDiffusionHead(nn.Module):
@@ -55,6 +55,9 @@ class JointSymmetryPlaneMixin:
         plane_diffusion_enabled: bool,
         geometry_mode: str,
         point_backbone,
+        selection_method: str = "hard",
+        soft_mask_temperature: float = 10.0,
+        soft_mask_use_ste: bool = False,
     ) -> dict[str, torch.Tensor | str]:
         if plane_diffusion_enabled:
             if plane_t is None:
@@ -74,11 +77,39 @@ class JointSymmetryPlaneMixin:
             batch_size, num_points, _ = x_t.shape
             indices = torch.arange(num_points, device=x_t.device, dtype=torch.long).view(1, -1).expand(batch_size, -1)
             x_selected = x_t
+            selection_weights = torch.ones(batch_size, num_points, device=x_t.device, dtype=x_t.dtype)
+            selected_weights = selection_weights
         elif geometry_mode == "half":
             prefer_positive = not plane_diffusion_enabled
             reference_points = x_t if selection_reference_points is None else selection_reference_points
-            _, indices = select_signed_half(reference_points, active_plane, prefer_positive=prefer_positive)
-            x_selected = torch.gather(x_t, 1, indices.unsqueeze(-1).expand(-1, -1, x_t.shape[-1]))
+            if selection_method == "soft":
+                batch_size, num_points, _ = x_t.shape
+                n, d = plane_to_normal_offset(active_plane)
+                distances = torch.bmm(reference_points, n.unsqueeze(2)).squeeze(2) - d
+                sign = 1.0 if prefer_positive else -1.0
+                scaled = sign * distances * float(soft_mask_temperature)
+                soft_weights = torch.sigmoid(scaled)
+
+                k = num_points // 2
+                _, indices = torch.topk(sign * distances, k, dim=1)
+                indices = indices.sort(dim=1).values
+
+                if soft_mask_use_ste:
+                    hard_weights = torch.zeros_like(soft_weights)
+                    hard_weights.scatter_(1, indices, 1.0)
+                    selection_weights = hard_weights + soft_weights - soft_weights.detach()
+                else:
+                    selection_weights = soft_weights
+                selected_weights = torch.gather(selection_weights, 1, indices)
+                x_selected = torch.gather(x_t, 1, indices.unsqueeze(-1).expand(-1, -1, x_t.shape[-1]))
+                x_selected = x_selected * selected_weights.unsqueeze(-1)
+            elif selection_method == "hard":
+                _, indices = select_signed_half(reference_points, active_plane, prefer_positive=prefer_positive)
+                x_selected = torch.gather(x_t, 1, indices.unsqueeze(-1).expand(-1, -1, x_t.shape[-1]))
+                selection_weights = torch.ones(indices.shape[0], indices.shape[1], device=x_t.device, dtype=x_t.dtype)
+                selected_weights = selection_weights
+            else:
+                raise ValueError(f"Unsupported selection_method: {selection_method}")
         else:
             raise ValueError(f"Unsupported geometry_mode: {geometry_mode}")
 
@@ -90,5 +121,9 @@ class JointSymmetryPlaneMixin:
             "plane_x0_pred": plane_x0_pred,
             "selection_plane": active_plane,
             "geometry_mode": geometry_mode,
+            "selection_method": selection_method,
+            "selection_weights": selection_weights,
+            "selection_weights_selected": selected_weights,
+            "x_selected": x_selected,
             "plane_diffusion_enabled": torch.tensor(1.0 if plane_diffusion_enabled else 0.0, device=x_t.device, dtype=x_t.dtype),
         }

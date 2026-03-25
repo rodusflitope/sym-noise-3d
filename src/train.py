@@ -24,12 +24,13 @@ from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_con
 from src.utils.common import load_cfg, set_seed, get_device
 from src.utils.lr import build_optimizer_and_scheduler
 from src.utils.ema import build_ema_model
-from src.utils.symmetry_planes import gather_points, normalize_plane
+from src.utils.symmetry_planes import gather_points, normalize_plane, reflect_points
 from src.utils.joint_modes import (
     get_joint_mode_config,
+    get_selection_reference_mode,
     infer_plane_mode_enabled,
     resolve_plane_target,
-    select_curriculum_plane,
+    select_training_plane,
     validate_joint_configuration,
 )
 
@@ -134,6 +135,7 @@ def run_joint_plane_debug_snapshot(
     forward: ForwardDiffusion,
     alpha_bars: torch.Tensor,
     debug_batch: Optional[tuple[torch.Tensor, torch.Tensor]],
+    cfg: dict,
     *,
     timesteps: list[int],
     recon_metric: str,
@@ -173,11 +175,20 @@ def run_joint_plane_debug_snapshot(
 
             indices = result["indices"]
             eps_half = result["eps_pred_half"]
-            x_half = gather_points(x_t, indices)
+            selection_method = str(result.get("selection_method", "hard")).lower()
+            if selection_method == "soft":
+                x_half = result.get("x_selected")
+                if x_half is None:
+                    x_half = gather_points(x_t, indices)
+            else:
+                x_half = gather_points(x_t, indices)
             abar = alpha_t.view(batch_size, 1, 1)
             x0_half = (x_half - torch.sqrt((1.0 - abar).clamp(min=1e-8)) * eps_half) / torch.sqrt(abar.clamp(min=1e-8))
-            x0_reflected = model.reflect(x0_half, plane_pred)
-            x0_reconstructed = torch.cat([x0_half, x0_reflected], dim=1)
+            if get_joint_mode_config(cfg).geometry_mode == "full":
+                x0_reconstructed = x0_half
+            else:
+                x0_reflected = reflect_points(x0_half, plane_pred)
+                x0_reconstructed = torch.cat([x0_half, x0_reflected], dim=1)
 
             if recon_metric == "emd":
                 recon = earth_movers_distance(x0_reconstructed, x0).mean()
@@ -581,12 +592,18 @@ def main() -> None:
                     x_t, eps = forward.add_noise(x0, t)
                     if infer_plane_mode_enabled(cfg):
                         plane_t, eps_plane = forward.add_noise(plane_target, t)
-                        selection_plane = select_curriculum_plane(plane_target, cfg, global_step)
+                        selection_plane = select_training_plane(plane_target, cfg, global_step, plane_t=plane_t)
                     else:
                         plane_t, eps_plane = None, None
                         selection_plane = plane_target
                     if joint_mode_cfg.geometry_mode == "half":
-                        selection_reference_points = x0
+                        ref_mode = get_selection_reference_mode(cfg, context="train")
+                        if ref_mode == "x0":
+                            selection_reference_points = x0
+                        elif ref_mode in {"xt", "x_t"}:
+                            selection_reference_points = x_t
+                        else:
+                            raise ValueError("Invalid train_selection_reference_mode. Expected 'x0' or 'x_t'")
                     else:
                         selection_reference_points = None
                     result = model(
@@ -764,12 +781,18 @@ def main() -> None:
                             x_t, eps = forward.add_noise(x0, t)
                             if infer_plane_mode_enabled(cfg):
                                 plane_t, eps_plane = forward.add_noise(plane_target, t)
-                                selection_plane = select_curriculum_plane(plane_target, cfg, global_step)
+                                selection_plane = select_training_plane(plane_target, cfg, global_step, plane_t=plane_t)
                             else:
                                 plane_t, eps_plane = None, None
                                 selection_plane = plane_target
                             if joint_mode_cfg.geometry_mode == "half":
-                                selection_reference_points = x0
+                                ref_mode = get_selection_reference_mode(cfg, context="train")
+                                if ref_mode == "x0":
+                                    selection_reference_points = x0
+                                elif ref_mode in {"xt", "x_t"}:
+                                    selection_reference_points = x_t
+                                else:
+                                    raise ValueError("Invalid train_selection_reference_mode. Expected 'x0' or 'x_t'")
                             else:
                                 selection_reference_points = None
                             result = model_to_eval(
@@ -924,6 +947,7 @@ def main() -> None:
                 forward,
                 alpha_bars,
                 debug_batch,
+                cfg,
                 timesteps=_resolve_debug_timesteps(joint_debug_cfg["timesteps"], T),
                 recon_metric=joint_debug_cfg["metric"],
                 global_step=global_step,

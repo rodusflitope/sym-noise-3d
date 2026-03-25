@@ -132,6 +132,9 @@ def build_model(cfg):
         mode_cfg = conditional_cfg if conditional_cfg else joint_cfg
         geometry_mode = str(mode_cfg.get("geometry_mode", cfg["model"].get("conditional_geometry_mode", cfg["model"].get("joint_geometry_mode", "half")))).lower()
         plane_mode = str(mode_cfg.get("plane_mode", cfg["model"].get("conditional_plane_mode", cfg["model"].get("joint_plane_mode", "diffusion")))).lower()
+        selection_method = str(mode_cfg.get("selection_method", cfg["model"].get("conditional_selection_method", cfg["model"].get("joint_selection_method", "hard")))).lower()
+        soft_mask_temperature = float(mode_cfg.get("soft_mask_temperature", cfg["model"].get("conditional_soft_mask_temperature", cfg["model"].get("joint_soft_mask_temperature", 10.0))))
+        soft_mask_use_ste = bool(mode_cfg.get("soft_mask_use_ste", cfg["model"].get("conditional_soft_mask_use_ste", cfg["model"].get("joint_soft_mask_use_ste", False))))
         return PVCNNJointSymPlane(
             plane_hidden_dim=plane_hidden_dim,
             backbone_hidden_dim=backbone_hidden_dim,
@@ -140,6 +143,9 @@ def build_model(cfg):
             num_blocks=num_blocks,
             geometry_mode=geometry_mode,
             plane_mode=plane_mode,
+            selection_method=selection_method,
+            soft_mask_temperature=soft_mask_temperature,
+            soft_mask_use_ste=soft_mask_use_ste,
         )
     elif name in {"pt_joint_sym_plane", "pt_conditional_sym_plane"}:
         from .pt_joint_sym_plane import PTJointSymPlane
@@ -156,6 +162,9 @@ def build_model(cfg):
         mode_cfg = conditional_cfg if conditional_cfg else joint_cfg
         geometry_mode = str(mode_cfg.get("geometry_mode", cfg["model"].get("conditional_geometry_mode", cfg["model"].get("joint_geometry_mode", "half")))).lower()
         plane_mode = str(mode_cfg.get("plane_mode", cfg["model"].get("conditional_plane_mode", cfg["model"].get("joint_plane_mode", "diffusion")))).lower()
+        selection_method = str(mode_cfg.get("selection_method", cfg["model"].get("conditional_selection_method", cfg["model"].get("joint_selection_method", "hard")))).lower()
+        soft_mask_temperature = float(mode_cfg.get("soft_mask_temperature", cfg["model"].get("conditional_soft_mask_temperature", cfg["model"].get("joint_soft_mask_temperature", 10.0))))
+        soft_mask_use_ste = bool(mode_cfg.get("soft_mask_use_ste", cfg["model"].get("conditional_soft_mask_use_ste", cfg["model"].get("joint_soft_mask_use_ste", False))))
         return PTJointSymPlane(
             plane_hidden_dim=plane_hidden_dim,
             backbone_hidden_dim=backbone_hidden_dim,
@@ -166,6 +175,9 @@ def build_model(cfg):
             use_symmetric_attention=use_symmetric_attention,
             geometry_mode=geometry_mode,
             plane_mode=plane_mode,
+            selection_method=selection_method,
+            soft_mask_temperature=soft_mask_temperature,
+            soft_mask_use_ste=soft_mask_use_ste,
         )
     elif name in {"legacy_pvcnn", "pvcnn_legacy"}:
         from .legacy_pvcnn import LegacyPVCNNEpsilon

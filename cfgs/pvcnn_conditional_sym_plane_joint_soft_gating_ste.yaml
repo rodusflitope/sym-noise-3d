@@ -1,0 +1,87 @@
+exp_name: "pvcnn-conditional-sym-plane-joint-soft-gating-ste"
+seed: 10
+device: "auto"
+
+data:
+  root_dir: "data/ShapeNetCore"
+  max_models: 1000
+  augment: false
+  val_frac: 0.1
+  test_frac: 0.1
+  use_symmetry_plane_labels: true
+  symmetry_plane_cache_path: "data/symmetry_cache.pt"
+  symmetry_plane_cache_required: true
+
+model:
+  name: "pvcnn_conditional_sym_plane"
+  hidden_dim: 128
+  plane_hidden_dim: 128
+  time_dim: 64
+  resolution: 16
+  num_blocks: 2
+
+conditional_symmetry:
+  geometry_mode: "half"
+  plane_mode: "diffusion"
+  fixed_plane_axis: null
+  selection_method: "soft"
+  soft_mask_temperature: 5.0
+  soft_mask_use_ste: true
+  train_selection_mode: "curriculum"
+  train_selection_reference_mode: "x0"
+
+loss:
+  lambda_diff: 1.0
+  lambda_plane: 1.0
+  lambda_recon: 0.0
+  lambda_plane_consistency: 0.0
+  plane_normal_weight: 1.0
+  plane_offset_weight: 1.0
+  metric: "cd"
+  warmup_steps: 1000
+  selection_warmup_steps: 1000
+  selection_gt_prob_start: 1.0
+  selection_gt_prob_end: 0.0
+
+train:
+  batch_size: 32
+  epochs: 100
+  log_every: 50
+  num_points: 2048
+  num_workers: 0
+  out_dir: "runs"
+  save_every: 10
+  amp: true
+
+diffusion:
+  T: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: "linear"
+  noise_type: "gaussian"
+
+sampler:
+  name: "ddpm"
+  eta: 1.0
+  conditional_selection_mode: "predicted"
+  selection_reference_mode: "running_x0"
+  num_samples: 4
+  save_dir: "samples"
+  save_format: "npy"
+  normalize_output: true
+  normalizer: "center_and_scale"
+
+lr_scheduler:
+  name: "cosine_warmup"
+  base_lr: 2.0e-4
+  min_lr: 1.0e-6
+  warmup_steps: 500
+
+debug:
+  conditional_plane_monitor:
+    enabled: true
+    source: "val"
+    batch_size: 4
+    timesteps: ["low", "mid", "high"]
+    metric: "cd"
+    print_every: 1

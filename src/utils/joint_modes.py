@@ -5,6 +5,8 @@ from typing import Optional
 
 import torch
 
+from src.utils.symmetry_planes import normalize_plane
+
 
 @dataclass(frozen=True)
 class JointModeConfig:
@@ -116,6 +118,51 @@ def select_curriculum_plane(plane_target: torch.Tensor | None, cfg: dict, curren
     return None
 
 
+def select_training_plane(
+    plane_target: torch.Tensor | None,
+    cfg: dict,
+    current_step: int,
+    plane_t: torch.Tensor | None = None,
+) -> torch.Tensor | None:
+    if plane_target is None:
+        return None
+    mode_cfg = cfg.get("conditional_symmetry", {}) or cfg.get("joint_symmetry", {}) or {}
+    selection_mode = str(mode_cfg.get("train_selection_mode", "curriculum")).strip().lower()
+    if selection_mode in {"gt", "teacher_forcing", "ground_truth"}:
+        return plane_target
+    if selection_mode in {"plane_t", "noisy", "noisy_plane"}:
+        if plane_t is None:
+            raise ValueError("train_selection_mode='plane_t' requires plane_t (plane diffusion enabled)")
+        return normalize_plane(plane_t)
+    if selection_mode in {"pred", "predicted", "none"}:
+        return None
+    if selection_mode == "curriculum":
+        return select_curriculum_plane(plane_target, cfg, current_step)
+    raise ValueError(
+        f"Invalid train_selection_mode: {selection_mode}. Expected 'curriculum', 'gt', 'plane_t', or 'predicted'"
+    )
+
+
+def get_sampler_selection_mode(cfg: dict) -> str:
+    sampler_cfg = cfg.get("sampler", {}) or {}
+    return str(
+        sampler_cfg.get(
+            "conditional_selection_mode",
+            sampler_cfg.get("joint_selection_mode", "predicted"),
+        )
+    ).strip().lower()
+
+
+def get_selection_reference_mode(cfg: dict, *, context: str) -> str:
+    if context == "train":
+        mode_cfg = cfg.get("conditional_symmetry", {}) or cfg.get("joint_symmetry", {}) or {}
+        return str(mode_cfg.get("train_selection_reference_mode", "x0")).strip().lower()
+    if context == "sampler":
+        sampler_cfg = cfg.get("sampler", {}) or {}
+        return str(sampler_cfg.get("selection_reference_mode", "running_x0")).strip().lower()
+    raise ValueError(f"Unsupported context for selection reference mode: {context}")
+
+
 def validate_joint_configuration(cfg: dict, *, context: str) -> None:
     mode_cfg = get_joint_mode_config(cfg)
     loss_cfg = cfg.get("loss", {}) or {}
@@ -144,6 +191,13 @@ def validate_joint_configuration(cfg: dict, *, context: str) -> None:
                 "Incompatible conditional configuration for training: plane_mode='conditioning' without fixed_plane_axis "
                 "requires data.use_symmetry_plane_labels=true."
             )
+
+    mode_cfg_raw = cfg.get("conditional_symmetry", {}) or cfg.get("joint_symmetry", {}) or {}
+    train_selection_mode = str(mode_cfg_raw.get("train_selection_mode", "curriculum")).strip().lower()
+    if train_selection_mode in {"plane_t", "noisy", "noisy_plane"} and mode_cfg.plane_mode != "diffusion":
+        raise ValueError(
+            "Incompatible conditional configuration: train_selection_mode='plane_t' requires plane_mode='diffusion'."
+        )
 
 
 def infer_plane_mode_enabled(cfg: dict) -> bool:
