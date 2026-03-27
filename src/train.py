@@ -15,9 +15,9 @@ from torch.utils.data import DataLoader
 from contextlib import nullcontext
 
 from src.data import build_datasets_from_config
-from src.losses import build_joint_symmetry_plane_loss, build_loss, build_sym_learned_plane_loss
+from src.losses import build_joint_symmetry_plane_loss, build_loss, build_sym_learned_plane_loss, build_true_joint_symmetry_plane_loss
 from src.metrics.metrics import chamfer_distance, earth_movers_distance
-from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane, PTSymLearnedPlane, PVCNNJointSymPlane, PTJointSymPlane
+from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane, PTSymLearnedPlane, PVCNNJointSymPlane, PTJointSymPlane, PVCNNTrueJoint
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_config
@@ -451,7 +451,8 @@ def main() -> None:
     use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, ae_ok_types))
     use_sym_plane = isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane))
     use_joint_sym_plane = isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane))
-    if use_joint_sym_plane:
+    use_true_joint_sym_plane = isinstance(model, PVCNNTrueJoint)
+    if use_joint_sym_plane or use_true_joint_sym_plane:
         validate_joint_configuration(cfg, context="train")
     joint_debug_cfg = _joint_debug_cfg(cfg)
     debug_batch = None
@@ -471,14 +472,18 @@ def main() -> None:
     
     sym_plane_loss_fn = None
     joint_sym_plane_loss_fn = None
+    true_joint_sym_plane_loss_fn = None
     if use_sym_plane:
         sym_plane_loss_fn = build_sym_learned_plane_loss(cfg)
         print("[train] MODE: Symmetric Learned Plane")
     if use_joint_sym_plane:
         joint_sym_plane_loss_fn = build_joint_symmetry_plane_loss(cfg)
         print("[train] MODE: Joint Symmetric Plane Diffusion")
+    if use_true_joint_sym_plane:
+        true_joint_sym_plane_loss_fn = build_true_joint_symmetry_plane_loss(cfg)
+        print("[train] MODE: True Joint Symmetric Plane Diffusion")
 
-    loss_fn = None if (use_two_priors or use_sym_plane or use_joint_sym_plane) else build_loss(cfg)
+    loss_fn = None if (use_two_priors or use_sym_plane or use_joint_sym_plane or use_true_joint_sym_plane) else build_loss(cfg)
     steps_per_epoch = math.ceil(len(ds) / cfg["train"]["batch_size"]) if len(ds) > 0 else 0
     opt, scheduler, total_steps = build_optimizer_and_scheduler(cfg, model, steps_per_epoch)
 
@@ -624,6 +629,42 @@ def main() -> None:
                         alpha_bars[t],
                         current_step=global_step,
                     )
+                elif use_true_joint_sym_plane:
+                    joint_mode_cfg = cfg.get("joint_symmetry", {}) or {}
+                    plane_target = resolve_plane_target(
+                        cfg,
+                        batch_size=B,
+                        device=x0.device,
+                        dtype=x0.dtype,
+                        plane0=plane0,
+                    )
+                    if plane_target is None:
+                        raise ValueError("True Joint symmetry training requires a plane target")
+                    
+                    geo_mode = model.geometry_mode if hasattr(model, "geometry_mode") else "half"
+                    
+                    if geo_mode == "half":
+                        from src.utils.symmetry_planes import select_signed_half
+                        with torch.no_grad():
+                            _, indices = select_signed_half(x0, plane_target, prefer_positive=True)
+                            x0_input = torch.gather(x0, 1, indices.unsqueeze(-1).expand(-1, -1, x0.shape[-1]))
+                    else:
+                        x0_input = x0
+
+                    x_t, eps = forward.add_noise(x0_input, t)
+                    plane_t, eps_plane = forward.add_noise(plane_target, t)
+                    
+                    result = model(
+                        x_t=x_t,
+                        plane_t=plane_t,
+                        t=t,
+                    )
+                    
+                    loss, loss_diff, loss_plane, loss_recon, loss_plane_cons = true_joint_sym_plane_loss_fn(
+                        result,
+                        eps_points=eps,
+                        eps_plane=eps_plane,
+                    )
                 elif use_latent:
                     with torch.no_grad():
                         if isinstance(autoencoder, LionAutoencoder):
@@ -678,7 +719,7 @@ def main() -> None:
             if use_sym_plane:
                 epoch_loss_diff_sum += float(loss_diff.detach().item())
                 epoch_loss_sym_sum += float(loss_sym.detach().item())
-            if use_joint_sym_plane:
+            if use_joint_sym_plane or use_true_joint_sym_plane:
                 epoch_loss_diff_sum += float(loss_diff.detach().item())
                 epoch_loss_plane_sum += float(loss_plane.detach().item())
                 epoch_loss_recon_sum += float(loss_recon.detach().item())
@@ -699,7 +740,7 @@ def main() -> None:
                         f"| loss_sym={float(loss_sym.detach().item()):.6f} "
                         f"| lr={current_lr:.6f}"
                     )
-                elif use_joint_sym_plane:
+                elif use_joint_sym_plane or use_true_joint_sym_plane:
                     print(
                         f"[epoch {epoch}] step {global_step} | loss={loss.item():.6f} "
                         f"| loss_diff={float(loss_diff.detach().item()):.6f} "
@@ -817,6 +858,44 @@ def main() -> None:
                             v_loss_plane_sum += float(lp.item())
                             v_loss_recon_sum += float(lr.item())
                             v_loss_plane_cons_sum += float(lc.item())
+                        elif use_true_joint_sym_plane:
+                            plane_target = resolve_plane_target(
+                                cfg,
+                                batch_size=B,
+                                device=x0.device,
+                                dtype=x0.dtype,
+                                plane0=plane0,
+                            )
+                            if plane_target is None:
+                                raise ValueError("True Joint symmetry validation requires a plane target")
+                            
+                            geo_mode = model_to_eval.geometry_mode if hasattr(model_to_eval, "geometry_mode") else "half"
+                            
+                            if geo_mode == "half":
+                                from src.utils.symmetry_planes import select_signed_half
+                                _, indices = select_signed_half(x0, plane_target, prefer_positive=True)
+                                x0_input = torch.gather(x0, 1, indices.unsqueeze(-1).expand(-1, -1, x0.shape[-1]))
+                            else:
+                                x0_input = x0
+
+                            x_t, eps = forward.add_noise(x0_input, t)
+                            plane_t, eps_plane = forward.add_noise(plane_target, t)
+                            
+                            result = model_to_eval(
+                                x_t=x_t,
+                                plane_t=plane_t,
+                                t=t,
+                            )
+                            
+                            l, ld, lp, lr, lc = true_joint_sym_plane_loss_fn(
+                                result,
+                                eps_points=eps,
+                                eps_plane=eps_plane,
+                            )
+                            v_loss_diff_sum += float(ld.item())
+                            v_loss_plane_sum += float(lp.item())
+                            v_loss_recon_sum += float(lr.item())
+                            v_loss_plane_cons_sum += float(lc.item())
                         elif use_latent:
                             z0 = autoencoder.encode(x0)
                             z_t, eps = forward.add_noise(z0, t)
@@ -838,7 +917,7 @@ def main() -> None:
             if use_sym_plane:
                 val_loss_diff = v_loss_diff_sum / max(1, v_steps)
                 val_loss_sym = v_loss_sym_sum / max(1, v_steps)
-            if use_joint_sym_plane:
+            if use_joint_sym_plane or use_true_joint_sym_plane:
                 val_loss_diff = v_loss_diff_sum / max(1, v_steps)
                 val_loss_plane = v_loss_plane_sum / max(1, v_steps)
                 val_loss_recon = v_loss_recon_sum / max(1, v_steps)
@@ -851,11 +930,11 @@ def main() -> None:
         avg_epoch_loss = epoch_loss_sum / epoch_steps
         avg_epoch_mse_z = (epoch_mse_z_sum / max(1, epoch_steps)) if use_two_priors else None
         avg_epoch_mse_h = (epoch_mse_h_sum / max(1, epoch_steps)) if use_two_priors else None
-        avg_epoch_loss_diff = (epoch_loss_diff_sum / max(1, epoch_steps)) if (use_sym_plane or use_joint_sym_plane) else None
+        avg_epoch_loss_diff = (epoch_loss_diff_sum / max(1, epoch_steps)) if (use_sym_plane or use_joint_sym_plane or use_true_joint_sym_plane) else None
         avg_epoch_loss_sym = (epoch_loss_sym_sum / max(1, epoch_steps)) if use_sym_plane else None
-        avg_epoch_loss_plane = (epoch_loss_plane_sum / max(1, epoch_steps)) if use_joint_sym_plane else None
-        avg_epoch_loss_recon = (epoch_loss_recon_sum / max(1, epoch_steps)) if use_joint_sym_plane else None
-        avg_epoch_loss_plane_cons = (epoch_loss_plane_cons_sum / max(1, epoch_steps)) if use_joint_sym_plane else None
+        avg_epoch_loss_plane = (epoch_loss_plane_sum / max(1, epoch_steps)) if (use_joint_sym_plane or use_true_joint_sym_plane) else None
+        avg_epoch_loss_recon = (epoch_loss_recon_sum / max(1, epoch_steps)) if (use_joint_sym_plane or use_true_joint_sym_plane) else None
+        avg_epoch_loss_plane_cons = (epoch_loss_plane_cons_sum / max(1, epoch_steps)) if (use_joint_sym_plane or use_true_joint_sym_plane) else None
         if val_loss is not None:
             if use_two_priors and val_mse_z is not None and val_mse_h is not None:
                 print(
@@ -871,7 +950,7 @@ def main() -> None:
                     f"| Val loss: {val_loss:.6f} (diff={val_loss_diff:.6f}, sym={val_loss_sym:.6f}) "
                     f"| Time: {epoch_time:.2f}s =="
                 )
-            elif use_joint_sym_plane and val_loss_diff is not None and val_loss_plane is not None:
+            elif (use_joint_sym_plane or use_true_joint_sym_plane) and val_loss_diff is not None and val_loss_plane is not None:
                 print(
                     f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} "
                     f"(diff={avg_epoch_loss_diff:.6f}, plane={avg_epoch_loss_plane:.6f}, recon={avg_epoch_loss_recon:.6f}, plane_cons={avg_epoch_loss_plane_cons:.6f}) "

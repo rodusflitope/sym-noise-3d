@@ -17,9 +17,10 @@ from src.models import (
     PTSymLearnedPlane,
     PVCNNJointSymPlane,
     PTJointSymPlane,
+    PVCNNTrueJoint,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
-from src.samplers import build_sampler, SymmetricDDPM_Sampler, JointSymmetricDDPM_Sampler
+from src.samplers import build_sampler, SymmetricDDPM_Sampler, JointSymmetricDDPM_Sampler, TrueJointSymmetricDDPM_Sampler
 from src.data import ShapeNetDataset
 from src.metrics import chamfer_distance, earth_movers_distance, reflection_symmetry_distance, compute_all_metrics
 from src.utils.checkpoint import load_ckpt_config
@@ -194,6 +195,16 @@ def evaluate(
             validate_joint_configuration(cfg, context="eval")
             joint_sampler = JointSymmetricDDPM_Sampler(sampler)
             samples = joint_sampler.sample(
+                model,
+                cfg,
+                num_samples=num_samples,
+                num_points=num_points,
+                device=device,
+                alpha_bars=alpha_bars,
+            ).detach().cpu()
+        elif isinstance(model, PVCNNTrueJoint) and not use_latent:
+            true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
+            samples = true_joint_sampler.sample(
                 model,
                 cfg,
                 num_samples=num_samples,

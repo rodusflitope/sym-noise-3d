@@ -147,6 +147,27 @@ def build_model(cfg):
             soft_mask_temperature=soft_mask_temperature,
             soft_mask_use_ste=soft_mask_use_ste,
         )
+    elif name == "pvcnn_true_joint":
+        from .pvcnn_true_joint import PVCNNTrueJoint
+
+        hidden_dim = int(cfg["model"].get("hidden_dim", 128))
+        time_dim = int(cfg["model"].get("time_dim", 64))
+        resolution = int(cfg["model"].get("resolution", 16))
+        num_blocks = int(cfg["model"].get("num_blocks", 2))
+        
+        joint_cfg = cfg.get("joint_symmetry", {}) or {}
+        geometry_mode = str(joint_cfg.get("geometry_mode", cfg["model"].get("joint_geometry_mode", "half"))).lower()
+        early_fusion_type = str(joint_cfg.get("early_fusion_type", cfg["model"].get("early_fusion_type", "add"))).lower()
+        
+        return PVCNNTrueJoint(
+            hidden_dim=hidden_dim,
+            time_dim=time_dim,
+            resolution=resolution,
+            num_blocks=num_blocks,
+            geometry_mode=geometry_mode,
+            early_fusion_type=early_fusion_type,
+            cfg=cfg,
+        )
     elif name in {"pt_joint_sym_plane", "pt_conditional_sym_plane"}:
         from .pt_joint_sym_plane import PTJointSymPlane
 

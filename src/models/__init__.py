@@ -7,6 +7,7 @@ from .lion_ae import LionAutoencoder
 from .pvcnn_sym_learned_plane import PVCNNSymLearnedPlane
 from .pt_sym_learned_plane import PTSymLearnedPlane
 from .pvcnn_joint_sym_plane import PVCNNJointSymPlane
+from .pvcnn_true_joint import PVCNNTrueJoint
 from .pt_joint_sym_plane import PTJointSymPlane
 from .builder import build_model
 
@@ -25,6 +26,7 @@ __all__ = [
     "PVCNNSymLearnedPlane",
     "PTSymLearnedPlane",
     "PVCNNJointSymPlane",
+    "PVCNNTrueJoint",
     "PTJointSymPlane",
     "build_model",
     "LionTwoPriorsDDM",

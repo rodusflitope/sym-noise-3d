@@ -11,10 +11,11 @@ from src.models import (
     PTSymLearnedPlane,
     PVCNNJointSymPlane,
     PTJointSymPlane,
+    PVCNNTrueJoint,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
-from src.samplers import build_sampler, SymmetricDDPM_Sampler, JointSymmetricDDPM_Sampler
+from src.samplers import build_sampler, SymmetricDDPM_Sampler, JointSymmetricDDPM_Sampler, TrueJointSymmetricDDPM_Sampler
 from src.utils.checkpoint import load_ckpt, load_ckpt_config
 from src.utils.io import save_npy, save_ply
 from src.vis_samples import plot_joint_plane_debug, plot_pc
@@ -288,6 +289,17 @@ def main():
                 alpha_bars=alpha_bars,
             )
             joint_debug = _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples, T, joint_selection_mode, joint_selection_reference_mode)
+        elif isinstance(model, PVCNNTrueJoint) and not use_latent:
+            print("[sample] MODE: True Joint Symmetric Plane Diffusion")
+            true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
+            pcs = true_joint_sampler.sample(
+                model,
+                cfg,
+                num_samples=num_samples,
+                num_points=num_points,
+                device=device,
+                alpha_bars=alpha_bars,
+            )
         elif not use_latent:
             pcs = sampler.sample(model, num_samples=num_samples, num_points=num_points)
         else:
