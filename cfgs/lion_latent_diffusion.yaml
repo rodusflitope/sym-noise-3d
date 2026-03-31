@@ -15,12 +15,12 @@ data:
 model:
   name: "lion_priors"
   input_dim: 3
-  time_dim: 64
-  hidden_dim_z: 512
-  hidden_dim_h: 128
+  time_dim: 32
+  hidden_dim_z: 256
+  hidden_dim_h: 64
   resolution: 32
-  num_blocks_z: 4
-  num_blocks_h: 4
+  num_blocks_z: 2
+  num_blocks_h: 2
   dropout: 0.1
 
 autoencoder:
@@ -28,10 +28,10 @@ autoencoder:
   global_latent_dim: 128
   local_latent_dim: 16
   hidden_dim: 128
-  resolution: 32
-  enc_blocks: 3
-  local_enc_blocks: 2
-  dec_blocks: 3
+  resolution: 16
+  enc_blocks: 2
+  local_enc_blocks: 1
+  dec_blocks: 2
   skip_weight: 0.01
   pts_sigma_offset: 2.0
   log_sigma_clip: [-10.0, 2.0]

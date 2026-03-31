@@ -556,7 +556,9 @@ def main() -> None:
             "timestamp": timestamp,
             "config": cfg,
         }
-        save_ckpt(autoencoder, cfg["train"]["out_dir"], exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata)
+        if epoch % 10 == 0:
+            save_ckpt(autoencoder, cfg["train"]["out_dir"], exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata)
+            
         save_ckpt(autoencoder, cfg["train"]["out_dir"], exp_name, "last.pt", metadata=ckpt_metadata)
 
         sel = val_loss if val_loss is not None else avg_loss

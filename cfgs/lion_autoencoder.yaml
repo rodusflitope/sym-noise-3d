@@ -16,17 +16,17 @@ autoencoder:
   global_latent_dim: 128
   local_latent_dim: 16
   hidden_dim: 128
-  resolution: 32
-  enc_blocks: 3
-  local_enc_blocks: 2
-  dec_blocks: 3
+  resolution: 16
+  enc_blocks: 2
+  local_enc_blocks: 1
+  dec_blocks: 2
   skip_weight: 0.01
   pts_sigma_offset: 2.0
   log_sigma_clip: [-10.0, 2.0]
   recon_loss: "chamfer"
 
-  lambda_z: 1.0
-  lambda_h: 1.0
+  lambda_z: 1.0e-3
+  lambda_h: 1.0e-4
   lambda_h_xyz: 1.0
   lambda_h_feat: 1.0
 
@@ -53,7 +53,7 @@ autoencoder:
       reflection_max_points: 256
 
 train:
-  batch_size: 4
+  batch_size: 8
   num_points: 1024
   num_workers: 4
   out_dir: "runs"
@@ -62,7 +62,7 @@ train:
   loss_fp32: true
   raise_on_nonfinite_loss: false
   skip_nonfinite_batches: true
-  grad_accum_steps: 8
+  grad_accum_steps: 2
   lr: 2.0e-4
 
 lr_scheduler:

@@ -36,14 +36,16 @@ class _AdaPVConv(nn.Module):
 
     def forward(self, feats_bcn: torch.Tensor, coords_bnc3: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
         x_in = self.point_in(feats_bcn)
+        s = self.ada_scale(style).unsqueeze(-1)
+        b = self.ada_bias(style).unsqueeze(-1)
+        x_in = x_in * (1 + s) + b
+        
         vox = self.voxelize(x_in, coords_bnc3)
         vox = self.voxel_conv(vox)
         devox = self.devoxelize(vox, coords_bnc3)
+        
         out = self.fuse(devox)
-        out = out + self.skip(feats_bcn)
-        s = self.ada_scale(style).unsqueeze(-1)
-        b = self.ada_bias(style).unsqueeze(-1)
-        return out * (1 + s) + b
+        return out + self.skip(feats_bcn)
 
 
 class LionGlobalLatentDDM(nn.Module):

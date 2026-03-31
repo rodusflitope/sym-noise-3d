@@ -60,15 +60,34 @@ class _PVConv(nn.Module):
 class _AdaPVConv(nn.Module):
     def __init__(self, c_in: int, c_out: int, resolution: int, style_dim: int):
         super().__init__()
-        self.pv = _PVConv(c_in, c_out, resolution)
+        self.voxelize = Voxelization(resolution)
+        self.devoxelize = TrilinearDevoxelization()
+        self.point_in = nn.Sequential(
+            nn.Conv1d(c_in, c_out, 1, bias=False), _group_norm(c_out), nn.SiLU(),
+        )
         self.ada_scale = nn.Linear(style_dim, c_out)
         self.ada_bias = nn.Linear(style_dim, c_out)
+        self.voxel_conv = nn.Sequential(
+            nn.Conv3d(c_out, c_out, 3, padding=1, bias=False), _group_norm(c_out), nn.SiLU(),
+            nn.Conv3d(c_out, c_out, 3, padding=1, bias=False), _group_norm(c_out), nn.SiLU(),
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv1d(c_out, c_out, 1, bias=False), _group_norm(c_out), nn.SiLU(),
+        )
+        self.skip = nn.Conv1d(c_in, c_out, 1, bias=False) if c_in != c_out else nn.Identity()
 
     def forward(self, feats_bcn: torch.Tensor, coords_bnc3: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
-        out = self.pv(feats_bcn, coords_bnc3)
+        x_in = self.point_in(feats_bcn)
         s = self.ada_scale(style).unsqueeze(-1)
         b = self.ada_bias(style).unsqueeze(-1)
-        return out * (1 + s) + b
+        x_in = x_in * (1 + s) + b
+        
+        vox = self.voxelize(x_in, coords_bnc3)
+        vox = self.voxel_conv(vox)
+        devox = self.devoxelize(vox, coords_bnc3)
+        
+        out = self.fuse(devox)
+        return out + self.skip(feats_bcn)
 
 
 class _PVCNNEncoder(nn.Module):
