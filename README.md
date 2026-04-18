@@ -16,19 +16,24 @@ Use the following meaning in experiments and reporting:
 - `joint` in legacy/internal symbols means the current conditional pipeline.
 - `joint_true` means a true joint formulation.
 
-## 1. Setup
+## 1. Setup (Unified Installation)
 
-1. Create and activate a virtual environment (example using PowerShell):
+It is highly recommended to use a single, unified Conda environment for the entire repository, including the `sym-lion` submodule. This avoids dependency conflicts and lets you run both standard models and LION baselines from the same terminal.
+
+1. Create and activate the Conda environment (this includes PyTorch 2.5, CUDA 12.1, and all pip requirements):
 
 ```pwsh
-python -m venv .venv
-& .venv/Scripts/activate
-python -m pip install --upgrade pip
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-pip install -r requirements.txt
+conda env create -f env.yaml
+conda activate sym-noise-env
 ```
 
-2. Download ShapeNet data (if you haven’t already):
+2. Build the `sym-lion` submodule components (requires the environment to be active):
+
+```pwsh
+python sym-lion/build_pkg.py
+```
+
+3. Download ShapeNet data (if you haven’t already):
 
 ```pwsh
 python scripts/download_data_from_huggingface.py --categories 02691156,03001627
