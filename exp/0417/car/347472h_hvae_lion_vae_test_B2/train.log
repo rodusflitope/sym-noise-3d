@@ -1,0 +1,5 @@
+2026-04-17 22:10:14.683 | INFO     | __main__:get_args:207 - EXP_ROOT: ../exp + exp name: 0417/car/347472h_hvae_lion_vae_test_B2, save dir: ../exp\0417/car/347472h_hvae_lion_vae_test_B2
+2026-04-17 22:10:14.710 | INFO     | __main__:get_args:212 - save config at ../exp\0417/car/347472h_hvae_lion_vae_test_B2\cfg.yml
+2026-04-17 22:10:14.711 | INFO     | __main__:get_args:215 - log dir: ../exp\0417/car/347472h_hvae_lion_vae_test_B2
+2026-04-17 22:10:14.711 | INFO     | utils.utils:init_processes:1133 - set MASTER_PORT: 127.0.0.1, MASTER_PORT: 6020
+2026-04-17 22:10:14.712 | INFO     | utils.utils:init_processes:1154 - init_process: rank=0, world_size=1

@@ -1,0 +1,214 @@
+2026-04-18 10:37:02.665 | INFO     | __main__:get_args:212 - EXP_ROOT: ../exp + exp name: 0418/car/347472h_hvae_lion_vae_test_B2, save dir: ../exp\0418/car/347472h_hvae_lion_vae_test_B2
+2026-04-18 10:37:02.692 | INFO     | __main__:get_args:217 - save config at ../exp\0418/car/347472h_hvae_lion_vae_test_B2\cfg.yml
+2026-04-18 10:37:02.693 | INFO     | __main__:get_args:220 - log dir: ../exp\0418/car/347472h_hvae_lion_vae_test_B2
+2026-04-18 10:37:02.693 | INFO     | utils.utils:init_processes:1133 - set MASTER_PORT: 127.0.0.1, MASTER_PORT: 6020
+2026-04-18 10:37:02.694 | INFO     | utils.utils:init_processes:1154 - init_process: rank=0, world_size=1
+2026-04-18 10:37:02.783 | INFO     | __main__:main:34 - use trainer: trainers.hvae_trainer
+2026-04-18 10:37:14.392 | INFO     | utils.utils:common_init:467 - [common-init] at rank=0, seed=1
+2026-04-18 10:37:14.405 | INFO     | utils.utils:__init__:332 - Not init TFB
+2026-04-18 10:37:14.406 | INFO     | utils.utils:common_init:511 - [common-init] DONE
+2026-04-18 10:37:14.449 | INFO     | utils.model_helper:import_model:106 - import: models.shapelatent_modules.PointNetPlusEncoder
+2026-04-18 10:37:14.529 | INFO     | models.shapelatent_modules:__init__:29 - [Encoder] zdim=128, out_sigma=True; force_att: 0
+2026-04-18 10:37:14.529 | INFO     | utils.model_helper:import_model:106 - import: models.latent_points_ada.PointTransPVC
+2026-04-18 10:37:14.613 | INFO     | models.latent_points_ada:__init__:38 - [Build Unet] extra_feature_channels=0, input_dim=3
+2026-04-18 10:37:14.775 | INFO     | utils.model_helper:import_model:106 - import: models.latent_points_ada.LatentPointDecPVC
+2026-04-18 10:37:14.776 | INFO     | models.latent_points_ada:__init__:241 - [Build Dec] point_dim=3, context_dim=1
+2026-04-18 10:37:14.776 | INFO     | models.latent_points_ada:__init__:38 - [Build Unet] extra_feature_channels=1, input_dim=3
+2026-04-18 10:37:14.929 | INFO     | models.vae_adain:__init__:50 - [Build Model] style_encoder: models.shapelatent_modules.PointNetPlusEncoder, encoder: models.latent_points_ada.PointTransPVC, decoder: models.latent_points_ada.LatentPointDecPVC
+2026-04-18 10:37:15.177 | INFO     | trainers.hvae_trainer:__init__:53 - broadcast_params: device=cuda:0
+2026-04-18 10:37:15.178 | INFO     | trainers.base_trainer:build_other_module:712 - no other module to build
+2026-04-18 10:37:15.178 | INFO     | trainers.base_trainer:build_data:152 - start build_data
+2026-04-18 10:37:16.310 | INFO     | datasets.pointflow_datasets:get_datasets:371 - get_datasets: tr_sample_size=2048,  te_sample_size=2048;  random_subsample=1 normalize_global=True normalize_std_per_axix=False normalize_per_shape=False recenter_per_shape=False
+2026-04-18 10:37:16.311 | INFO     | datasets.pointflow_datasets:__init__:118 - [DATA] cat: car, split: train, full path: ../data/ShapeNetCore.v2.PC15k/; norm global=True, norm-box=False
+2026-04-18 10:37:16.312 | ERROR    | utils.utils:init_processes:1159 - An error has been caught in function 'init_processes', process 'MainProcess' (16612), thread 'MainThread' (14792):
+Traceback (most recent call last):
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\train_dist.py", line 254, in <module>
+    utils.init_processes(0, size, main, args, config)
+    │     │                 │     │     │     └ CfgNode({'dpm_ckpt': '', 'clipforge': CfgNode({'clip_model': 'ViT-B/32', 'enable': 0, 'feat_dim': 512}), 'eval_trainnll': 0, ...
+    │     │                 │     │     └ Namespace(exp_root='../exp', skip_sample=0, skip_nll=0, ntest=None, dataset='cifar10', data='/tmp/nvae-diff/data', autocast_t...
+    │     │                 │     └ <function main at 0x0000015045342CB0>
+    │     │                 └ 1
+    │     └ <function init_processes at 0x0000015045341F30>
+    └ <module 'utils.utils' from 'C:\\Dev\\Tesis\\sym-noise-3d\\sym-lion\\utils\\utils.py'>
+
+> File "C:\Dev\Tesis\sym-noise-3d\sym-lion\utils\utils.py", line 1159, in init_processes
+    fn(args, config)
+    │  │     └ CfgNode({'dpm_ckpt': '', 'clipforge': CfgNode({'clip_model': 'ViT-B/32', 'enable': 0, 'feat_dim': 512}), 'eval_trainnll': 0, ...
+    │  └ Namespace(exp_root='../exp', skip_sample=0, skip_nll=0, ntest=None, dataset='cifar10', data='/tmp/nvae-diff/data', autocast_t...
+    └ <function main at 0x0000015045342CB0>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\train_dist.py", line 48, in main
+    trainer = Trainer(config, args)
+              │       │       └ Namespace(exp_root='../exp', skip_sample=0, skip_nll=0, ntest=None, dataset='cifar10', data='/tmp/nvae-diff/data', autocast_t...
+              │       └ CfgNode({'dpm_ckpt': '', 'clipforge': CfgNode({'clip_model': 'ViT-B/32', 'enable': 0, 'feat_dim': 512}), 'eval_trainnll': 0, ...
+              └ <class 'trainers.hvae_trainer.Trainer'>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\trainers\hvae_trainer.py", line 62, in __init__
+    self.train_loader, self.test_loader = self.build_data()
+    │                  │                  │    └ <function BaseTrainer.build_data at 0x00000150547A5FC0>
+    │                  │                  └ <trainers.hvae_trainer.Trainer object at 0x0000015044458070>
+    │                  └ <trainers.hvae_trainer.Trainer object at 0x0000015044458070>
+    └ <trainers.hvae_trainer.Trainer object at 0x0000015044458070>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\trainers\base_trainer.py", line 156, in build_data
+    loaders = data_lib.get_data_loaders(cfg.data, args)
+              │        │                │         └ Namespace(exp_root='../exp', skip_sample=0, skip_nll=0, ntest=None, dataset='cifar10', data='/tmp/nvae-diff/data', autocast_t...
+              │        │                └ CfgNode({'dpm_ckpt': '', 'clipforge': CfgNode({'clip_model': 'ViT-B/32', 'enable': 0, 'feat_dim': 512}), 'eval_trainnll': 0, ...
+              │        └ <function get_data_loaders at 0x0000015069E2E680>
+              └ <module 'datasets.pointflow_datasets' from 'C:\\Dev\\Tesis\\sym-noise-3d\\sym-lion\\datasets\\pointflow_datasets.py'>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\datasets\pointflow_datasets.py", line 419, in get_data_loaders
+    tr_dataset, te_dataset = get_datasets(cfg, args)
+                             │            │    └ Namespace(exp_root='../exp', skip_sample=0, skip_nll=0, ntest=None, dataset='cifar10', data='/tmp/nvae-diff/data', autocast_t...
+                             │            └ CfgNode({'nclass': 55, 'cond_on_cat': 0, 'cond_on_voxel': 0, 'eval_test_split': 0, 'voxel_size': 0.1, 'noise_std': 0.1, 'nois...
+                             └ <function get_datasets at 0x0000015069E2E5F0>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\datasets\pointflow_datasets.py", line 380, in get_datasets
+    tr_dataset = ShapeNet15kPointClouds(
+                 └ <class 'datasets.pointflow_datasets.ShapeNet15kPointClouds'>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\datasets\pointflow_datasets.py", line 157, in __init__
+    raise ValueError('check the data path')
+
+ValueError: check the data path
+2026-04-18 10:40:31.188 | INFO     | __main__:get_args:212 - EXP_ROOT: ../exp + exp name: 0418/car/347472h_hvae_lion_vae_test_B2, save dir: ../exp\0418/car/347472h_hvae_lion_vae_test_B2
+2026-04-18 10:40:31.216 | INFO     | __main__:get_args:217 - save config at ../exp\0418/car/347472h_hvae_lion_vae_test_B2\cfg.yml
+2026-04-18 10:40:31.216 | INFO     | __main__:get_args:220 - log dir: ../exp\0418/car/347472h_hvae_lion_vae_test_B2
+2026-04-18 10:40:31.217 | INFO     | utils.utils:init_processes:1133 - set MASTER_PORT: 127.0.0.1, MASTER_PORT: 6020
+2026-04-18 10:40:31.217 | INFO     | utils.utils:init_processes:1154 - init_process: rank=0, world_size=1
+2026-04-18 10:40:31.300 | INFO     | __main__:main:34 - use trainer: trainers.hvae_trainer
+2026-04-18 10:40:39.253 | INFO     | utils.utils:common_init:467 - [common-init] at rank=0, seed=1
+2026-04-18 10:40:39.262 | INFO     | utils.utils:__init__:332 - Not init TFB
+2026-04-18 10:40:39.263 | INFO     | utils.utils:common_init:511 - [common-init] DONE
+2026-04-18 10:40:39.272 | INFO     | utils.model_helper:import_model:106 - import: models.shapelatent_modules.PointNetPlusEncoder
+2026-04-18 10:40:39.301 | INFO     | models.shapelatent_modules:__init__:29 - [Encoder] zdim=128, out_sigma=True; force_att: 0
+2026-04-18 10:40:39.302 | INFO     | utils.model_helper:import_model:106 - import: models.latent_points_ada.PointTransPVC
+2026-04-18 10:40:39.311 | INFO     | models.latent_points_ada:__init__:38 - [Build Unet] extra_feature_channels=0, input_dim=3
+2026-04-18 10:40:39.471 | INFO     | utils.model_helper:import_model:106 - import: models.latent_points_ada.LatentPointDecPVC
+2026-04-18 10:40:39.471 | INFO     | models.latent_points_ada:__init__:241 - [Build Dec] point_dim=3, context_dim=1
+2026-04-18 10:40:39.472 | INFO     | models.latent_points_ada:__init__:38 - [Build Unet] extra_feature_channels=1, input_dim=3
+2026-04-18 10:40:39.624 | INFO     | models.vae_adain:__init__:50 - [Build Model] style_encoder: models.shapelatent_modules.PointNetPlusEncoder, encoder: models.latent_points_ada.PointTransPVC, decoder: models.latent_points_ada.LatentPointDecPVC
+2026-04-18 10:40:39.864 | INFO     | trainers.hvae_trainer:__init__:53 - broadcast_params: device=cuda:0
+2026-04-18 10:40:39.864 | INFO     | trainers.base_trainer:build_other_module:712 - no other module to build
+2026-04-18 10:40:39.864 | INFO     | trainers.base_trainer:build_data:152 - start build_data
+2026-04-18 10:40:40.748 | INFO     | datasets.pointflow_datasets:get_datasets:375 - get_datasets: tr_sample_size=2048,  te_sample_size=2048;  random_subsample=1 normalize_global=True normalize_std_per_axix=False normalize_per_shape=False recenter_per_shape=False
+2026-04-18 10:40:40.748 | INFO     | datasets.pointflow_datasets:__init__:118 - [DATA] cat: car, split: train, full path: ../data/ShapeNetCore.v2.PC15k/; norm global=True, norm-box=False
+2026-04-18 10:40:40.813 | INFO     | datasets.pointflow_datasets:__init__:172 - [DATA] number of file [2458] under: ../data/ShapeNetCore.v2.PC15k/02958343\_\train 
+2026-04-18 10:40:40.813 | ERROR    | utils.utils:init_processes:1159 - An error has been caught in function 'init_processes', process 'MainProcess' (20820), thread 'MainThread' (13892):
+Traceback (most recent call last):
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\train_dist.py", line 254, in <module>
+    utils.init_processes(0, size, main, args, config)
+    │     │                 │     │     │     └ CfgNode({'dpm_ckpt': '', 'clipforge': CfgNode({'clip_model': 'ViT-B/32', 'enable': 0, 'feat_dim': 512}), 'eval_trainnll': 0, ...
+    │     │                 │     │     └ Namespace(exp_root='../exp', skip_sample=0, skip_nll=0, ntest=None, dataset='cifar10', data='/tmp/nvae-diff/data', autocast_t...
+    │     │                 │     └ <function main at 0x00000258BC39EEF0>
+    │     │                 └ 1
+    │     └ <function init_processes at 0x00000258BC39E170>
+    └ <module 'utils.utils' from 'C:\\Dev\\Tesis\\sym-noise-3d\\sym-lion\\utils\\utils.py'>
+
+> File "C:\Dev\Tesis\sym-noise-3d\sym-lion\utils\utils.py", line 1159, in init_processes
+    fn(args, config)
+    │  │     └ CfgNode({'dpm_ckpt': '', 'clipforge': CfgNode({'clip_model': 'ViT-B/32', 'enable': 0, 'feat_dim': 512}), 'eval_trainnll': 0, ...
+    │  └ Namespace(exp_root='../exp', skip_sample=0, skip_nll=0, ntest=None, dataset='cifar10', data='/tmp/nvae-diff/data', autocast_t...
+    └ <function main at 0x00000258BC39EEF0>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\train_dist.py", line 48, in main
+    trainer = Trainer(config, args)
+              │       │       └ Namespace(exp_root='../exp', skip_sample=0, skip_nll=0, ntest=None, dataset='cifar10', data='/tmp/nvae-diff/data', autocast_t...
+              │       └ CfgNode({'dpm_ckpt': '', 'clipforge': CfgNode({'clip_model': 'ViT-B/32', 'enable': 0, 'feat_dim': 512}), 'eval_trainnll': 0, ...
+              └ <class 'trainers.hvae_trainer.Trainer'>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\trainers\hvae_trainer.py", line 62, in __init__
+    self.train_loader, self.test_loader = self.build_data()
+    │                  │                  │    └ <function BaseTrainer.build_data at 0x00000258CB906320>
+    │                  │                  └ <trainers.hvae_trainer.Trainer object at 0x00000258CB8CFEB0>
+    │                  └ <trainers.hvae_trainer.Trainer object at 0x00000258CB8CFEB0>
+    └ <trainers.hvae_trainer.Trainer object at 0x00000258CB8CFEB0>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\trainers\base_trainer.py", line 156, in build_data
+    loaders = data_lib.get_data_loaders(cfg.data, args)
+              │        │                │         └ Namespace(exp_root='../exp', skip_sample=0, skip_nll=0, ntest=None, dataset='cifar10', data='/tmp/nvae-diff/data', autocast_t...
+              │        │                └ CfgNode({'dpm_ckpt': '', 'clipforge': CfgNode({'clip_model': 'ViT-B/32', 'enable': 0, 'feat_dim': 512}), 'eval_trainnll': 0, ...
+              │        └ <function get_data_loaders at 0x00000258E0F92C20>
+              └ <module 'datasets.pointflow_datasets' from 'C:\\Dev\\Tesis\\sym-noise-3d\\sym-lion\\datasets\\pointflow_datasets.py'>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\datasets\pointflow_datasets.py", line 423, in get_data_loaders
+    tr_dataset, te_dataset = get_datasets(cfg, args)
+                             │            │    └ Namespace(exp_root='../exp', skip_sample=0, skip_nll=0, ntest=None, dataset='cifar10', data='/tmp/nvae-diff/data', autocast_t...
+                             │            └ CfgNode({'nclass': 55, 'cond_on_cat': 0, 'cond_on_voxel': 0, 'eval_test_split': 0, 'voxel_size': 0.1, 'noise_std': 0.1, 'nois...
+                             └ <function get_datasets at 0x00000258E0F92B90>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\datasets\pointflow_datasets.py", line 384, in get_datasets
+    tr_dataset = ShapeNet15kPointClouds(
+                 └ <class 'datasets.pointflow_datasets.ShapeNet15kPointClouds'>
+
+  File "C:\Dev\Tesis\sym-noise-3d\sym-lion\datasets\pointflow_datasets.py", line 189, in __init__
+    point_cloud = np.load(obj_fname)  # (15k, 3)
+                  │  │    └ '../data/ShapeNetCore.v2.PC15k/02958343\\train\\100715345ee54d7ae38b52b4ee9d36a3.npy'
+                  │  └ <function load at 0x00000258ADC5D1B0>
+                  └ <module 'numpy' from 'C:\\Users\\potat\\miniconda3\\envs\\sym-noise-3d\\lib\\site-packages\\numpy\\__init__.py'>
+
+  File "C:\Users\potat\miniconda3\envs\sym-noise-3d\lib\site-packages\numpy\lib\npyio.py", line 427, in load
+    fid = stack.enter_context(open(os_fspath(file), "rb"))
+          │     │                  │         └ '../data/ShapeNetCore.v2.PC15k/02958343\\train\\100715345ee54d7ae38b52b4ee9d36a3.npy'
+          │     │                  └ <built-in function fspath>
+          │     └ <function _BaseExitStack.enter_context at 0x0000025894711C60>
+          └ <contextlib.ExitStack object at 0x00000258CD85DF90>
+
+FileNotFoundError: [Errno 2] No such file or directory: '../data/ShapeNetCore.v2.PC15k/02958343\\train\\100715345ee54d7ae38b52b4ee9d36a3.npy'
+2026-04-18 10:42:14.398 | INFO     | __main__:get_args:212 - EXP_ROOT: ../exp + exp name: 0418/car/347472h_hvae_lion_vae_test_B2, save dir: ../exp\0418/car/347472h_hvae_lion_vae_test_B2
+2026-04-18 10:42:14.426 | INFO     | __main__:get_args:217 - save config at ../exp\0418/car/347472h_hvae_lion_vae_test_B2\cfg.yml
+2026-04-18 10:42:14.426 | INFO     | __main__:get_args:220 - log dir: ../exp\0418/car/347472h_hvae_lion_vae_test_B2
+2026-04-18 10:42:14.426 | INFO     | utils.utils:init_processes:1133 - set MASTER_PORT: 127.0.0.1, MASTER_PORT: 6020
+2026-04-18 10:42:14.427 | INFO     | utils.utils:init_processes:1154 - init_process: rank=0, world_size=1
+2026-04-18 10:42:14.507 | INFO     | __main__:main:34 - use trainer: trainers.hvae_trainer
+2026-04-18 10:42:22.124 | INFO     | utils.utils:common_init:467 - [common-init] at rank=0, seed=1
+2026-04-18 10:42:22.132 | INFO     | utils.utils:__init__:332 - Not init TFB
+2026-04-18 10:42:22.132 | INFO     | utils.utils:common_init:511 - [common-init] DONE
+2026-04-18 10:42:22.141 | INFO     | utils.model_helper:import_model:106 - import: models.shapelatent_modules.PointNetPlusEncoder
+2026-04-18 10:42:22.169 | INFO     | models.shapelatent_modules:__init__:29 - [Encoder] zdim=128, out_sigma=True; force_att: 0
+2026-04-18 10:42:22.171 | INFO     | utils.model_helper:import_model:106 - import: models.latent_points_ada.PointTransPVC
+2026-04-18 10:42:22.179 | INFO     | models.latent_points_ada:__init__:38 - [Build Unet] extra_feature_channels=0, input_dim=3
+2026-04-18 10:42:22.322 | INFO     | utils.model_helper:import_model:106 - import: models.latent_points_ada.LatentPointDecPVC
+2026-04-18 10:42:22.323 | INFO     | models.latent_points_ada:__init__:241 - [Build Dec] point_dim=3, context_dim=1
+2026-04-18 10:42:22.323 | INFO     | models.latent_points_ada:__init__:38 - [Build Unet] extra_feature_channels=1, input_dim=3
+2026-04-18 10:42:22.467 | INFO     | models.vae_adain:__init__:50 - [Build Model] style_encoder: models.shapelatent_modules.PointNetPlusEncoder, encoder: models.latent_points_ada.PointTransPVC, decoder: models.latent_points_ada.LatentPointDecPVC
+2026-04-18 10:42:22.653 | INFO     | trainers.hvae_trainer:__init__:53 - broadcast_params: device=cuda:0
+2026-04-18 10:42:22.653 | INFO     | trainers.base_trainer:build_other_module:712 - no other module to build
+2026-04-18 10:42:22.654 | INFO     | trainers.base_trainer:build_data:152 - start build_data
+2026-04-18 10:42:23.614 | INFO     | datasets.pointflow_datasets:get_datasets:378 - get_datasets: tr_sample_size=2048,  te_sample_size=2048;  random_subsample=1 normalize_global=True normalize_std_per_axix=False normalize_per_shape=False recenter_per_shape=False
+2026-04-18 10:42:23.615 | INFO     | datasets.pointflow_datasets:__init__:118 - [DATA] cat: car, split: train, full path: ../data/ShapeNetCore.v2.PC15k/; norm global=True, norm-box=False
+2026-04-18 10:42:23.636 | INFO     | datasets.pointflow_datasets:__init__:172 - [DATA] number of file [2458] under: ../data/ShapeNetCore.v2.PC15k/02958343\_\train 
+2026-04-18 10:42:55.783 | INFO     | datasets.pointflow_datasets:__init__:197 - [DATA] Load data time: 32.2s | dir: ['02958343'] | sample_with_replacement: 1; num points: 2458
+2026-04-18 10:42:57.176 | INFO     | datasets.pointflow_datasets:__init__:263 - [DATA] normalize_global: mean=[0.00131747 0.00735971 0.02350355], std=[0.1634924]
+2026-04-18 10:42:58.017 | INFO     | datasets.pointflow_datasets:__init__:270 - [DATA] shape=(2458, 15000, 3), all_points_mean:=(1, 1, 3), std=(1, 1, 1), max=4.166, min=-4.333; num-pts=2048
+2026-04-18 10:42:58.018 | INFO     | datasets.pointflow_datasets:__init__:118 - [DATA] cat: car, split: val, full path: ../data/ShapeNetCore.v2.PC15k/; norm global=True, norm-box=False
+2026-04-18 10:42:58.028 | INFO     | datasets.pointflow_datasets:__init__:172 - [DATA] number of file [352] under: ../data/ShapeNetCore.v2.PC15k/02958343\_\val 
+2026-04-18 10:43:03.078 | INFO     | datasets.pointflow_datasets:__init__:197 - [DATA] Load data time: 5.1s | dir: ['02958343'] | sample_with_replacement: 1; num points: 352
+2026-04-18 10:43:03.191 | INFO     | datasets.pointflow_datasets:__init__:270 - [DATA] shape=(352, 15000, 3), all_points_mean:=(1, 1, 3), std=(1, 1, 1), max=4.002, min=-4.059; num-pts=2048
+2026-04-18 10:43:03.192 | INFO     | datasets.pointflow_datasets:get_data_loaders:447 - [Batch Size] train=2, test=10; drop-last=1
+2026-04-18 10:43:03.197 | INFO     | trainers.hvae_trainer:__init__:75 - done init trainer @cuda:0
+2026-04-18 10:43:03.243 | INFO     | trainers.base_trainer:prepare_vis_data:676 - [prepare_vis_data] len of train_loader: 1229
+2026-04-18 10:43:03.262 | INFO     | trainers.base_trainer:prepare_vis_data:691 - tr_x: torch.Size([16, 2048, 3]), m_pcs: torch.Size([16, 1, 3]), s_pcs: torch.Size([16, 1, 1]), val_x: torch.Size([16, 2048, 3])
+2026-04-18 10:43:03.291 | INFO     | __main__:main:51 - param size = 22.402731M 
+2026-04-18 10:43:03.291 | INFO     | trainers.base_trainer:set_writer:57 - 
+----------
+[url]: none
+../exp\0418/car/347472h_hvae_lion_vae_test_B2
+----------
+2026-04-18 10:43:03.300 | INFO     | __main__:main:73 - not find any checkpoint: ../exp\0418/car/347472h_hvae_lion_vae_test_B2\checkpoints, (exist=False), or snapshot ../exp\0418/car/347472h_hvae_lion_vae_test_B2\checkpoints\snapshot, (exist=False)
+2026-04-18 10:43:03.301 | INFO     | trainers.base_trainer:train_epochs:173 - [rank=0] Start epoch: 0 End epoch: 8000, batch-size=2 | Niter/epo=1229 | log freq=1229, viz freq 491600, val freq 200 
+2026-04-18 10:43:30.559 | INFO     | trainers.common_fun:validate_inspect_noprior:104 - writer: none
+2026-04-18 10:44:03.764 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E0 iter[ 67/1229] | [Loss] 35.48 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]    67 | [url] none 
+2026-04-18 10:45:04.071 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E0 iter[200/1229] | [Loss] 19.39 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]   200 | [url] none 
+2026-04-18 10:46:04.420 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E0 iter[338/1229] | [Loss] 13.91 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]   338 | [url] none 
+2026-04-18 10:47:04.846 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E0 iter[475/1229] | [Loss] 11.34 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]   475 | [url] none 
+2026-04-18 10:48:05.285 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E0 iter[612/1229] | [Loss] 9.94 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]   612 | [url] none 
+2026-04-18 10:49:05.550 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E0 iter[746/1229] | [Loss] 9.11 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]   746 | [url] none 
+2026-04-18 10:50:05.841 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E0 iter[885/1229] | [Loss] 8.60 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]   885 | [url] none 
+2026-04-18 10:51:06.110 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E0 iter[1023/1229] | [Loss] 8.33 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]  1023 | [url] none 
+2026-04-18 10:52:06.404 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E0 iter[1161/1229] | [Loss] 8.22 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]  1161 | [url] none 
+2026-04-18 10:52:35.582 | INFO     | trainers.base_trainer:train_epochs:256 - [R0] | E0 iter[1228/1229] | [Loss] 8.21 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]  1228 | [url] none | [time] 9.5m (~1271h) |[best] 0 -100.000x1e-2 
+2026-04-18 10:53:35.976 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E1 iter[132/1229] | [Loss] 8.54 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]  1361 | [url] none 
+2026-04-18 10:54:35.990 | INFO     | trainers.base_trainer:train_epochs:219 - [R0] | E1 iter[261/1229] | [Loss] 8.91 | [exp] ../exp\0418/car/347472h_hvae_lion_vae_test_B2 | [step]  1490 | [url] none 
