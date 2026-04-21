@@ -12,6 +12,7 @@ from src.models import (
     PVCNNJointSymPlane,
     PTJointSymPlane,
     PVCNNTrueJoint,
+    PointTransformerTrueJointDiT,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
@@ -289,7 +290,7 @@ def main():
                 alpha_bars=alpha_bars,
             )
             joint_debug = _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples, T, joint_selection_mode, joint_selection_reference_mode)
-        elif isinstance(model, PVCNNTrueJoint) and not use_latent:
+        elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT)) and not use_latent:
             print("[sample] MODE: True Joint Symmetric Plane Diffusion")
             true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
             pcs = true_joint_sampler.sample(

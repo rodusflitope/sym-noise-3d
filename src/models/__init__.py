@@ -9,6 +9,8 @@ from .pt_sym_learned_plane import PTSymLearnedPlane
 from .pvcnn_joint_sym_plane import PVCNNJointSymPlane
 from .pvcnn_true_joint import PVCNNTrueJoint
 from .pt_joint_sym_plane import PTJointSymPlane
+from .pointtransformer_dit import PointTransformerDiT
+from .pointtransformer_true_joint_dit import PointTransformerTrueJointDiT
 from .builder import build_model
 
 try:
@@ -28,6 +30,8 @@ __all__ = [
     "PVCNNJointSymPlane",
     "PVCNNTrueJoint",
     "PTJointSymPlane",
+    "PointTransformerDiT",
+    "PointTransformerTrueJointDiT",
     "build_model",
     "LionTwoPriorsDDM",
 ]

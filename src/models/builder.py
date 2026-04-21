@@ -200,6 +200,46 @@ def build_model(cfg):
             soft_mask_temperature=soft_mask_temperature,
             soft_mask_use_ste=soft_mask_use_ste,
         )
+    elif name == "pointtransformer_dit":
+        from .pointtransformer_dit import PointTransformerDiT
+        
+        hidden_dim = int(cfg["model"]["hidden_dim"])
+        time_dim = int(cfg["model"]["time_dim"])
+        num_heads = int(cfg["model"].get("num_heads", 4))
+        num_layers = int(cfg["model"].get("num_layers", 2))
+        use_fourier_features = bool(cfg["model"].get("use_fourier_features", False))
+        use_symmetric_attention = bool(cfg["model"].get("use_symmetric_attention", False))
+        
+        return PointTransformerDiT(
+            hidden_dim=hidden_dim,
+            time_dim=time_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            use_fourier_features=use_fourier_features,
+            use_symmetric_attention=use_symmetric_attention,
+        )
+    elif name == "pointtransformer_true_joint_dit":
+        from .pointtransformer_true_joint_dit import PointTransformerTrueJointDiT
+        
+        hidden_dim = int(cfg["model"]["hidden_dim"])
+        time_dim = int(cfg["model"]["time_dim"])
+        num_heads = int(cfg["model"].get("num_heads", 4))
+        num_layers = int(cfg["model"].get("num_layers", 2))
+        use_fourier_features = bool(cfg["model"].get("use_fourier_features", False))
+        use_symmetric_attention = bool(cfg["model"].get("use_symmetric_attention", False))
+
+        joint_cfg = cfg.get("joint_symmetry", {}) or {}
+        geometry_mode = str(joint_cfg.get("geometry_mode", cfg["model"].get("joint_geometry_mode", "half"))).lower()
+        
+        return PointTransformerTrueJointDiT(
+            hidden_dim=hidden_dim,
+            time_dim=time_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            use_fourier_features=use_fourier_features,
+            use_symmetric_attention=use_symmetric_attention,
+            geometry_mode=geometry_mode
+        )
     elif name in {"legacy_pvcnn", "pvcnn_legacy"}:
         from .legacy_pvcnn import LegacyPVCNNEpsilon
 

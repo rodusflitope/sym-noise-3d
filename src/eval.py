@@ -18,6 +18,7 @@ from src.models import (
     PVCNNJointSymPlane,
     PTJointSymPlane,
     PVCNNTrueJoint,
+    PointTransformerTrueJointDiT,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler, SymmetricDDPM_Sampler, JointSymmetricDDPM_Sampler, TrueJointSymmetricDDPM_Sampler
@@ -202,7 +203,7 @@ def evaluate(
                 device=device,
                 alpha_bars=alpha_bars,
             ).detach().cpu()
-        elif isinstance(model, PVCNNTrueJoint) and not use_latent:
+        elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT)) and not use_latent:
             true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
             samples = true_joint_sampler.sample(
                 model,

@@ -17,7 +17,7 @@ from contextlib import nullcontext
 from src.data import build_datasets_from_config
 from src.losses import build_joint_symmetry_plane_loss, build_loss, build_sym_learned_plane_loss, build_true_joint_symmetry_plane_loss
 from src.metrics.metrics import chamfer_distance, earth_movers_distance
-from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane, PTSymLearnedPlane, PVCNNJointSymPlane, PTJointSymPlane, PVCNNTrueJoint
+from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane, PTSymLearnedPlane, PVCNNJointSymPlane, PTJointSymPlane, PVCNNTrueJoint, PointTransformerTrueJointDiT
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_config
@@ -451,7 +451,7 @@ def main() -> None:
     use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, ae_ok_types))
     use_sym_plane = isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane))
     use_joint_sym_plane = isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane))
-    use_true_joint_sym_plane = isinstance(model, PVCNNTrueJoint)
+    use_true_joint_sym_plane = isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT))
     if use_joint_sym_plane or use_true_joint_sym_plane:
         validate_joint_configuration(cfg, context="train")
     joint_debug_cfg = _joint_debug_cfg(cfg)

@@ -183,7 +183,27 @@ def sample_normalized_point_cloud(
         mesh: Any = trimesh.load(str(obj_path), force="mesh", process=False)
         if sample_symmetric:
             n_half = num_points // 2
-            points_half = mesh.sample(n_half)
+
+            plane_normal = [0.0, 0.0, 0.0]
+            plane_normal[symmetry_axis] = 1.0
+
+            if isinstance(mesh, trimesh.Trimesh):
+                try:
+                    half_mesh = trimesh.intersections.slice_mesh_plane(
+                        mesh, 
+                        plane_normal=plane_normal, 
+                        plane_origin=[0.0, 0.0, 0.0],
+                        cached_dots=None
+                    )
+                    if len(half_mesh.faces) > 0:
+                        points_half = half_mesh.sample(n_half)
+                    else:
+                        points_half = mesh.sample(n_half)
+                except Exception:
+                    points_half = mesh.sample(n_half)
+            else:
+                points_half = mesh.sample(n_half)
+
             points_tensor_half = torch.from_numpy(points_half).float()
             points_tensor_reflected = points_tensor_half.clone()
             points_tensor_reflected[:, symmetry_axis] *= -1
