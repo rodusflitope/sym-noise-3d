@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import trimesh
 
-from src.metrics.metrics import chamfer_distance
+from src.metrics.metrics import chamfer_distance, earth_movers_distance
 
 
 def canonicalize_plane(plane: torch.Tensor) -> torch.Tensor:
@@ -70,9 +70,47 @@ def gather_points(points: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     return torch.gather(points, 1, indices.unsqueeze(-1).expand(-1, -1, points.shape[-1]))
 
 
+def resample_point_cloud(points: torch.Tensor, num_points: int) -> torch.Tensor:
+    if points.shape[0] == 0:
+        return torch.zeros((int(num_points), 3), dtype=points.dtype, device=points.device)
+    if points.shape[0] == int(num_points):
+        return points
+    if points.shape[0] > int(num_points):
+        idx = torch.randperm(points.shape[0], device=points.device)[: int(num_points)]
+    else:
+        idx = torch.randint(0, points.shape[0], (int(num_points),), device=points.device)
+    return points[idx]
+
+
+def select_fundamental_domain(points: torch.Tensor, planes: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    pts = points
+    planes = normalize_plane(planes.to(device=pts.device, dtype=pts.dtype))
+    mask = mask.to(device=pts.device).bool()
+    keep = torch.ones(pts.shape[0], dtype=torch.bool, device=pts.device)
+    for i in range(min(mask.numel(), planes.shape[0])):
+        if bool(mask[i].item()):
+            n = planes[i, :3]
+            d = planes[i, 3]
+            keep &= (pts.matmul(n) - d) >= 0
+    return pts[keep]
+
+
+def reconstruct_from_fundamental_domain(points: torch.Tensor, planes: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    pts_list = [points]
+    planes = normalize_plane(planes.to(device=points.device, dtype=points.dtype))
+    mask = mask.to(device=points.device).bool()
+    for i in range(min(mask.numel(), planes.shape[0])):
+        if bool(mask[i].item()):
+            plane = planes[i]
+            reflected = [reflect_points(pts.unsqueeze(0), plane.unsqueeze(0)).squeeze(0) for pts in pts_list]
+            pts_list = pts_list + reflected
+    return torch.cat(pts_list, dim=0)
+
+
 def _stratified_subsample(indices: torch.Tensor, scores: torch.Tensor, target_count: int, descending: bool = False) -> torch.Tensor:
     if indices.numel() <= target_count:
         return indices
+
     order = torch.argsort(scores, descending=descending)
     ordered = indices[order]
     positions = torch.linspace(0, ordered.numel() - 1, steps=target_count, device=ordered.device)
@@ -222,9 +260,32 @@ def sample_normalized_point_cloud(
     return points_tensor
 
 
+SHAPENET_CATEGORY_TO_ID = {
+    "airplane": "02691156",
+    "cabinet": "02933112",
+    "car": "02958343",
+    "chair": "03001627",
+    "lamp": "03636649",
+    "sofa": "04256520",
+    "table": "04379243",
+    "watercraft": "04530566",
+    "bench": "02828884",
+    "display": "03211117",
+    "phone": "04401088",
+    "speaker": "03691459",
+    "rifle": "04090263",
+}
+
 def discover_shapenet_obj_paths(root_dir: str | Path, categories: list[str] | None = None) -> list[Path]:
     root = Path(root_dir)
     categories = categories or ["02691156"]
+    mapped = []
+    for cat in categories:
+        if cat.lower() in SHAPENET_CATEGORY_TO_ID:
+            mapped.append(SHAPENET_CATEGORY_TO_ID[cat.lower()])
+        else:
+            mapped.append(cat)
+    categories = mapped
     obj_paths: list[Path] = []
     for cat_id in categories:
         candidate_dirs: list[Path] = []
@@ -308,6 +369,110 @@ def estimate_symmetry_plane(
     }
 
 
+CANONICAL_SYMMETRY_PLANES = torch.tensor([
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+])
+
+def solve_translation_from_planes(planes: torch.Tensor) -> torch.Tensor:
+    planes = normalize_plane(planes)
+    normals = planes[..., :3]
+    offsets = planes[..., 3]
+    solution = torch.linalg.lstsq(normals, offsets.unsqueeze(-1)).solution.squeeze(-1)
+    return solution
+
+def translate_points(points: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:
+    if translation.shape[-1] != 3:
+        raise ValueError(f"translation must have last dim 3, got {tuple(translation.shape)}")
+    translation = translation.to(device=points.device, dtype=points.dtype)
+    view_shape = [1] * points.ndim
+    view_shape[-1] = 3
+    return points - translation.view(*view_shape)
+
+def translate_plane(plane: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:
+    squeeze = False
+    if plane.ndim == 1:
+        plane = plane.unsqueeze(0)
+        squeeze = True
+    planes = normalize_plane(plane)
+    if translation.ndim == 1:
+        translation = translation.unsqueeze(0)
+    if translation.shape[-1] != 3:
+        raise ValueError(f"translation must have last dim 3, got {tuple(translation.shape)}")
+    if translation.shape[0] == 1 and planes.shape[0] != 1:
+        translation = translation.expand(planes.shape[0], -1)
+    elif translation.shape[0] != planes.shape[0]:
+        raise ValueError(
+            f"translation batch must match plane batch or be singleton, got planes={tuple(planes.shape)} translation={tuple(translation.shape)}"
+        )
+    translation = translation.to(device=planes.device, dtype=planes.dtype)
+    delta = (planes[:, :3] * translation).sum(dim=-1, keepdim=True)
+    out = torch.cat([planes[:, :3], planes[:, 3:4] - delta], dim=-1)
+    out = canonicalize_plane(out)
+    if squeeze:
+        return out.squeeze(0)
+    return out
+
+def estimate_canonical_translation(
+    points: torch.Tensor,
+    planes: torch.Tensor,
+    reduction: str = "median",
+) -> dict[str, torch.Tensor]:
+    pts = points.to(dtype=torch.float32)
+    planes_dev = normalize_plane(planes.to(device=pts.device, dtype=pts.dtype))
+    batch_points = pts.unsqueeze(0).expand(planes_dev.shape[0], -1, -1).contiguous()
+    offsets = compute_plane_offset(batch_points, planes_dev[:, :3], reduction=reduction).squeeze(1)
+    planes_with_offsets = canonicalize_plane(torch.cat([planes_dev[:, :3], offsets.unsqueeze(1)], dim=1))
+    translation = solve_translation_from_planes(planes_with_offsets)
+    return {
+        "planes": planes_with_offsets,
+        "translation": translation,
+    }
+
+def evaluate_canonical_symmetry_scores(
+    points: torch.Tensor,
+    planes: torch.Tensor,
+    device: str | torch.device = "cpu",
+    halfspace_epsilon: float = 1e-3,
+    offset_reduction: str = "median",
+) -> dict[str, Any]:
+    pts = points.to(device=device, dtype=torch.float32)
+    alignment = estimate_canonical_translation(
+        pts,
+        planes.to(device=pts.device, dtype=pts.dtype),
+        reduction=offset_reduction,
+    )
+    planes_dev = alignment["planes"]
+    translation = alignment["translation"]
+    scores: list[float] = []
+    balances: list[float] = []
+    for plane in planes_dev:
+        n = plane[:3]
+        d = plane[3]
+        dist = pts.matmul(n) - d
+        pos_mask = dist > halfspace_epsilon
+        neg_mask = dist < -halfspace_epsilon
+        pos_count = int(pos_mask.sum().item())
+        neg_count = int(neg_mask.sum().item())
+        total_count = max(1, pos_count + neg_count)
+        balances.append(float(abs(pos_count - neg_count) / total_count))
+        pts_pos = pts[pos_mask]
+        pts_neg = pts[neg_mask]
+        if pts_pos.numel() == 0 or pts_neg.numel() == 0:
+            scores.append(float("inf"))
+            continue
+
+        pts_pos_ref = reflect_points(pts_pos.unsqueeze(0), plane.unsqueeze(0)).squeeze(0)
+        score = float(earth_movers_distance(pts_pos_ref.unsqueeze(0), pts_neg.unsqueeze(0)).item())
+        scores.append(score)
+    return {
+        "planes": planes_dev.cpu(),
+        "scores": scores,
+        "balances": balances,
+        "canonical_translation": translation.cpu(),
+    }
+
 def load_symmetry_plane_cache(cache_path: str | Path) -> dict[str, Any]:
     path = Path(cache_path)
     if not path.exists():
@@ -323,12 +488,10 @@ def load_symmetry_plane_cache(cache_path: str | Path) -> dict[str, Any]:
         payload = {"planes": payload, "meta": {}}
     return payload
 
-
 def save_symmetry_plane_cache(cache_path: str | Path, payload: dict[str, Any]) -> None:
     path = Path(cache_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, str(path))
-
 
 def build_symmetry_plane_cache(
     root_dir: str | Path,
@@ -345,10 +508,15 @@ def build_symmetry_plane_cache(
     progress_every: int = 1,
     partial_save_path: str | Path | None = None,
     partial_save_every: int = 10,
+    canonical_planes: torch.Tensor | None = None,
+    canonical_offset_reduction: str = "median",
 ) -> dict[str, Any]:
+    if canonical_planes is not None and sample_symmetric:
+        raise ValueError("canonical symmetry precompute cannot be combined with sample_symmetric=True")
     obj_paths = discover_shapenet_obj_paths(root_dir, categories)
     if max_models is not None and max_models > 0:
         obj_paths = obj_paths[:max_models]
+
     total_models = len(obj_paths)
     print(
         f"[symmetry_plane_cache] starting precompute | root={Path(root_dir)} | "
@@ -366,24 +534,40 @@ def build_symmetry_plane_cache(
             symmetry_axis=symmetry_axis,
             deterministic_seed=seed,
         )
-        result = estimate_symmetry_plane(
-            points,
-            num_restarts=num_restarts,
-            steps=steps,
-            lr=lr,
-            device=device,
-        )
         key = symmetry_plane_cache_key(root_dir, obj_path)
-        planes[key] = {
-            "plane": normalize_plane(result["plane"]).cpu(),
-            "score": float(result["score"]),
-        }
+        if canonical_planes is not None:
+            result = evaluate_canonical_symmetry_scores(
+                points,
+                canonical_planes,
+                device=device,
+                offset_reduction=canonical_offset_reduction,
+            )
+            planes[key] = {
+                "planes": result["planes"],
+                "scores": result["scores"],
+                "balances": result["balances"],
+                "canonical_translation": result["canonical_translation"],
+            }
+            score_repr = ",".join(f"{s:.6f}" for s in result["scores"])
+        else:
+            result = estimate_symmetry_plane(
+                points,
+                num_restarts=num_restarts,
+                steps=steps,
+                lr=lr,
+                device=device,
+            )
+            planes[key] = {
+                "plane": normalize_plane(result["plane"]).cpu(),
+                "score": float(result["score"]),
+            }
+            score_repr = f"{planes[key]['score']:.6f}"
         if progress_every > 0 and (index == 1 or index % progress_every == 0 or index == total_models):
             elapsed = time.time() - start_time
             item_elapsed = time.time() - item_start
             print(
                 f"[symmetry_plane_cache] {index}/{total_models} | key={key} | "
-                f"score={planes[key]['score']:.6f} | item_time={item_elapsed:.2f}s | elapsed={elapsed:.2f}s"
+                f"scores=[{score_repr}] | item_time={item_elapsed:.2f}s | elapsed={elapsed:.2f}s"
             )
         if partial_save_path is not None and partial_save_every > 0 and (index % partial_save_every == 0 or index == total_models):
             save_symmetry_plane_cache(
@@ -398,6 +582,7 @@ def build_symmetry_plane_cache(
                         "num_restarts": int(num_restarts),
                         "steps": int(steps),
                         "lr": float(lr),
+                        "canonical_offset_reduction": str(canonical_offset_reduction),
                         "partial": True,
                         "completed": int(index),
                         "total": int(total_models),
@@ -416,6 +601,7 @@ def build_symmetry_plane_cache(
             "num_restarts": int(num_restarts),
             "steps": int(steps),
             "lr": float(lr),
+            "canonical_offset_reduction": str(canonical_offset_reduction),
             "partial": False,
             "completed": int(total_models),
             "total": int(total_models),

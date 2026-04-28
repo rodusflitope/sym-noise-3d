@@ -12,13 +12,13 @@ class DDIM_Sampler:
         self.noise_type = noise_type
 
     @torch.no_grad()
-    def step(self, model, x_t: torch.Tensor, t: int, t_prev: int = None):
+    def step(self, model, x_t: torch.Tensor, t: int, t_prev: int = None, **model_kwargs):
 
         B = x_t.shape[0]
         device = x_t.device
         t_batch = torch.full((B,), t, dtype=torch.long, device=device)
 
-        eps_pred = model(x_t, t_batch)
+        eps_pred = model(x_t, t_batch, **model_kwargs)
 
         alpha_bar_t = self.alpha_bars[t]
         alpha_bar_t_prev = self.alpha_bars[t_prev] if t_prev is not None and t_prev >= 0 else torch.tensor(1.0, device=device)
@@ -41,7 +41,7 @@ class DDIM_Sampler:
         return x_t_prev
 
     @torch.no_grad()
-    def sample(self, model, num_samples: int, num_points: int, num_steps: int = None):
+    def sample(self, model, num_samples: int, num_points: int, num_steps: int = None, **model_kwargs):
 
         device = self.alpha_bars.device
         T = self.betas.shape[0]
@@ -63,6 +63,6 @@ class DDIM_Sampler:
 
         for i, t in enumerate(timesteps):
             t_prev = timesteps[i+1] if i+1 < len(timesteps) else -1
-            x_t = self.step(model, x_t, t, t_prev)
+            x_t = self.step(model, x_t, t, t_prev, **model_kwargs)
 
         return x_t

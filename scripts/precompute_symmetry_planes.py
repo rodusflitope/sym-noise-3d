@@ -3,12 +3,17 @@ from __future__ import annotations
 import argparse as ap
 from pathlib import Path
 import sys
+import torch
 
 root = Path(__file__).resolve().parents[1]
 sys.path.append(str(root))
 
 from src.utils.common import load_cfg
-from src.utils.symmetry_planes import build_symmetry_plane_cache, save_symmetry_plane_cache
+from src.utils.symmetry_planes import (
+    build_symmetry_plane_cache,
+    save_symmetry_plane_cache,
+    CANONICAL_SYMMETRY_PLANES,
+)
 
 
 def parse_args() -> ap.Namespace:
@@ -22,6 +27,8 @@ def parse_args() -> ap.Namespace:
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--progress_every", type=int, default=1)
     parser.add_argument("--save_every", type=int, default=10)
+    parser.add_argument("--canonical", action="store_true", help="Use canonical symmetry planes instead of optimizing per-model")
+    parser.add_argument("--canonical_offset_reduction", type=str, default=None, choices=["median", "mean"])
     return parser.parse_args()
 
 
@@ -51,10 +58,13 @@ def main() -> None:
     )
     print("[precompute_symmetry_planes] created output directory and initialized partial cache")
 
+    use_canonical = args.canonical or bool(data_cfg.get("canonical_symmetry_planes", False))
+    canonical_planes = CANONICAL_SYMMETRY_PLANES if use_canonical else None
+    canonical_offset_reduction = args.canonical_offset_reduction or str(data_cfg.get("canonical_symmetry_offset_reduction", "median"))
     payload = build_symmetry_plane_cache(
         data_cfg.get("root_dir", "data/ShapeNetCore"),
         categories=data_cfg.get("categories", None),
-        num_points=int(train_cfg.get("num_points", 2048)),
+        num_points=int(data_cfg.get("symmetry_precompute_num_points", train_cfg.get("num_points", 2048))),
         max_models=args.max_models if args.max_models is not None else data_cfg.get("max_models", None),
         sample_symmetric=bool(data_cfg.get("sample_symmetric", False)),
         symmetry_axis=int(data_cfg.get("symmetry_axis", 0)),
@@ -65,6 +75,8 @@ def main() -> None:
         progress_every=max(1, int(args.progress_every)),
         partial_save_path=out_file,
         partial_save_every=max(1, int(args.save_every)),
+        canonical_planes=canonical_planes,
+        canonical_offset_reduction=canonical_offset_reduction,
     )
     save_symmetry_plane_cache(out_path, payload)
     print(f"[precompute_symmetry_planes] saved {len(payload['planes'])} planes to {Path(out_path)}")

@@ -426,26 +426,64 @@ def main() -> None:
 
     num_workers = int(cfg["train"].get("num_workers", 4))
     persistent_workers = bool(num_workers > 0)
-    dl = DataLoader(
-        ds,
-        batch_size=cfg["train"]["batch_size"],
-        shuffle=True,
-        drop_last=False,
-        num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=persistent_workers,
-    )
-    dl_val = None
-    if ds_val is not None:
-        dl_val = DataLoader(
-            ds_val,
+    
+    use_symmetry_classes = cfg.get("data", {}).get("use_symmetry_classes", False)
+    
+    if use_symmetry_classes and hasattr(ds, "dataset") and hasattr(ds.dataset, "classes") and ds.dataset.classes is not None:
+        from src.data import HomogeneousClassBatchSampler
+        subset_classes = [ds.dataset.classes[i] for i in ds.indices]
+        batch_sampler = HomogeneousClassBatchSampler(
+            classes=subset_classes,
             batch_size=cfg["train"]["batch_size"],
-            shuffle=False,
+            shuffle=True,
+            drop_last=False
+        )
+        dl = DataLoader(
+            ds,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=persistent_workers,
+        )
+    else:
+        dl = DataLoader(
+            ds,
+            batch_size=cfg["train"]["batch_size"],
+            shuffle=True,
             drop_last=False,
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=persistent_workers,
         )
+
+    dl_val = None
+    if ds_val is not None:
+        if use_symmetry_classes and hasattr(ds_val, "dataset") and hasattr(ds_val.dataset, "classes") and ds_val.dataset.classes is not None:
+            from src.data import HomogeneousClassBatchSampler
+            subset_classes_val = [ds_val.dataset.classes[i] for i in ds_val.indices]
+            batch_sampler_val = HomogeneousClassBatchSampler(
+                classes=subset_classes_val,
+                batch_size=cfg["train"]["batch_size"],
+                shuffle=False,
+                drop_last=False
+            )
+            dl_val = DataLoader(
+                ds_val,
+                batch_sampler=batch_sampler_val,
+                num_workers=num_workers,
+                pin_memory=True,
+                persistent_workers=persistent_workers,
+            )
+        else:
+            dl_val = DataLoader(
+                ds_val,
+                batch_size=cfg["train"]["batch_size"],
+                shuffle=False,
+                drop_last=False,
+                num_workers=num_workers,
+                pin_memory=True,
+                persistent_workers=persistent_workers,
+            )
 
     ae_ok_types = (LionAutoencoder,)
     use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, ae_ok_types))
@@ -677,7 +715,10 @@ def main() -> None:
                     loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
                 else:
                     x_t, eps = forward.add_noise(x0, t)
-                    eps_pred = model(x_t, t)
+                    kwargs = {}
+                    if use_symmetry_classes and isinstance(batch, dict) and "symmetry_plane_mask" in batch:
+                        kwargs["c"] = batch["symmetry_plane_mask"].to(device)
+                    eps_pred = model(x_t, t, **kwargs)
                     assert loss_fn is not None
                     loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step, x_t=x_t)
 
@@ -904,7 +945,10 @@ def main() -> None:
                             l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
                         else:
                             x_t, eps = forward.add_noise(x0, t)
-                            eps_pred = model_to_eval(x_t, t)
+                            kwargs = {}
+                            if use_symmetry_classes and isinstance(batch, dict) and "symmetry_plane_mask" in batch:
+                                kwargs["c"] = batch["symmetry_plane_mask"].to(device)
+                            eps_pred = model_to_eval(x_t, t, **kwargs)
                             assert loss_fn is not None
                             l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
 

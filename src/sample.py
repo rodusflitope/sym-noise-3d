@@ -13,6 +13,7 @@ from src.models import (
     PTJointSymPlane,
     PVCNNTrueJoint,
     PointTransformerTrueJointDiT,
+    PointTransformerSymClassDiT,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
@@ -20,7 +21,14 @@ from src.samplers import build_sampler, SymmetricDDPM_Sampler, JointSymmetricDDP
 from src.utils.checkpoint import load_ckpt, load_ckpt_config
 from src.utils.io import save_npy, save_ply
 from src.vis_samples import plot_joint_plane_debug, plot_pc
-from src.utils.symmetry_planes import gather_points, normalize_plane, select_signed_half
+from src.utils.symmetry_planes import (
+    CANONICAL_SYMMETRY_PLANES,
+    gather_points,
+    normalize_plane,
+    reconstruct_from_fundamental_domain,
+    resample_point_cloud,
+    select_signed_half,
+)
 from src.utils.joint_modes import (
     get_joint_mode_config,
     get_sampler_selection_mode,
@@ -95,6 +103,23 @@ def _load_autoencoder(cfg, device, ae_ckpt: str):
     ae = load_ckpt(ae, ae_ckpt, map_location=device)
     ae.eval()
     return ae
+
+
+def _symmetry_class_mask(class_idx: int, num_planes: int, device: torch.device) -> torch.Tensor:
+    mask = torch.zeros(num_planes, dtype=torch.float32, device=device)
+    for i in range(num_planes):
+        if (int(class_idx) >> i) & 1:
+            mask[i] = 1.0
+    return mask
+
+
+def _reconstruct_canonical_batch_from_domain(points: torch.Tensor, mask: torch.Tensor, target_points: int) -> torch.Tensor:
+    planes = CANONICAL_SYMMETRY_PLANES.to(device=points.device, dtype=points.dtype)
+    out = []
+    for i in range(points.shape[0]):
+        reconstructed = reconstruct_from_fundamental_domain(points[i], planes, mask[i])
+        out.append(resample_point_cloud(reconstructed, target_points))
+    return torch.stack(out, dim=0)
 
 def parse_args():
     import argparse as ap
@@ -301,6 +326,20 @@ def main():
                 device=device,
                 alpha_bars=alpha_bars,
             )
+        elif isinstance(model, PointTransformerSymClassDiT) and not use_latent:
+            print("[sample] MODE: Symmetry Class Domain Diffusion")
+            data_cfg = cfg.get("data", {}) or {}
+            num_planes = int(data_cfg.get("num_symmetry_planes", 1))
+            class_idx = int((cfg.get("sampler", {}) or {}).get("symmetry_class", (2 ** num_planes) - 1))
+            mask_single = _symmetry_class_mask(class_idx, num_planes, device)
+            mask = mask_single.unsqueeze(0).expand(num_samples, -1).contiguous()
+            k = int(mask_single.sum().item())
+            sample_points = num_points
+            if bool(data_cfg.get("return_fundamental_domain", False)):
+                sample_points = max(1, num_points // (2 ** k))
+            pcs = sampler.sample(model, num_samples=num_samples, num_points=sample_points, c=mask)
+            if bool(data_cfg.get("return_fundamental_domain", False)) and k > 0:
+                pcs = _reconstruct_canonical_batch_from_domain(pcs, mask, num_points)
         elif not use_latent:
             pcs = sampler.sample(model, num_samples=num_samples, num_points=num_points)
         else:

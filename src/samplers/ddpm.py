@@ -21,13 +21,13 @@ class DDPM_Sampler:
         self.beta_t_tilde = torch.clamp(self.beta_t_tilde, min=1e-20)
 
     @torch.no_grad()
-    def step(self, model, x_t: torch.Tensor, t: int, t_prev=None):
+    def step(self, model, x_t: torch.Tensor, t: int, t_prev=None, **model_kwargs):
 
         B = x_t.shape[0]
         device = x_t.device
         t_batch = torch.full((B,), t, dtype=torch.long, device=device)
 
-        eps_pred = model(x_t, t_batch)
+        eps_pred = model(x_t, t_batch, **model_kwargs)
 
         c1 = (1 - self.alphas[t]) / torch.sqrt(1 - self.alpha_bars[t])
         mu = (x_t - c1 * eps_pred) / self.sqrt_alphas[t]
@@ -89,7 +89,7 @@ class DDPM_Sampler:
         return mu + sigma_t * z
 
     @torch.no_grad()
-    def sample(self, model, num_samples: int, num_points: int):
+    def sample(self, model, num_samples: int, num_points: int, **model_kwargs):
 
         device = self.alpha_bars.device
 
@@ -100,7 +100,7 @@ class DDPM_Sampler:
         
         T = self.betas.shape[0]
         for t in reversed(range(T)):
-            x_t = self.step(model, x_t, t)
+            x_t = self.step(model, x_t, t, **model_kwargs)
         if self.normalize_output and self.normalizer is not None:
             x_t = self.normalizer.normalize(x_t)
         return x_t

@@ -8,11 +8,79 @@ from src.utils.symmetry import order_point_cloud_for_symmetry
 from src.utils.symmetry_planes import (
     load_symmetry_plane_cache,
     normalize_plane,
+    reconstruct_from_fundamental_domain,
+    resample_point_cloud,
     sample_normalized_point_cloud,
+    select_fundamental_domain,
     stable_mesh_seed,
     symmetry_plane_cache_key,
+    translate_plane,
+    translate_points,
 )
+from torch.utils.data import Sampler
+from typing import List, Iterator, Dict
+import random
 
+def resample_points(points: torch.Tensor, num_target: int) -> torch.Tensor:
+    """Remuestrea la nube para tener exactamente num_target puntos"""
+    num_current = points.shape[0]
+    if num_current == 0:
+        return torch.zeros((num_target, 3), dtype=points.dtype, device=points.device)
+    indices = torch.randint(0, num_current, (num_target,), device=points.device)
+    return points[indices]
+
+class HomogeneousClassBatchSampler(Sampler[List[int]]):
+    def __init__(self, classes: List[int], batch_size: int, shuffle: bool = True, drop_last: bool = False):
+        self.classes = classes
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        
+        self.class_to_indices: Dict[int, List[int]] = {}
+        for idx, c in enumerate(self.classes):
+            if c not in self.class_to_indices:
+                self.class_to_indices[c] = []
+            self.class_to_indices[c].append(idx)
+            
+    def __iter__(self) -> Iterator[List[int]]:
+        batches = []
+        for c, indices in self.class_to_indices.items():
+            if self.shuffle:
+                random.shuffle(indices)
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i:i + self.batch_size]
+                if len(batch) == self.batch_size or not self.drop_last:
+                    batches.append(batch)
+        if self.shuffle:
+            random.shuffle(batches)
+        for batch in batches:
+            yield batch
+            
+    def __len__(self) -> int:
+        count = 0
+        for indices in self.class_to_indices.values():
+            if self.drop_last:
+                count += len(indices) // self.batch_size
+            else:
+                count += (len(indices) + self.batch_size - 1) // self.batch_size
+        return count
+
+
+SHAPENET_CATEGORY_TO_ID = {
+    "airplane": "02691156",
+    "cabinet": "02933112",
+    "car": "02958343",
+    "chair": "03001627",
+    "lamp": "03636649",
+    "sofa": "04256520",
+    "table": "04379243",
+    "watercraft": "04530566",
+    "bench": "02828884",
+    "display": "03211117",
+    "phone": "04401088",
+    "speaker": "03691459",
+    "rifle": "04090263",
+}
 
 class ShapeNetDataset(Dataset):
     def __init__(
@@ -31,6 +99,14 @@ class ShapeNetDataset(Dataset):
         use_symmetry_plane_labels: bool = False,
         symmetry_plane_cache_path: str | None = None,
         symmetry_plane_cache_required: bool = False,
+        use_symmetry_classes: bool = False,
+        symmetry_classes_list: list[int] | None = None,
+        symmetry_plane_score_threshold: float = 0.03,
+        symmetry_plane_balance_threshold: float | None = None,
+        num_symmetry_planes: int = 1,
+        apply_canonical_symmetry_translation: bool = False,
+        train_sample_symmetric_from_gt: bool = False,
+        return_fundamental_domain: bool = False,
     ) -> None:
         super().__init__()
         self.root_dir = Path(root_dir)
@@ -42,14 +118,28 @@ class ShapeNetDataset(Dataset):
         self.enforce_symmetry = enforce_symmetry
         self.symmetry_axis = symmetry_axis
         self.sample_symmetric = sample_symmetric
+        self.train_sample_symmetric_from_gt = train_sample_symmetric_from_gt
+        self.return_fundamental_domain = return_fundamental_domain
+        if self.sample_symmetric and self.train_sample_symmetric_from_gt:
+            raise ValueError("sample_symmetric and train_sample_symmetric_from_gt cannot be enabled together")
         self.use_symmetry_plane_labels = use_symmetry_plane_labels
+        
         self.symmetry_plane_cache_required = symmetry_plane_cache_required
         self.symmetry_plane_cache = None
         if symmetry_plane_cache_path:
             self.symmetry_plane_cache = load_symmetry_plane_cache(symmetry_plane_cache_path)
-
+        self.apply_canonical_symmetry_translation = apply_canonical_symmetry_translation
+        
         if categories is None or len(categories) == 0:
             categories = ["02691156"]
+            
+        mapped_categories = []
+        for cat in categories:
+            if cat.lower() in SHAPENET_CATEGORY_TO_ID:
+                mapped_categories.append(SHAPENET_CATEGORY_TO_ID[cat.lower()])
+            else:
+                mapped_categories.append(cat)
+        categories = mapped_categories
 
         self.obj_paths: list[Path] = []
         for cat_id in categories:
@@ -79,6 +169,117 @@ class ShapeNetDataset(Dataset):
             )
         print(f"[ShapeNetDataset] {len(self.obj_paths)} modelos cargados")
 
+        self.use_symmetry_classes = use_symmetry_classes
+        self.symmetry_plane_score_threshold = symmetry_plane_score_threshold
+        self.symmetry_plane_balance_threshold = symmetry_plane_balance_threshold
+        self.num_symmetry_planes = num_symmetry_planes
+        
+        self.symmetry_classes_list = symmetry_classes_list if symmetry_classes_list is not None else list(range(2 ** num_symmetry_planes))
+        if self.use_symmetry_classes:
+            self.classes = []
+            if self.symmetry_plane_cache is not None:
+                for obj_path in self.obj_paths:
+                    cache_key = symmetry_plane_cache_key(self.root_dir, obj_path)
+                    entry = self.symmetry_plane_cache.get("planes", {}).get(cache_key)
+                    self.classes.append(self._derive_class(entry))
+            else:
+                print("[ShapeNetDataset] use_symmetry_classes=True pero no hay cache; usando clase 0 para todo.")
+                self.classes = [0] * len(self.obj_paths)
+        else:
+            self.classes = None
+
+    def _get_cache_entry(self, obj_path: Path) -> dict[str, Any] | None:
+        if self.symmetry_plane_cache is None:
+            return None
+        cache_key = symmetry_plane_cache_key(self.root_dir, obj_path)
+        return self.symmetry_plane_cache.get("planes", {}).get(cache_key)
+
+    def _get_canonical_translation(self, entry: dict[str, Any] | None, dtype: torch.dtype) -> torch.Tensor | None:
+        if entry is None or "canonical_translation" not in entry:
+            return None
+        translation = entry["canonical_translation"]
+        if not isinstance(translation, torch.Tensor):
+            translation = torch.tensor(translation, dtype=dtype)
+        return translation.to(dtype=dtype)
+
+    def _get_planes(self, entry: dict[str, Any] | None, dtype: torch.dtype) -> torch.Tensor | None:
+        if entry is None:
+            return None
+        if "planes" in entry:
+            planes = entry["planes"]
+            if not isinstance(planes, torch.Tensor):
+                planes = torch.tensor(planes, dtype=dtype)
+            return normalize_plane(planes.float()).to(dtype=dtype)
+        if "plane" in entry:
+            plane = entry["plane"]
+            if not isinstance(plane, torch.Tensor):
+                plane = torch.tensor(plane, dtype=dtype)
+            return normalize_plane(plane.float().unsqueeze(0)).to(dtype=dtype)
+        return None
+
+    def _derive_mask(self, entry: dict[str, Any] | None) -> torch.Tensor:
+        mask = torch.zeros(self.num_symmetry_planes, dtype=torch.float32)
+        if entry is None:
+            return mask
+        if "planes" in entry and "scores" in entry:
+            scores = entry["scores"]
+            if isinstance(scores, torch.Tensor):
+                scores = scores.tolist()
+            elif not isinstance(scores, (list, tuple)):
+                scores = [float(scores)]
+            balances = entry.get("balances", None)
+            if isinstance(balances, torch.Tensor):
+                balances = balances.tolist()
+            elif balances is not None and not isinstance(balances, (list, tuple)):
+                balances = [float(balances)]
+            for i in range(min(self.num_symmetry_planes, len(scores))):
+                score_ok = float(scores[i]) < self.symmetry_plane_score_threshold
+                balance_ok = True
+                if self.symmetry_plane_balance_threshold is not None and balances is not None and i < len(balances):
+                    balance_ok = float(balances[i]) < float(self.symmetry_plane_balance_threshold)
+                if score_ok and balance_ok:
+                    mask[i] = 1.0
+            return mask
+        if "plane" in entry and "score" in entry:
+            if float(entry["score"]) < self.symmetry_plane_score_threshold:
+                mask[0] = 1.0
+        return mask
+
+    def _derive_class(self, entry: dict[str, Any] | None) -> int:
+        mask = self._derive_mask(entry)
+        class_idx = 0
+        for i in range(min(self.num_symmetry_planes, mask.numel())):
+            if float(mask[i].item()) > 0.5:
+                class_idx |= (1 << i)
+        return class_idx
+
+    def _apply_gt_symmetric_sampling(
+        self,
+        points_tensor: torch.Tensor,
+        entry: dict[str, Any] | None,
+        class_idx: int,
+        canonical_translation: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        planes = self._get_planes(entry, points_tensor.dtype)
+        if planes is None:
+            return points_tensor
+        mask = torch.zeros(self.num_symmetry_planes, dtype=torch.float32, device=points_tensor.device)
+        for i in range(self.num_symmetry_planes):
+            if (class_idx >> i) & 1:
+                mask[i] = 1.0
+        if mask.sum().item() <= 0:
+            return points_tensor
+        if self.apply_canonical_symmetry_translation and canonical_translation is not None:
+            planes = translate_plane(planes, canonical_translation.to(device=points_tensor.device, dtype=points_tensor.dtype))
+        fundamental = select_fundamental_domain(points_tensor, planes, mask)
+        k = int(mask.sum().item())
+        target_fundamental = max(1, self.num_points // (2 ** k))
+        fundamental = resample_point_cloud(fundamental, target_fundamental)
+        if self.return_fundamental_domain:
+            return fundamental
+        reconstructed = reconstruct_from_fundamental_domain(fundamental, planes, mask)
+        return resample_point_cloud(reconstructed, self.num_points)
+
     def __len__(self) -> int:
         return len(self.obj_paths)
 
@@ -87,6 +288,9 @@ class ShapeNetDataset(Dataset):
             base_points = self._cache[idx]
         else:
             obj_path = self.obj_paths[idx]
+            entry = self._get_cache_entry(obj_path)
+            c = self.classes[idx] if self.classes is not None else self._derive_class(entry)
+            translation = None
             points_tensor = sample_normalized_point_cloud(
                 obj_path,
                 self.num_points,
@@ -94,6 +298,13 @@ class ShapeNetDataset(Dataset):
                 symmetry_axis=self.symmetry_axis,
                 deterministic_seed=stable_mesh_seed(obj_path, self.num_points),
             )
+            if self.apply_canonical_symmetry_translation:
+                translation = self._get_canonical_translation(entry, points_tensor.dtype)
+                if translation is None:
+                    raise KeyError(f"Missing canonical_translation for {symmetry_plane_cache_key(self.root_dir, obj_path)}")
+                points_tensor = translate_points(points_tensor, translation)
+            if self.train_sample_symmetric_from_gt or self.return_fundamental_domain:
+                points_tensor = self._apply_gt_symmetric_sampling(points_tensor, entry, c, canonical_translation=translation)
             
             if self.enforce_symmetry:
                 points_tensor = order_point_cloud_for_symmetry(points_tensor, axis=self.symmetry_axis)
@@ -116,26 +327,55 @@ class ShapeNetDataset(Dataset):
                     points_tensor[:, 0] = -points_tensor[:, 0]
                 else:
                     points_tensor[:, 1] = -points_tensor[:, 1]
-            if self.jitter_sigma > 0.0:
+        if self.jitter_sigma > 0.0:
                 noise = torch.randn_like(points_tensor) * self.jitter_sigma
                 points_tensor = points_tensor + noise
-        if not self.use_symmetry_plane_labels:
+                
+        c = 0
+        if self.use_symmetry_classes and self.classes is not None:
+            c = self.classes[idx]
+
+        if not self.use_symmetry_plane_labels and not self.use_symmetry_classes:
             return points_tensor
-        obj_path = self.obj_paths[idx]
-        cache_key = symmetry_plane_cache_key(self.root_dir, obj_path)
-        plane_tensor = None
-        if self.symmetry_plane_cache is not None:
-            entry = self.symmetry_plane_cache.get("planes", {}).get(cache_key)
-            if entry is not None:
-                plane_tensor = normalize_plane(entry["plane"].float())
-        if plane_tensor is None and self.symmetry_plane_cache_required:
-            raise KeyError(f"Missing symmetry plane label for {cache_key}")
-        if plane_tensor is None:
-            plane_tensor = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=points_tensor.dtype)
-        return {
-            "points": points_tensor,
-            "symmetry_plane": plane_tensor,
-        }
+            
+        ret = {}
+        if self.use_symmetry_classes:
+            ret["points"] = points_tensor
+            mask = torch.zeros(self.num_symmetry_planes, dtype=torch.float32)
+            for i in range(self.num_symmetry_planes):
+                if (c >> i) & 1:
+                    mask[i] = 1.0
+            ret["symmetry_plane_mask"] = mask
+        else:
+            ret["points"] = points_tensor
+            
+        if self.use_symmetry_plane_labels:
+            obj_path = self.obj_paths[idx]
+            cache_key = symmetry_plane_cache_key(self.root_dir, obj_path)
+            plane_tensor = None
+            entry = self._get_cache_entry(obj_path)
+            if self.symmetry_plane_cache is not None:
+                if entry is not None:
+                    if "plane" in entry:
+                        plane_tensor = normalize_plane(entry["plane"].float())
+                    elif "planes" in entry:
+                        planes_data = entry["planes"]
+                        if isinstance(planes_data, torch.Tensor) and planes_data.ndim >= 1:
+                            plane_tensor = normalize_plane(planes_data[0].float())
+                        elif isinstance(planes_data, (list, tuple)) and len(planes_data) > 0:
+                            plane_tensor = normalize_plane(planes_data[0].float())
+            if plane_tensor is None and self.symmetry_plane_cache_required:
+                raise KeyError(f"Missing symmetry plane label for {cache_key}")
+            if plane_tensor is None:
+                plane_tensor = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=points_tensor.dtype)
+            elif self.apply_canonical_symmetry_translation:
+                translation = self._get_canonical_translation(entry, plane_tensor.dtype)
+                if translation is None:
+                    raise KeyError(f"Missing canonical_translation for {cache_key}")
+                plane_tensor = translate_plane(plane_tensor, translation).to(dtype=points_tensor.dtype)
+            ret["symmetry_plane"] = plane_tensor
+            
+        return ret
 
 
 def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[int] | dict[str, list[int]]]:
@@ -154,6 +394,14 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         use_symmetry_plane_labels=data_cfg.get("use_symmetry_plane_labels", False),
         symmetry_plane_cache_path=data_cfg.get("symmetry_plane_cache_path", None),
         symmetry_plane_cache_required=data_cfg.get("symmetry_plane_cache_required", False),
+        use_symmetry_classes=data_cfg.get("use_symmetry_classes", False),
+        symmetry_classes_list=data_cfg.get("symmetry_classes_list", None),
+        symmetry_plane_score_threshold=float(data_cfg.get("symmetry_plane_score_threshold", 0.03)),
+        symmetry_plane_balance_threshold=data_cfg.get("symmetry_plane_balance_threshold", None),
+        num_symmetry_planes=int(data_cfg.get("num_symmetry_planes", 1)),
+        apply_canonical_symmetry_translation=bool(data_cfg.get("apply_canonical_symmetry_translation", False)),
+        train_sample_symmetric_from_gt=bool(data_cfg.get("train_sample_symmetric_from_gt", False)),
+        return_fundamental_domain=bool(data_cfg.get("return_fundamental_domain", False)),
     )
 
     n = len(base_ds)
@@ -187,6 +435,14 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         use_symmetry_plane_labels=data_cfg.get("use_symmetry_plane_labels", False),
         symmetry_plane_cache_path=data_cfg.get("symmetry_plane_cache_path", None),
         symmetry_plane_cache_required=data_cfg.get("symmetry_plane_cache_required", False),
+        use_symmetry_classes=data_cfg.get("use_symmetry_classes", False),
+        symmetry_classes_list=data_cfg.get("symmetry_classes_list", None),
+        symmetry_plane_score_threshold=float(data_cfg.get("symmetry_plane_score_threshold", 0.03)),
+        symmetry_plane_balance_threshold=data_cfg.get("symmetry_plane_balance_threshold", None),
+        num_symmetry_planes=int(data_cfg.get("num_symmetry_planes", 1)),
+        apply_canonical_symmetry_translation=bool(data_cfg.get("apply_canonical_symmetry_translation", False)),
+        train_sample_symmetric_from_gt=bool(data_cfg.get("train_sample_symmetric_from_gt", False)),
+        return_fundamental_domain=bool(data_cfg.get("return_fundamental_domain", False)),
     )
 
     eval_ds_full = base_ds
