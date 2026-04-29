@@ -202,6 +202,11 @@ class ShapeNetDataset(Dataset):
             translation = torch.tensor(translation, dtype=dtype)
         return translation.to(dtype=dtype)
 
+    def _get_normalization(self, entry: dict[str, Any] | None) -> dict[str, Any] | None:
+        if entry is None:
+            return None
+        return entry.get("normalization", None)
+
     def _get_planes(self, entry: dict[str, Any] | None, dtype: torch.dtype) -> torch.Tensor | None:
         if entry is None:
             return None
@@ -291,13 +296,23 @@ class ShapeNetDataset(Dataset):
             entry = self._get_cache_entry(obj_path)
             c = self.classes[idx] if self.classes is not None else self._derive_class(entry)
             translation = None
+            normalization = self._get_normalization(entry)
+            if (
+                self.symmetry_plane_cache_required
+                and self.apply_canonical_symmetry_translation
+                and (self.train_sample_symmetric_from_gt or self.return_fundamental_domain)
+                and normalization is None
+            ):
+                raise KeyError(f"Missing normalization for {symmetry_plane_cache_key(self.root_dir, obj_path)}")
             points_tensor = sample_normalized_point_cloud(
                 obj_path,
                 self.num_points,
                 sample_symmetric=self.sample_symmetric,
                 symmetry_axis=self.symmetry_axis,
                 deterministic_seed=stable_mesh_seed(obj_path, self.num_points),
+                normalization=normalization,
             )
+            
             if self.apply_canonical_symmetry_translation:
                 translation = self._get_canonical_translation(entry, points_tensor.dtype)
                 if translation is None:

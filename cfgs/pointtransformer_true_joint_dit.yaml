@@ -31,9 +31,9 @@ loss:
   lambda_diff: 1.0
   lambda_plane: 1.0
   lambda_recon: 0.0
-loss:
+  lambda_plane_consistency: 0.0
   name: "mse"
-  weighting: "snr"
+  weighting: none
 
 train:
   batch_size: 16

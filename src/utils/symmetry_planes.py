@@ -215,7 +215,9 @@ def sample_normalized_point_cloud(
     sample_symmetric: bool = False,
     symmetry_axis: int = 0,
     deterministic_seed: int | None = None,
-) -> torch.Tensor:
+    normalization: dict[str, Any] | None = None,
+    return_normalization: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
     seed_ctx = numpy_seed(deterministic_seed) if deterministic_seed is not None else nullcontext()
     with seed_ctx:
         mesh: Any = trimesh.load(str(obj_path), force="mesh", process=False)
@@ -252,11 +254,24 @@ def sample_normalized_point_cloud(
         else:
             points = mesh.sample(num_points)
             points_tensor = torch.from_numpy(points).float()
-    centroid = points_tensor.mean(dim=0, keepdim=True)
+    if normalization is not None:
+        centroid = normalization["centroid"]
+        scale = normalization["scale"]
+        if not isinstance(centroid, torch.Tensor):
+            centroid = torch.tensor(centroid, dtype=points_tensor.dtype)
+        if not isinstance(scale, torch.Tensor):
+            scale = torch.tensor(scale, dtype=points_tensor.dtype)
+        centroid = centroid.to(dtype=points_tensor.dtype).view(1, 3)
+        scale = scale.to(dtype=points_tensor.dtype)
+    else:
+        centroid = points_tensor.mean(dim=0, keepdim=True)
+        centered = points_tensor - centroid
+        scale = torch.sqrt((centered ** 2).sum(dim=1)).max()
     points_tensor = points_tensor - centroid
-    max_dist = torch.sqrt((points_tensor ** 2).sum(dim=1)).max()
-    if max_dist > 0:
-        points_tensor = points_tensor / max_dist
+    if scale > 0:
+        points_tensor = points_tensor / scale
+    if return_normalization:
+        return points_tensor, {"centroid": centroid.squeeze(0).cpu(), "scale": scale.detach().cpu()}
     return points_tensor
 
 
@@ -527,13 +542,15 @@ def build_symmetry_plane_cache(
     for index, obj_path in enumerate(obj_paths, start=1):
         item_start = time.time()
         seed = stable_mesh_seed(obj_path, num_points)
-        points = sample_normalized_point_cloud(
+        points, normalization = sample_normalized_point_cloud(
             obj_path,
             num_points,
             sample_symmetric=sample_symmetric,
             symmetry_axis=symmetry_axis,
             deterministic_seed=seed,
+            return_normalization=True,
         )
+
         key = symmetry_plane_cache_key(root_dir, obj_path)
         if canonical_planes is not None:
             result = evaluate_canonical_symmetry_scores(
@@ -547,7 +564,9 @@ def build_symmetry_plane_cache(
                 "scores": result["scores"],
                 "balances": result["balances"],
                 "canonical_translation": result["canonical_translation"],
+                "normalization": normalization,
             }
+
             score_repr = ",".join(f"{s:.6f}" for s in result["scores"])
         else:
             result = estimate_symmetry_plane(
@@ -560,7 +579,9 @@ def build_symmetry_plane_cache(
             planes[key] = {
                 "plane": normalize_plane(result["plane"]).cpu(),
                 "score": float(result["score"]),
+                "normalization": normalization,
             }
+
             score_repr = f"{planes[key]['score']:.6f}"
         if progress_every > 0 and (index == 1 or index % progress_every == 0 or index == total_models):
             elapsed = time.time() - start_time

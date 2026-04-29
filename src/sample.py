@@ -129,6 +129,7 @@ def parse_args():
                    help="Ruta al checkpoint .pt (si no, usa runs/<exp_name>/last.pt)")
     p.add_argument("--ae_ckpt", type=str, default=None,
                    help="Checkpoint del autoencoder para modo latente (opcional: usa AE_CHECKPOINT si no se pasa)")
+    p.add_argument("--symmetry_class", type=int, default=None)
     return p.parse_args()
 
 
@@ -267,6 +268,9 @@ def main():
     else:
         print("[sample] Warning: No config found in checkpoint metadata. Using local config file.")
         cfg = temp_cfg
+    if args.symmetry_class is not None:
+        cfg.setdefault("sampler", {})["symmetry_class"] = int(args.symmetry_class)
+        print(f"[sample] Overriding sampler.symmetry_class={args.symmetry_class}")
 
     set_seed(cfg.get("seed"))
     device = get_device(cfg.get("device","auto"))
@@ -330,13 +334,14 @@ def main():
             print("[sample] MODE: Symmetry Class Domain Diffusion")
             data_cfg = cfg.get("data", {}) or {}
             num_planes = int(data_cfg.get("num_symmetry_planes", 1))
-            class_idx = int((cfg.get("sampler", {}) or {}).get("symmetry_class", (2 ** num_planes) - 1))
+            class_idx = int((cfg.get("sampler", {}) or {}).get("symmetry_class", 0))
             mask_single = _symmetry_class_mask(class_idx, num_planes, device)
             mask = mask_single.unsqueeze(0).expand(num_samples, -1).contiguous()
             k = int(mask_single.sum().item())
             sample_points = num_points
             if bool(data_cfg.get("return_fundamental_domain", False)):
                 sample_points = max(1, num_points // (2 ** k))
+            print(f"[sample] symmetry_class={class_idx}, mask={mask_single.tolist()}, sample_points={sample_points}, output_points={num_points}")
             pcs = sampler.sample(model, num_samples=num_samples, num_points=sample_points, c=mask)
             if bool(data_cfg.get("return_fundamental_domain", False)) and k > 0:
                 pcs = _reconstruct_canonical_batch_from_domain(pcs, mask, num_points)

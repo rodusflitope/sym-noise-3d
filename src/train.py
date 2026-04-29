@@ -702,6 +702,13 @@ def main() -> None:
                         result,
                         eps_points=eps,
                         eps_plane=eps_plane,
+                        x_t=x_t,
+                        plane_t=plane_t,
+                        x0=x0,
+                        x0_input=x0_input,
+                        plane0=plane_target,
+                        alpha_bar_t=alpha_bars[t],
+                        current_step=global_step,
                     )
                 elif use_latent:
                     with torch.no_grad():
@@ -932,6 +939,12 @@ def main() -> None:
                                 result,
                                 eps_points=eps,
                                 eps_plane=eps_plane,
+                                x_t=x_t,
+                                plane_t=plane_t,
+                                x0=x0,
+                                x0_input=x0_input,
+                                plane0=plane_target,
+                                alpha_bar_t=alpha_bars[t],
                             )
                             v_loss_diff_sum += float(ld.item())
                             v_loss_plane_sum += float(lp.item())

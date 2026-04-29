@@ -1,32 +1,21 @@
-exp_name: "pointtransformer-sym-class-canonical-dit"
+exp_name: "pointtransformer-true-joint-dit-cons"
 seed: 10
 device: "auto"
 
 data:
   root_dir: "data/ShapeNetCore"
-  categories: ["table"]
   max_models: 1000
   augment: false
   val_frac: 0.1
   test_frac: 0.1
-  sample_symmetric: false
+  sample_symmetric: true
   symmetry_axis: 0
-  use_symmetry_plane_labels: false
-  symmetry_plane_cache_path: "data/symmetry_cache_table_canonical.pt"
+  use_symmetry_plane_labels: true
+  symmetry_plane_cache_path: "data/symmetry_cache.pt"
   symmetry_plane_cache_required: true
-  use_symmetry_classes: true
-  canonical_symmetry_planes: true
-  canonical_symmetry_offset_reduction: "median"
-  apply_canonical_symmetry_translation: true
-  symmetry_precompute_num_points: 8192
-  symmetry_plane_score_threshold: 0.001
-  symmetry_plane_balance_threshold: 0.01
-  num_symmetry_planes: 3
-  train_sample_symmetric_from_gt: true
-  return_fundamental_domain: true
 
 model:
-  name: "pointtransformer_sym_class_dit"
+  name: "pointtransformer_true_joint_dit"
   hidden_dim: 128
   time_dim: 128
   num_heads: 4
@@ -39,8 +28,12 @@ joint_symmetry:
   plane_mode: "diffusion"
 
 loss:
+  lambda_diff: 1.0
+  lambda_plane: 1.0
+  lambda_recon: 0.0
+  lambda_plane_consistency: 0.25
   name: "mse"
-  weighting: "none"
+  weighting: none
 
 train:
   batch_size: 16
@@ -50,6 +43,8 @@ train:
   num_workers: 8
   out_dir: "runs"
   save_every: 10
+  trainer: "joint"
+  joint_weight_plane: 0.5
 
 diffusion:
   T: 1000
@@ -64,7 +59,6 @@ sampler:
   num_samples: 4
   save_dir: "samples"
   save_format: "npy"
-  symmetry_class: 1
 
 lr_scheduler:
   name: "cosine_warmup"

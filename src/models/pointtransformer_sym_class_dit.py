@@ -19,8 +19,16 @@ class PointTransformerSymClassDiT(nn.Module):
         self.use_symmetric_attention = use_symmetric_attention
         
         self.time_embed = SinusoidalTimeEmbed(time_dim)
-        self.plane_mask_proj = nn.Sequential(
-            nn.Linear(num_planes, time_dim),
+        self.time_cond_proj = nn.Sequential(
+            nn.Linear(time_dim, hidden_dim),
+            nn.SiLU(),
+        )
+        self.class_cond_proj = nn.Sequential(
+            nn.Linear(num_planes, hidden_dim),
+            nn.SiLU(),
+        )
+        self.count_cond_proj = nn.Sequential(
+            nn.Linear(1, hidden_dim),
             nn.SiLU(),
         )
 
@@ -38,7 +46,7 @@ class PointTransformerSymClassDiT(nn.Module):
             )
 
         self.cond_proj = nn.Sequential(
-            nn.Linear(time_dim, hidden_dim),
+            nn.Linear(hidden_dim * 6, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
@@ -69,8 +77,18 @@ class PointTransformerSymClassDiT(nn.Module):
             feats = self.point_embed(x_t)
 
         t_emb = self.time_embed(t)
-        c_emb = self.plane_mask_proj(c)
-        cond = t_emb + c_emb
+        t_feat = self.time_cond_proj(t_emb)
+        class_feat = self.class_cond_proj(c.float())
+        count = torch.full((B, 1), float(N), device=x_t.device, dtype=x_t.dtype)
+        count_feat = self.count_cond_proj(torch.log2(count))
+        cond = torch.cat([
+            t_feat,
+            class_feat,
+            count_feat,
+            t_feat * class_feat,
+            t_feat * count_feat,
+            class_feat * count_feat,
+        ], dim=-1)
         c_feat = self.cond_proj(cond)
 
         for layer in self.layers:
