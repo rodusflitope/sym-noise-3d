@@ -75,7 +75,7 @@ class PVCNNTrueJoint(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 4),
+            nn.Linear(hidden_dim, 3),
         )
 
     def forward(
@@ -120,7 +120,9 @@ class PVCNNTrueJoint(nn.Module):
         pooled_max = feats.max(dim=2)[0]
         pooled_mean = feats.mean(dim=2)
         plane_pred_input = torch.cat([pooled_max, pooled_mean, t_emb], dim=-1)
-        eps_plane = self.out_head_plane(plane_pred_input)
+        eps_normal = self.out_head_plane(plane_pred_input)
+        eps_offset = torch.zeros(B, 1, device=eps_normal.device)
+        eps_plane = torch.cat([eps_normal, eps_offset], dim=1)
 
         return {
             "eps_points": eps_points,

@@ -27,7 +27,8 @@ class TrueJointSymmetricDDPM_Sampler:
         num_points: int = 2048,
         device: torch.device | str = "cuda",
         alpha_bars: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_plane: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         joint_cfg = cfg.get("joint_symmetry", {}) or {}
         geometry_mode = str(joint_cfg.get("geometry_mode", cfg.get("model", {}).get("joint_geometry_mode", "half"))).lower()
 
@@ -40,6 +41,8 @@ class TrueJointSymmetricDDPM_Sampler:
         else:
             x_t = torch.randn(num_samples, N_gen, 3, device=device)
             plane_t = torch.randn(num_samples, 4, device=device)
+            
+        plane_t[:, 3] = 0.0 # Start with plane at the origin
 
         from src.utils.symmetry_planes import normalize_plane
 
@@ -52,6 +55,7 @@ class TrueJointSymmetricDDPM_Sampler:
 
             x_t = self.base_sampler.step_from_eps(x_t, eps_pred_points, t)
             plane_t = self.base_sampler.step_from_eps(plane_t, eps_pred_plane, t)
+            plane_t[:, 3] = 0.0 # Force offset to 0 during sampling
             
             # Normalize plane occasionally or at the end to keep it numerically stable
             if t % 50 == 0 or t == 0:
@@ -67,4 +71,6 @@ class TrueJointSymmetricDDPM_Sampler:
         else:
             x0_full = x0
 
+        if return_plane:
+            return x0_full, plane_final
         return x0_full

@@ -692,13 +692,17 @@ def main() -> None:
                     x_t, eps = forward.add_noise(x0_input, t)
                     plane_t, eps_plane = forward.add_noise(plane_target, t)
                     
+                    # Force the offset to 0 for true joint diffusion since model doesn't predict it
+                    plane_t[:, 3] = 0.0
+                    eps_plane[:, 3] = 0.0
+                    
                     result = model(
                         x_t=x_t,
                         plane_t=plane_t,
                         t=t,
                     )
                     
-                    loss, loss_diff, loss_plane, loss_recon, loss_plane_cons = true_joint_sym_plane_loss_fn(
+                    loss, loss_diff, loss_plane, loss_recon, loss_plane_cons, loss_boundary = true_joint_sym_plane_loss_fn(
                         result,
                         eps_points=eps,
                         eps_plane=eps_plane,
@@ -928,6 +932,10 @@ def main() -> None:
 
                             x_t, eps = forward.add_noise(x0_input, t)
                             plane_t, eps_plane = forward.add_noise(plane_target, t)
+
+                            # Force the offset to 0 for true joint diffusion since model doesn't predict it
+                            plane_t[:, 3] = 0.0
+                            eps_plane[:, 3] = 0.0
                             
                             result = model_to_eval(
                                 x_t=x_t,
@@ -935,7 +943,7 @@ def main() -> None:
                                 t=t,
                             )
                             
-                            l, ld, lp, lr, lc = true_joint_sym_plane_loss_fn(
+                            l, ld, lp, lr, lc, lb = true_joint_sym_plane_loss_fn(
                                 result,
                                 eps_points=eps,
                                 eps_plane=eps_plane,

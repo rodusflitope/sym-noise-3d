@@ -13,6 +13,7 @@ from src.models import (
     PTJointSymPlane,
     PVCNNTrueJoint,
     PointTransformerTrueJointDiT,
+    PointTransformerTrueJointMultiplaneDiT,
     PointTransformerSymClassDiT,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
@@ -319,17 +320,24 @@ def main():
                 alpha_bars=alpha_bars,
             )
             joint_debug = _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples, T, joint_selection_mode, joint_selection_reference_mode)
-        elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT)) and not use_latent:
+        elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT)) and not use_latent:
             print("[sample] MODE: True Joint Symmetric Plane Diffusion")
             true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
-            pcs = true_joint_sampler.sample(
+            out = true_joint_sampler.sample(
                 model,
                 cfg,
                 num_samples=num_samples,
                 num_points=num_points,
                 device=device,
                 alpha_bars=alpha_bars,
+                return_plane=True,
             )
+            if isinstance(out, tuple):
+                pcs, planes = out
+                planes_np = planes.detach().cpu().numpy().astype(np.float32)
+            else:
+                pcs = out
+                planes_np = None
         elif isinstance(model, PointTransformerSymClassDiT) and not use_latent:
             print("[sample] MODE: Symmetry Class Domain Diffusion")
             data_cfg = cfg.get("data", {}) or {}
@@ -451,6 +459,8 @@ def main():
                 pcs = ae.decode(z_t)
 
     pcs_np = pcs.detach().cpu().numpy().astype(np.float32)
+    if 'planes_np' not in locals():
+        planes_np = None
 
     run_name = pathlib.Path(ckpt).parent.name
     save_dir = pathlib.Path(cfg["sampler"]["save_dir"]) / run_name
@@ -466,7 +476,8 @@ def main():
             save_npy(pcs_np[i], str(out))
             
         out_vis = out.with_suffix(".png")
-        plot_pc(pcs_np[i], str(out_vis))
+        current_plane = planes_np[i] if ('planes_np' in locals() and planes_np is not None) else None
+        plot_pc(pcs_np[i], str(out_vis), plane=current_plane)
         if joint_debug is not None and i < len(joint_debug["original_pc"]):
             out_joint_vis = save_dir / f"test_{i:03d}_conditional_plane_debug.png"
             plot_joint_plane_debug(

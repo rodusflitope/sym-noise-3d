@@ -1,17 +1,21 @@
-exp_name: "pointtransformer-dit-baseline"
+exp_name: "pointtransformer-true-joint-dit-boundary"
 seed: 10
 device: "auto"
 
 data:
   root_dir: "data/ShapeNetCore"
-  categories: ["table"]
   max_models: 1000
   augment: false
   val_frac: 0.1
   test_frac: 0.1
+  sample_symmetric: true
+  symmetry_axis: 0
+  use_symmetry_plane_labels: true
+  symmetry_plane_cache_path: "data/symmetry_cache.pt"
+  symmetry_plane_cache_required: true
 
 model:
-  name: "pointtransformer_dit"
+  name: "pointtransformer_true_joint_dit"
   hidden_dim: 128
   time_dim: 128
   num_heads: 4
@@ -19,7 +23,19 @@ model:
   use_fourier_features: false
   use_symmetric_attention: false
 
+joint_symmetry:
+  geometry_mode: "half"
+  plane_mode: "diffusion"
+
 loss:
+  lambda_diff: 1.0
+  lambda_plane: 1.0
+  lambda_recon: 0.0
+  lambda_plane_consistency: 0.0
+  lambda_boundary: 0.1
+  boundary_margin: 0.02
+  boundary_frac: 0.05
+  recon_cd_sigma: 0.1
   name: "mse"
   weighting: none
 
@@ -31,6 +47,8 @@ train:
   num_workers: 8
   out_dir: "runs"
   save_every: 10
+  trainer: "joint"
+  joint_weight_plane: 0.5
 
 diffusion:
   T: 1000

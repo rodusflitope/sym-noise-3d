@@ -4,8 +4,15 @@ import torch
 import torch.nn.functional as F
 
 from src.losses.losses import min_snr_weight, p2_weight, snr_weight, truncated_snr_weight
-from src.metrics.metrics import chamfer_distance, earth_movers_distance
+from src.metrics.metrics import chamfer_distance, earth_movers_distance, square_distance
 from src.utils.symmetry_planes import normalize_plane, reflect_points
+
+def weighted_chamfer_distance(x: torch.Tensor, y: torch.Tensor, weight_x: torch.Tensor, weight_y: torch.Tensor) -> torch.Tensor:
+    dist_sq = square_distance(x, y)
+    min_dist_x_to_y = torch.min(dist_sq, dim=2)[0]
+    min_dist_y_to_x = torch.min(dist_sq, dim=1)[0]
+    return torch.mean(min_dist_x_to_y * weight_x, dim=1) + torch.mean(min_dist_y_to_x * weight_y, dim=1)
+
 
 
 class TrueJointSymmetryPlaneLoss:
@@ -15,6 +22,10 @@ class TrueJointSymmetryPlaneLoss:
         lambda_plane: float = 1.0,
         lambda_recon: float = 0.0,
         lambda_plane_consistency: float = 0.0,
+        lambda_boundary: float = 0.0,
+        boundary_margin: float = 0.01,
+        boundary_frac: float = 0.05,
+        recon_cd_sigma: float = 1.0,
         plane_normal_weight: float = 1.0,
         plane_offset_weight: float = 1.0,
         metric: str = "cd",
@@ -31,6 +42,10 @@ class TrueJointSymmetryPlaneLoss:
         self.lambda_plane = float(lambda_plane)
         self.lambda_recon = float(lambda_recon)
         self.lambda_plane_consistency = float(lambda_plane_consistency)
+        self.lambda_boundary = float(lambda_boundary)
+        self.boundary_margin = float(boundary_margin)
+        self.boundary_frac = float(boundary_frac)
+        self.recon_cd_sigma = float(recon_cd_sigma)
         self.plane_normal_weight = float(plane_normal_weight)
         self.plane_offset_weight = float(plane_offset_weight)
         self.metric = str(metric).lower()
@@ -86,8 +101,9 @@ class TrueJointSymmetryPlaneLoss:
             loss_plane = loss_plane_raw.mean()
         loss_recon = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
         loss_plane_consistency = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
+        loss_boundary = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
 
-        need_x0_pred = self.lambda_recon > 0.0 or self.lambda_plane_consistency > 0.0
+        need_x0_pred = self.lambda_recon > 0.0 or self.lambda_plane_consistency > 0.0 or self.lambda_boundary > 0.0
         if need_x0_pred:
             if x_t is None or plane_t is None or alpha_bar_t is None:
                 raise ValueError("true joint recon/consistency losses require x_t, plane_t, and alpha_bar_t")
@@ -107,11 +123,23 @@ class TrueJointSymmetryPlaneLoss:
                 loss_plane_offset = F.smooth_l1_loss(plane_x0_pred[:, 3], plane_target[:, 3])
                 loss_plane_consistency = (self.plane_normal_weight * loss_plane_normal) + (self.plane_offset_weight * loss_plane_offset)
 
+            if self.lambda_boundary > 0.0:
+                recon_plane = normalize_plane(plane0) if plane0 is not None else plane_x0_pred
+                normals = recon_plane[:, :3].unsqueeze(1)
+                offsets = recon_plane[:, 3].unsqueeze(1).unsqueeze(2)
+                dists_to_plane = torch.abs(torch.bmm(x0_pred, normals.transpose(1, 2)) + offsets).squeeze(-1)
+                min_dists, _ = torch.topk(dists_to_plane, k=max(1, int(x0_pred.shape[1] * self.boundary_frac)), dim=1, largest=False)
+                loss_boundary = torch.mean(torch.relu(min_dists - self.boundary_margin))
+            else:
+                loss_boundary = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
+
             if self.lambda_recon > 0.0:
                 if x0 is None:
                     raise ValueError("loss.lambda_recon > 0 requires x0")
                 if self.geometry_mode == "full":
                     x0_reconstructed = x0_pred
+                    weight_x = torch.ones(x0_reconstructed.shape[:2], device=x0_reconstructed.device)
+                    weight_y = torch.ones(x0.shape[:2], device=x0.device)
                 else:
                     recon_plane = normalize_plane(plane0) if plane0 is not None else plane_x0_pred
                     if self.warmup_steps > 0 and current_step is not None and plane0 is not None:
@@ -123,10 +151,19 @@ class TrueJointSymmetryPlaneLoss:
                             recon_plane = torch.where(use_pred.view(-1, 1), plane_x0_pred, recon_plane)
                             recon_plane = normalize_plane(recon_plane)
                     x0_reconstructed = torch.cat([x0_pred, reflect_points(x0_pred, recon_plane)], dim=1)
+                    
+                    normals_recon = recon_plane[:, :3].unsqueeze(1)
+                    offsets_recon = recon_plane[:, 3].unsqueeze(1).unsqueeze(2)
+                    dists_pred = torch.abs(torch.bmm(x0_reconstructed, normals_recon.transpose(1, 2)) + offsets_recon).squeeze(-1)
+                    weight_x = torch.exp(- (dists_pred ** 2) / (2 * self.recon_cd_sigma ** 2))
+                    
+                    dists_gt = torch.abs(torch.bmm(x0, normals_recon.transpose(1, 2)) + offsets_recon).squeeze(-1)
+                    weight_y = torch.exp(- (dists_gt ** 2) / (2 * self.recon_cd_sigma ** 2))
+
                 if self.metric == "emd":
                     loss_recon = earth_movers_distance(x0_reconstructed, x0).mean()
                 else:
-                    loss_recon = chamfer_distance(x0_reconstructed, x0).mean()
+                    loss_recon = weighted_chamfer_distance(x0_reconstructed, x0, weight_x, weight_y).mean()
                 loss_recon = torch.nan_to_num(loss_recon, nan=0.0, posinf=0.0, neginf=0.0)
                 recon_mode = self.recon_timestep_weighting
                 if recon_mode == "loss":
@@ -142,6 +179,7 @@ class TrueJointSymmetryPlaneLoss:
             + (self.lambda_plane * loss_plane)
             + (recon_weight * loss_recon)
             + (self.lambda_plane_consistency * loss_plane_consistency)
+            + (self.lambda_boundary * loss_boundary)
         )
 
         return (
@@ -150,8 +188,8 @@ class TrueJointSymmetryPlaneLoss:
             loss_plane,
             loss_recon,
             loss_plane_consistency,
+            loss_boundary,
         )
-
 
 def build_true_joint_symmetry_plane_loss(cfg: dict) -> TrueJointSymmetryPlaneLoss:
     loss_cfg = cfg.get("loss", {})
@@ -163,6 +201,10 @@ def build_true_joint_symmetry_plane_loss(cfg: dict) -> TrueJointSymmetryPlaneLos
         lambda_plane=float(loss_cfg.get("lambda_plane", 1.0)),
         lambda_recon=float(loss_cfg.get("lambda_recon", 0.0)),
         lambda_plane_consistency=float(loss_cfg.get("lambda_plane_consistency", 0.0)),
+        lambda_boundary=float(loss_cfg.get("lambda_boundary", 0.0)),
+        boundary_margin=float(loss_cfg.get("boundary_margin", 0.01)),
+        boundary_frac=float(loss_cfg.get("boundary_frac", 0.05)),
+        recon_cd_sigma=float(loss_cfg.get("recon_cd_sigma", 0.1)),
         plane_normal_weight=float(loss_cfg.get("plane_normal_weight", 1.0)),
         plane_offset_weight=float(loss_cfg.get("plane_offset_weight", 1.0)),
         metric=str(loss_cfg.get("metric", "cd")).lower(),

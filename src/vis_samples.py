@@ -97,11 +97,13 @@ def plot_joint_plane_debug(original_pc, selected_pc, reconstructed_pc, plane, pa
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
-def plot_pc(pc, path):
+def plot_pc(pc, path, plane=None):
     fig = plt.figure(figsize=(12, 12))
     
     ax1 = fig.add_subplot(2, 2, 1, projection='3d')
     ax1.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=1)
+    if plane is not None:
+        _draw_plane(ax1, plane, color="#2ec4b6")
     ax1.set_xlabel("x (right)")
     ax1.set_ylabel("z (front -)")
     ax1.set_zlabel("y (up)")
@@ -112,6 +114,8 @@ def plot_pc(pc, path):
 
     ax2 = fig.add_subplot(2, 2, 2, projection='3d')
     ax2.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=1)
+    if plane is not None:
+        _draw_plane(ax2, plane, color="#2ec4b6")
     ax2.view_init(elev=90, azim=-90)
     ax2.set_xlabel("x")
     ax2.set_ylabel("z")
@@ -126,6 +130,8 @@ def plot_pc(pc, path):
 
     ax3 = fig.add_subplot(2, 2, 3, projection='3d')
     ax3.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=1)
+    if plane is not None:
+        _draw_plane(ax3, plane, color="#2ec4b6")
     ax3.view_init(elev=0, azim=0)
     ax3.set_xlabel("x")
     ax3.set_ylabel("z")
@@ -140,6 +146,8 @@ def plot_pc(pc, path):
 
     ax4 = fig.add_subplot(2, 2, 4, projection='3d')
     ax4.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=1)
+    if plane is not None:
+        _draw_plane(ax4, plane, color="#2ec4b6")
     ax4.view_init(elev=0, azim=-90)
     ax4.set_xlabel("x")
     ax4.set_ylabel("z")

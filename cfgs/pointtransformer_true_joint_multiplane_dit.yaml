@@ -1,23 +1,35 @@
-exp_name: "pointtransformer-true-joint-dit-recon"
+exp_name: "pointtransformer-true-joint-multiplane-dit"
 seed: 10
 device: "auto"
 
 data:
   root_dir: "data/ShapeNetCore"
+  categories: ["table"]
   max_models: 1000
   augment: false
   val_frac: 0.1
   test_frac: 0.1
-  sample_symmetric: true
+  sample_symmetric: false
   symmetry_axis: 0
   use_symmetry_plane_labels: true
-  symmetry_plane_cache_path: "data/symmetry_cache.pt"
+  symmetry_plane_cache_path: "data/symmetry_cache_table_canonical.pt"
   symmetry_plane_cache_required: true
+  use_symmetry_classes: true
+  canonical_symmetry_planes: true
+  canonical_symmetry_offset_reduction: "median"
+  apply_canonical_symmetry_translation: true
+  symmetry_precompute_num_points: 8192
+  symmetry_plane_score_threshold: 0.001
+  symmetry_plane_balance_threshold: 0.01
+  num_symmetry_planes: 3
+  train_sample_symmetric_from_gt: true
+  return_fundamental_domain: true
 
 model:
-  name: "pointtransformer_true_joint_dit"
+  name: "pointtransformer_true_joint_multiplane_dit"
   hidden_dim: 128
   time_dim: 128
+  num_planes: 3
   num_heads: 4
   num_layers: 3
   use_fourier_features: false
@@ -28,17 +40,16 @@ joint_symmetry:
   plane_mode: "diffusion"
 
 loss:
+  name: "true_joint_symmetry_plane_loss"
   lambda_diff: 1.0
   lambda_plane: 1.0
-  lambda_recon: 0.01
+  lambda_recon: 0.2
+  lambda_boundary: 0.1
   lambda_plane_consistency: 0.0
-  lambda_boundary: 0.0
   boundary_margin: 0.02
-  boundary_frac: 0.05
-  recon_cd_sigma: 0.1
-  name: "mse"
-  weighting: none
-  recon_timestep_weighting: snr
+  recon_cd_sigma: 0.15
+  weighting: "none"
+  metric: "cd"
 
 train:
   batch_size: 16
@@ -64,6 +75,7 @@ sampler:
   num_samples: 4
   save_dir: "samples"
   save_format: "npy"
+  symmetry_class: 1
 
 lr_scheduler:
   name: "cosine_warmup"
