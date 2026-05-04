@@ -36,15 +36,15 @@ model:
   use_symmetric_attention: false
 
 joint_symmetry:
-  geometry_mode: "half"
+  geometry_mode: "full"
   plane_mode: "diffusion"
 
 loss:
   name: "true_joint_symmetry_plane_loss"
   lambda_diff: 1.0
   lambda_plane: 1.0
-  lambda_recon: 0.2
-  lambda_boundary: 0.1
+  lambda_recon: 0.0
+  lambda_boundary: 0.0
   lambda_plane_consistency: 0.0
   boundary_margin: 0.02
   recon_cd_sigma: 0.15
@@ -53,10 +53,10 @@ loss:
 
 train:
   batch_size: 16
-  epochs: 100
+  epochs: 400
   log_every: 50
   num_points: 2048
-  num_workers: 8
+  num_workers: 2
   out_dir: "runs"
   save_every: 10
   trainer: "joint"

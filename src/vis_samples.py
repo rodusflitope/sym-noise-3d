@@ -52,6 +52,11 @@ def _scatter_pc(ax, pc, color="#1f77b4", size=1.0, alpha=0.9):
 
 
 def _draw_plane(ax, plane, color="#2ec4b6"):
+    plane = np.asarray(plane)
+    if len(plane.shape) == 2:
+        for i in range(plane.shape[0]):
+            _draw_plane(ax, plane[i], color=color)
+        return
     plane_x, plane_y, plane_z = _plane_patch_points(plane)
     ax.plot_surface(plane_x, plane_z, plane_y, color=color, alpha=0.18, linewidth=0, shade=False)
 

@@ -375,14 +375,36 @@ class ShapeNetDataset(Dataset):
                         plane_tensor = normalize_plane(entry["plane"].float())
                     elif "planes" in entry:
                         planes_data = entry["planes"]
-                        if isinstance(planes_data, torch.Tensor) and planes_data.ndim >= 1:
-                            plane_tensor = normalize_plane(planes_data[0].float())
-                        elif isinstance(planes_data, (list, tuple)) and len(planes_data) > 0:
-                            plane_tensor = normalize_plane(planes_data[0].float())
+                        
+                        # Convert list to tensor if needed
+                        if isinstance(planes_data, (list, tuple)):
+                            planes_data = torch.tensor(planes_data, dtype=points_tensor.dtype)
+                            
+                        if isinstance(planes_data, torch.Tensor) and planes_data.ndim >= 2:
+                            mask = self._derive_mask(entry)
+                            valid_planes = []
+                            for i in range(min(planes_data.shape[0], mask.shape[0])):
+                                if mask[i] > 0.5:
+                                    valid_planes.append(planes_data[i])
+                            
+                            if len(valid_planes) == 0:
+                                valid_planes.append(planes_data[0]) # Fallback to first plane if mask is empty
+                                
+                            valid_tensor = torch.stack(valid_planes)
+                            num_to_take = min(self.num_symmetry_planes, valid_tensor.shape[0])
+                            plane_tensor = normalize_plane(valid_tensor[:num_to_take].float())
+                            
+                            # Pad by duplicating the first valid plane so it reflects redundantly without changing geometry
+                            if num_to_take < self.num_symmetry_planes:
+                                padding = plane_tensor[0:1].repeat(self.num_symmetry_planes - num_to_take, 1)
+                                plane_tensor = torch.cat([plane_tensor, padding], dim=0)
             if plane_tensor is None and self.symmetry_plane_cache_required:
                 raise KeyError(f"Missing symmetry plane label for {cache_key}")
             if plane_tensor is None:
-                plane_tensor = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=points_tensor.dtype)
+                if self.num_symmetry_planes > 1:
+                    plane_tensor = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * self.num_symmetry_planes, dtype=points_tensor.dtype)
+                else:
+                    plane_tensor = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=points_tensor.dtype)
             elif self.apply_canonical_symmetry_translation:
                 translation = self._get_canonical_translation(entry, plane_tensor.dtype)
                 if translation is None:

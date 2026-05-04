@@ -95,7 +95,8 @@ class TrueJointSymmetryPlaneLoss:
         if alpha_bar_t is not None:
             weight = self._timestep_weight(alpha_bar_t, self.weighting)
             loss_diff = (loss_diff_raw * weight.view(-1, 1, 1)).mean()
-            loss_plane = (loss_plane_raw * weight.view(-1, 1)).mean()
+            weight_plane_view = [-1] + [1] * (loss_plane_raw.dim() - 1)
+            loss_plane = (loss_plane_raw * weight.view(*weight_plane_view)).mean()
         else:
             loss_diff = loss_diff_raw.mean()
             loss_plane = loss_plane_raw.mean()
@@ -109,7 +110,7 @@ class TrueJointSymmetryPlaneLoss:
                 raise ValueError("true joint recon/consistency losses require x_t, plane_t, and alpha_bar_t")
             batch_size = x_t.shape[0]
             abar_points = alpha_bar_t.view(batch_size, 1, 1)
-            abar_plane = alpha_bar_t.view(batch_size, 1)
+            abar_plane = alpha_bar_t.view(*([-1] + [1] * (plane_t.dim() - 1)))
             x0_pred = (x_t - torch.sqrt((1.0 - abar_points).clamp(min=1e-8)) * eps_points_pred) / torch.sqrt(abar_points.clamp(min=1e-8))
             plane_x0_pred = (plane_t - torch.sqrt((1.0 - abar_plane).clamp(min=1e-8)) * eps_plane_pred) / torch.sqrt(abar_plane.clamp(min=1e-8))
             plane_x0_pred = normalize_plane(plane_x0_pred)
@@ -118,18 +119,27 @@ class TrueJointSymmetryPlaneLoss:
                 if plane0 is None:
                     raise ValueError("loss.lambda_plane_consistency > 0 requires plane0")
                 plane_target = normalize_plane(plane0)
-                normal_cos = F.cosine_similarity(plane_x0_pred[:, :3], plane_target[:, :3], dim=-1)
+                normal_cos = F.cosine_similarity(plane_x0_pred[..., :3], plane_target[..., :3], dim=-1)
                 loss_plane_normal = (1.0 - normal_cos).mean()
-                loss_plane_offset = F.smooth_l1_loss(plane_x0_pred[:, 3], plane_target[:, 3])
+                loss_plane_offset = F.smooth_l1_loss(plane_x0_pred[..., 3], plane_target[..., 3])
                 loss_plane_consistency = (self.plane_normal_weight * loss_plane_normal) + (self.plane_offset_weight * loss_plane_offset)
 
             if self.lambda_boundary > 0.0:
                 recon_plane = normalize_plane(plane0) if plane0 is not None else plane_x0_pred
-                normals = recon_plane[:, :3].unsqueeze(1)
-                offsets = recon_plane[:, 3].unsqueeze(1).unsqueeze(2)
-                dists_to_plane = torch.abs(torch.bmm(x0_pred, normals.transpose(1, 2)) + offsets).squeeze(-1)
-                min_dists, _ = torch.topk(dists_to_plane, k=max(1, int(x0_pred.shape[1] * self.boundary_frac)), dim=1, largest=False)
-                loss_boundary = torch.mean(torch.relu(min_dists - self.boundary_margin))
+                if recon_plane.dim() == 2:
+                    recon_plane_iter = recon_plane.unsqueeze(1)
+                else:
+                    recon_plane_iter = recon_plane
+                
+                loss_boundary_acc = 0.0
+                for p_idx in range(recon_plane_iter.shape[1]):
+                    p_curr = recon_plane_iter[:, p_idx, :]
+                    normals = p_curr[:, :3].unsqueeze(1)
+                    offsets = p_curr[:, 3].unsqueeze(1).unsqueeze(2)
+                    dists_to_plane = torch.abs(torch.bmm(x0_pred, normals.transpose(1, 2)) + offsets).squeeze(-1)
+                    min_dists, _ = torch.topk(dists_to_plane, k=max(1, int(x0_pred.shape[1] * self.boundary_frac)), dim=1, largest=False)
+                    loss_boundary_acc += torch.mean(torch.relu(min_dists - self.boundary_margin))
+                loss_boundary = loss_boundary_acc / float(recon_plane_iter.shape[1])
             else:
                 loss_boundary = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
 
@@ -148,17 +158,44 @@ class TrueJointSymmetryPlaneLoss:
                             with torch.no_grad():
                                 prob = torch.rand(recon_plane.shape[0], device=recon_plane.device)
                                 use_pred = prob < warmup_progress
-                            recon_plane = torch.where(use_pred.view(-1, 1), plane_x0_pred, recon_plane)
+                            
+                            use_pred_expanded = use_pred
+                            for _ in range(recon_plane.dim() - 1):
+                                use_pred_expanded = use_pred_expanded.unsqueeze(-1)
+                            use_pred_expanded = use_pred_expanded.expand_as(recon_plane)
+                            recon_plane = torch.where(use_pred_expanded, plane_x0_pred, recon_plane)
                             recon_plane = normalize_plane(recon_plane)
-                    x0_reconstructed = torch.cat([x0_pred, reflect_points(x0_pred, recon_plane)], dim=1)
+                            
+                    if recon_plane.dim() == 2:
+                        recon_plane_iter = recon_plane.unsqueeze(1)
+                    else:
+                        recon_plane_iter = recon_plane
+                        
+                    reconstructed_parts = [x0_pred]
+                    for p_idx in range(recon_plane_iter.shape[1]):
+                        p_curr = recon_plane_iter[:, p_idx, :]
+                        reconstructed_parts.append(reflect_points(x0_pred, p_curr))
+                    x0_reconstructed = torch.cat(reconstructed_parts, dim=1)
                     
-                    normals_recon = recon_plane[:, :3].unsqueeze(1)
-                    offsets_recon = recon_plane[:, 3].unsqueeze(1).unsqueeze(2)
-                    dists_pred = torch.abs(torch.bmm(x0_reconstructed, normals_recon.transpose(1, 2)) + offsets_recon).squeeze(-1)
-                    weight_x = torch.exp(- (dists_pred ** 2) / (2 * self.recon_cd_sigma ** 2))
+                    weight_x_acc = torch.ones_like(x0_reconstructed[..., 0])
+                    weight_y_acc = torch.ones_like(x0[..., 0])
                     
-                    dists_gt = torch.abs(torch.bmm(x0, normals_recon.transpose(1, 2)) + offsets_recon).squeeze(-1)
-                    weight_y = torch.exp(- (dists_gt ** 2) / (2 * self.recon_cd_sigma ** 2))
+                    # Compute minimum distance to any plane for weighting
+                    for p_idx in range(recon_plane_iter.shape[1]):
+                        p_curr = recon_plane_iter[:, p_idx, :]
+                        normals_recon = p_curr[:, :3].unsqueeze(1)
+                        offsets_recon = p_curr[:, 3].unsqueeze(1).unsqueeze(2)
+                        
+                        dists_pred = torch.abs(torch.bmm(x0_reconstructed, normals_recon.transpose(1, 2)) + offsets_recon).squeeze(-1)
+                        w_x = torch.exp(- (dists_pred ** 2) / (2 * self.recon_cd_sigma ** 2))
+                        weight_x_acc = torch.min(weight_x_acc, w_x)
+                        
+                        dists_gt = torch.abs(torch.bmm(x0, normals_recon.transpose(1, 2)) + offsets_recon).squeeze(-1)
+                        w_y = torch.exp(- (dists_gt ** 2) / (2 * self.recon_cd_sigma ** 2))
+                        weight_y_acc = torch.min(weight_y_acc, w_y)
+                        
+                    weight_x = weight_x_acc
+                    weight_y = weight_y_acc
 
                 if self.metric == "emd":
                     loss_recon = earth_movers_distance(x0_reconstructed, x0).mean()
