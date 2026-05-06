@@ -367,6 +367,12 @@ def parse_args() -> ap.Namespace:
             "If omitted, AE_CHECKPOINT from the environment will be used."
         ),
     )
+    p.add_argument(
+        "--ckpt",
+        type=str,
+        default=None,
+        help="Pre-trained checkpoint for post-training",
+    )
     return p.parse_args()
 
 
@@ -400,6 +406,10 @@ def main() -> None:
         print("[train] MODE: Direct Point Cloud Diffusion")
 
     model = build_model(cfg).to(device)
+    if args.ckpt:
+        print(f"[post_train] Loading pre-trained checkpoint from {args.ckpt}")
+        from src.utils.checkpoint import load_ckpt
+        model = load_ckpt(model, args.ckpt, map_location=device)
     print("[train] model params:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
 
     T = cfg["diffusion"]["T"]
@@ -594,7 +604,12 @@ def main() -> None:
             loss_recon = torch.tensor(0.0, device=device)
             loss_plane_cons = torch.tensor(0.0, device=device)
             B = x0.shape[0]
-            t = sample_timesteps(B, T, device)
+            max_t_frac = float(cfg.get("train", {}).get("post_train_max_t_frac", 1.0))
+            if max_t_frac < 1.0:
+                max_t = max(1, int(T * max_t_frac))
+                t = torch.randint(low=0, high=max_t, size=(B,), device=device, dtype=torch.long)
+            else:
+                t = sample_timesteps(B, T, device)
             
             with autocast_ctx():
                 if use_two_priors:

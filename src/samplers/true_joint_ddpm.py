@@ -55,12 +55,54 @@ class TrueJointSymmetricDDPM_Sampler:
 
         from src.utils.symmetry_planes import normalize_plane
 
+        guided_inference = bool(joint_cfg.get("guided_inference", False))
+        guide_scale = float(joint_cfg.get("guide_scale", 10.0))
+
         for t in tqdm(reversed(range(self.T)), desc="True Joint DDPM Sampling", total=self.T):
             t_batch = torch.full((num_samples,), t, dtype=torch.long, device=device)
             
-            result = model(x_t=x_t, plane_t=plane_t, t=t_batch)
-            eps_pred_points = result["eps_points"]
-            eps_pred_plane = result["eps_plane"]
+            if guided_inference and is_half and t > 0:
+                with torch.enable_grad():
+                    x_t_in = x_t.detach().requires_grad_(True)
+                    plane_t_in = plane_t.detach()
+                    
+                    result = model(x_t=x_t_in, plane_t=plane_t_in, t=t_batch)
+                    eps_pred_points = result["eps_points"]
+                    eps_pred_plane = result["eps_plane"]
+                    
+                    abar = self.alpha_bars[t_batch].view(-1, 1, 1)
+                    x0_pred = (x_t_in - torch.sqrt(1.0 - abar) * eps_pred_points) / torch.sqrt(abar)
+                    
+                    plane_abar = self.alpha_bars[t_batch].view(-1, 1)
+                    plane_x0_pred = (plane_t_in - torch.sqrt(1.0 - plane_abar) * eps_pred_plane) / torch.sqrt(plane_abar)
+                    from src.utils.symmetry_planes import normalize_plane
+                    plane_x0_pred = normalize_plane(plane_x0_pred)
+                    
+                    boundary_frac = float(joint_cfg.get("boundary_frac", 0.05))
+                    boundary_margin = float(joint_cfg.get("boundary_margin", 0.01))
+                    
+                    recon_plane_iter = plane_x0_pred.unsqueeze(1) if plane_x0_pred.dim() == 2 else plane_x0_pred
+                    loss_boundary_acc = 0.0
+                    for p_idx in range(recon_plane_iter.shape[1]):
+                        p_curr = recon_plane_iter[:, p_idx, :]
+                        normals = p_curr[:, :3].unsqueeze(1)
+                        offsets = p_curr[:, 3].unsqueeze(1).unsqueeze(2)
+                        dists_to_plane = torch.abs(torch.bmm(x0_pred, normals.transpose(1, 2)) + offsets).squeeze(-1)
+                        min_dists, _ = torch.topk(dists_to_plane, k=max(1, int(x0_pred.shape[1] * boundary_frac)), dim=1, largest=False)
+                        loss_boundary_acc += torch.mean(torch.relu(min_dists - boundary_margin))
+                    
+                    loss = loss_boundary_acc / float(recon_plane_iter.shape[1])
+                    
+                if loss > 0:
+                    grad_x = torch.autograd.grad(loss, x_t_in)[0]
+                    eps_pred_points = eps_pred_points.detach() + guide_scale * torch.sqrt(1.0 - abar) * grad_x
+                else:
+                    eps_pred_points = eps_pred_points.detach()
+                eps_pred_plane = eps_pred_plane.detach()
+            else:
+                result = model(x_t=x_t, plane_t=plane_t, t=t_batch)
+                eps_pred_points = result["eps_points"]
+                eps_pred_plane = result["eps_plane"]
 
             x_t = self.base_sampler.step_from_eps(x_t, eps_pred_points, t)
             plane_t = self.base_sampler.step_from_eps(plane_t, eps_pred_plane, t)
