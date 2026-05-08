@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 from typing import Optional, Dict, List, Tuple
 from scipy.optimize import linear_sum_assignment
+from tqdm import tqdm
 
 try:
     from geomloss import SamplesLoss
@@ -113,7 +114,8 @@ def compute_pairwise_dist_batch(
     x: torch.Tensor, 
     y: torch.Tensor, 
     batch_size: int = 32, 
-    use_emd: bool = False
+    use_emd: bool = False,
+    desc: str = "Pairwise Dist",
 ) -> torch.Tensor:
 
     x = _ensure_bnc3(x, name="x_pairwise")
@@ -126,6 +128,13 @@ def compute_pairwise_dist_batch(
     loss_fn = None
     if use_emd and GEOMLOSS_AVAILABLE:
         loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.05, scaling=0.9, backend="tensorized")
+
+    import math
+    num_batches_x = math.ceil(N_samples / batch_size)
+    num_batches_y = math.ceil(M_samples / batch_size)
+    total_iters = num_batches_x * num_batches_y
+    
+    pbar = tqdm(total=total_iters, desc=desc, leave=False)
 
     for i in range(0, N_samples, batch_size):
         x_batch = x[i : i + batch_size]
@@ -148,6 +157,9 @@ def compute_pairwise_dist_batch(
                     x_k_expanded = x_batch[k].unsqueeze(0).expand(y_batch.shape[0], -1, -1).contiguous()
                     dists = chamfer_distance(x_k_expanded, y_batch)
                     dist_mat[i+k, j : j + batch_size] = dists
+            pbar.update(1)
+            
+    pbar.close()
 
     return dist_mat
 
@@ -206,9 +218,9 @@ def compute_all_metrics(
         
         print(f"[metrics] Computing pairwise matrix for {suffix}...")
 
-        d_gg = compute_pairwise_dist_batch(gen, gen, batch_size, use_emd)
-        d_rr = compute_pairwise_dist_batch(gt, gt, batch_size, use_emd)
-        d_gr = compute_pairwise_dist_batch(gen, gt, batch_size, use_emd)
+        d_gg = compute_pairwise_dist_batch(gen, gen, batch_size, use_emd, desc=f"{suffix} Gen-Gen")
+        d_rr = compute_pairwise_dist_batch(gt, gt, batch_size, use_emd, desc=f"{suffix} Ref-Ref")
+        d_gr = compute_pairwise_dist_batch(gen, gt, batch_size, use_emd, desc=f"{suffix} Gen-Ref")
         
         stats = _compute_stats_from_matrices(d_gg, d_rr, d_gr)
         

@@ -479,9 +479,16 @@ def evaluate(
     print("-" * 40)
     print(f"{'Metric':<15} | {'CD':<10} | {'EMD':<10}")
     print("-" * 40)
-    print(f"{'1-NNA':<15} | {adv_metrics.get('1-NNA-CD', 0):.4f}     | {adv_metrics.get('1-NNA-EMD', '-'):.4f}")
-    print(f"{'COV':<15}   | {adv_metrics.get('COV-CD', 0):.4f}     | {adv_metrics.get('COV-EMD', '-'):.4f}")
-    print(f"{'MMD':<15}   | {adv_metrics.get('MMD-CD', 0):.6f}   | {adv_metrics.get('MMD-EMD', '-'):.6f}")
+    emd_1nna = adv_metrics.get('1-NNA-EMD', '-')
+    emd_1nna_str = f"{emd_1nna:.4f}" if isinstance(emd_1nna, (float, int)) else str(emd_1nna)
+    emd_cov = adv_metrics.get('COV-EMD', '-')
+    emd_cov_str = f"{emd_cov:.4f}" if isinstance(emd_cov, (float, int)) else str(emd_cov)
+    emd_mmd = adv_metrics.get('MMD-EMD', '-')
+    emd_mmd_str = f"{emd_mmd:.6f}" if isinstance(emd_mmd, (float, int)) else str(emd_mmd)
+
+    print(f"{'1-NNA':<15} | {adv_metrics.get('1-NNA-CD', 0):.4f}     | {emd_1nna_str}")
+    print(f"{'COV':<15}   | {adv_metrics.get('COV-CD', 0):.4f}     | {emd_cov_str}")
+    print(f"{'MMD':<15}   | {adv_metrics.get('MMD-CD', 0):.6f}   | {emd_mmd_str}")
     print("-" * 40)
 
     out = {

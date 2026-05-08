@@ -61,7 +61,7 @@ class TrueJointSymmetricDDPM_Sampler:
         for t in tqdm(reversed(range(self.T)), desc="True Joint DDPM Sampling", total=self.T):
             t_batch = torch.full((num_samples,), t, dtype=torch.long, device=device)
             
-            if guided_inference and is_half and t > 0:
+            if guided_inference and (is_half or num_planes > 1) and t > 0:
                 with torch.enable_grad():
                     x_t_in = x_t.detach().requires_grad_(True)
                     plane_t_in = plane_t.detach()

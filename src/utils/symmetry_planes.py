@@ -82,7 +82,7 @@ def resample_point_cloud(points: torch.Tensor, num_points: int) -> torch.Tensor:
     return points[idx]
 
 
-def select_fundamental_domain(points: torch.Tensor, planes: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def select_fundamental_domain(points: torch.Tensor, planes: torch.Tensor, mask: torch.Tensor, margin: float = 0.0) -> torch.Tensor:
     pts = points
     planes = normalize_plane(planes.to(device=pts.device, dtype=pts.dtype))
     mask = mask.to(device=pts.device).bool()
@@ -91,7 +91,7 @@ def select_fundamental_domain(points: torch.Tensor, planes: torch.Tensor, mask: 
         if bool(mask[i].item()):
             n = planes[i, :3]
             d = planes[i, 3]
-            keep &= (pts.matmul(n) - d) >= 0
+            keep &= (pts.matmul(n) - d) >= -margin
     return pts[keep]
 
 

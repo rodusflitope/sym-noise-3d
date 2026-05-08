@@ -107,6 +107,8 @@ class ShapeNetDataset(Dataset):
         apply_canonical_symmetry_translation: bool = False,
         train_sample_symmetric_from_gt: bool = False,
         return_fundamental_domain: bool = False,
+        soft_cut: bool = False,
+        soft_cut_margin: float = 0.05,
     ) -> None:
         super().__init__()
         self.root_dir = Path(root_dir)
@@ -123,6 +125,8 @@ class ShapeNetDataset(Dataset):
         if self.sample_symmetric and self.train_sample_symmetric_from_gt:
             raise ValueError("sample_symmetric and train_sample_symmetric_from_gt cannot be enabled together")
         self.use_symmetry_plane_labels = use_symmetry_plane_labels
+        self.soft_cut = soft_cut
+        self.soft_cut_margin = soft_cut_margin
         
         self.symmetry_plane_cache_required = symmetry_plane_cache_required
         self.symmetry_plane_cache = None
@@ -276,7 +280,9 @@ class ShapeNetDataset(Dataset):
             return points_tensor
         if self.apply_canonical_symmetry_translation and canonical_translation is not None:
             planes = translate_plane(planes, canonical_translation.to(device=points_tensor.device, dtype=points_tensor.dtype))
-        fundamental = select_fundamental_domain(points_tensor, planes, mask)
+            
+        margin = self.soft_cut_margin if self.soft_cut else 0.0
+        fundamental = select_fundamental_domain(points_tensor, planes, mask, margin=margin)
         k = int(mask.sum().item())
         target_fundamental = max(1, self.num_points // (2 ** k))
         fundamental = resample_point_cloud(fundamental, target_fundamental)
@@ -439,6 +445,8 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         apply_canonical_symmetry_translation=bool(data_cfg.get("apply_canonical_symmetry_translation", False)),
         train_sample_symmetric_from_gt=bool(data_cfg.get("train_sample_symmetric_from_gt", False)),
         return_fundamental_domain=bool(data_cfg.get("return_fundamental_domain", False)),
+        soft_cut=bool(data_cfg.get("soft_cut", False)),
+        soft_cut_margin=float(data_cfg.get("soft_cut_margin", 0.05)),
     )
 
     n = len(base_ds)
@@ -480,6 +488,8 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         apply_canonical_symmetry_translation=bool(data_cfg.get("apply_canonical_symmetry_translation", False)),
         train_sample_symmetric_from_gt=bool(data_cfg.get("train_sample_symmetric_from_gt", False)),
         return_fundamental_domain=bool(data_cfg.get("return_fundamental_domain", False)),
+        soft_cut=bool(data_cfg.get("soft_cut", False)),
+        soft_cut_margin=float(data_cfg.get("soft_cut_margin", 0.05)),
     )
 
     eval_ds_full = base_ds
