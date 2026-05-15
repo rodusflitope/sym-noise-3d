@@ -131,6 +131,8 @@ def parse_args():
     p.add_argument("--ae_ckpt", type=str, default=None,
                    help="Checkpoint del autoencoder para modo latente (opcional: usa AE_CHECKPOINT si no se pasa)")
     p.add_argument("--symmetry_class", type=int, default=None)
+    p.add_argument("--test_disentanglement", action="store_true", help="Probar disentanglement con planos rotados fijos.")
+    p.add_argument("--num_samples", type=int, default=None, help="Sobrescribe la cantidad de samples a generar.")
     return p.parse_args()
 
 
@@ -273,6 +275,10 @@ def main():
         cfg.setdefault("sampler", {})["symmetry_class"] = int(args.symmetry_class)
         print(f"[sample] Overriding sampler.symmetry_class={args.symmetry_class}")
 
+    if args.num_samples is not None:
+        cfg.setdefault("sampler", {})["num_samples"] = int(args.num_samples)
+        print(f"[sample] Overriding sampler.num_samples={args.num_samples}")
+
     set_seed(cfg.get("seed"))
     device = get_device(cfg.get("device","auto"))
     print(f"[sample] device = {device}")
@@ -321,17 +327,42 @@ def main():
             )
             joint_debug = _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples, T, joint_selection_mode, joint_selection_reference_mode)
         elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT)) and not use_latent:
-            print("[sample] MODE: True Joint Symmetric Plane Diffusion")
             true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
-            out = true_joint_sampler.sample(
-                model,
-                cfg,
-                num_samples=num_samples,
-                num_points=num_points,
-                device=device,
-                alpha_bars=alpha_bars,
-                return_plane=True,
-            )
+            if args.test_disentanglement:
+                print("[sample] TEST DISENTANGLEMENT: Forzando planos canónicos fijos.")
+                num_planes = getattr(model, "num_planes", 1)
+                
+                if num_planes > 1:
+                    target_planes = torch.zeros((num_samples, num_planes, 4), device=device)
+                    # El dataset hace padding con el primer plano si la figura no tiene más simetrías.
+                    # NUNCA le pases [0,0,1] a una mesa porque las mesas no son simétricas arriba/abajo. 
+                    # Eso causa un colapso Out-of-Distribution (OOD) en la red.
+                    # Vamos a forzar que TODOS los planos sean [1,0,0] (Simetría en X)
+                    target_planes[:, :, :3] = torch.tensor([1.0, 0.0, 0.0]) 
+                else:
+                    target_planes = torch.zeros((num_samples, 4), device=device)
+                    target_planes[:, :3] = torch.tensor([1.0, 0.0, 0.0]) # Plano X
+                
+                out = true_joint_sampler.sample_with_fixed_planes(
+                    model,
+                    cfg=cfg,
+                    target_planes=target_planes,
+                    num_samples=num_samples,
+                    num_points=num_points,
+                    device=device,
+                    alpha_bars=alpha_bars,
+                )
+            else:
+                print("[sample] MODE: True Joint Symmetric Plane Diffusion")
+                out = true_joint_sampler.sample(
+                    model,
+                    cfg,
+                    num_samples=num_samples,
+                    num_points=num_points,
+                    device=device,
+                    alpha_bars=alpha_bars,
+                    return_plane=True,
+                )
             if isinstance(out, tuple):
                 pcs, planes = out
                 planes_np = planes.detach().cpu().numpy().astype(np.float32)

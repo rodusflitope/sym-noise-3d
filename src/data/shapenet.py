@@ -109,11 +109,13 @@ class ShapeNetDataset(Dataset):
         return_fundamental_domain: bool = False,
         soft_cut: bool = False,
         soft_cut_margin: float = 0.05,
+        symmetry_dropout_prob: float = 0.0,
     ) -> None:
         super().__init__()
         self.root_dir = Path(root_dir)
         self.num_points = num_points
         self.augment = augment
+        self.symmetry_dropout_prob = symmetry_dropout_prob
         self.rotate_prob = rotate_prob
         self.flip_prob = flip_prob
         self.jitter_sigma = jitter_sigma
@@ -283,6 +285,7 @@ class ShapeNetDataset(Dataset):
             
         margin = self.soft_cut_margin if self.soft_cut else 0.0
         fundamental = select_fundamental_domain(points_tensor, planes, mask, margin=margin)
+        
         k = int(mask.sum().item())
         target_fundamental = max(1, self.num_points // (2 ** k))
         fundamental = resample_point_cloud(fundamental, target_fundamental)
@@ -324,15 +327,33 @@ class ShapeNetDataset(Dataset):
                 if translation is None:
                     raise KeyError(f"Missing canonical_translation for {symmetry_plane_cache_key(self.root_dir, obj_path)}")
                 points_tensor = translate_points(points_tensor, translation)
-            if self.train_sample_symmetric_from_gt or self.return_fundamental_domain:
-                points_tensor = self._apply_gt_symmetric_sampling(points_tensor, entry, c, canonical_translation=translation)
             
             if self.enforce_symmetry:
                 points_tensor = order_point_cloud_for_symmetry(points_tensor, axis=self.symmetry_axis)
                 
             self._cache[idx] = points_tensor
             base_points = points_tensor
+            
         points_tensor = base_points.clone()
+        entry = self._get_cache_entry(self.obj_paths[idx])
+        c = self.classes[idx] if self.classes is not None else self._derive_class(entry)
+        
+        # 2. SYMMETRY DROPOUT
+        if self.symmetry_dropout_prob > 0.0:
+            for i in range(self.num_symmetry_planes):
+                if (c >> i) & 1:
+                    if torch.rand(1).item() < self.symmetry_dropout_prob:
+                        c = c & ~(1 << i)
+
+        # 3. DYNAMIC CROPPING based on the post-dropout symmetry class
+        if self.train_sample_symmetric_from_gt or self.return_fundamental_domain:
+            translation = None
+            if self.apply_canonical_symmetry_translation:
+                translation = self._get_canonical_translation(entry, points_tensor.dtype)
+            points_tensor = self._apply_gt_symmetric_sampling(points_tensor, entry, c, canonical_translation=translation)
+            
+        applied_rot_mat = None
+        applied_flip = None
         if self.augment:
             if self.rotate_prob > 0.0 and torch.rand(1).item() < self.rotate_prob:
                 theta = torch.rand(1) * 2.0 * torch.pi
@@ -343,11 +364,14 @@ class ShapeNetDataset(Dataset):
                     device=points_tensor.device,
                 )
                 points_tensor = points_tensor @ rot_mat.T
+                applied_rot_mat = rot_mat
             if self.flip_prob > 0.0 and torch.rand(1).item() < self.flip_prob:
                 if torch.rand(1).item() < 0.5:
                     points_tensor[:, 0] = -points_tensor[:, 0]
+                    applied_flip = 0
                 else:
                     points_tensor[:, 1] = -points_tensor[:, 1]
+                    applied_flip = 1
         if self.jitter_sigma > 0.0:
                 noise = torch.randn_like(points_tensor) * self.jitter_sigma
                 points_tensor = points_tensor + noise
@@ -387,10 +411,9 @@ class ShapeNetDataset(Dataset):
                             planes_data = torch.tensor(planes_data, dtype=points_tensor.dtype)
                             
                         if isinstance(planes_data, torch.Tensor) and planes_data.ndim >= 2:
-                            mask = self._derive_mask(entry)
                             valid_planes = []
-                            for i in range(min(planes_data.shape[0], mask.shape[0])):
-                                if mask[i] > 0.5:
+                            for i in range(min(planes_data.shape[0], self.num_symmetry_planes)):
+                                if (c >> i) & 1:
                                     valid_planes.append(planes_data[i])
                             
                             if len(valid_planes) == 0:
@@ -416,6 +439,16 @@ class ShapeNetDataset(Dataset):
                 if translation is None:
                     raise KeyError(f"Missing canonical_translation for {cache_key}")
                 plane_tensor = translate_plane(plane_tensor, translation).to(dtype=points_tensor.dtype)
+                
+            if applied_rot_mat is not None:
+                normals = plane_tensor[..., :3]
+                normals = normals @ applied_rot_mat.T.to(device=normals.device, dtype=normals.dtype)
+                plane_tensor[..., :3] = normals
+            if applied_flip is not None:
+                plane_tensor[..., applied_flip] = -plane_tensor[..., applied_flip]
+            
+            plane_tensor = normalize_plane(plane_tensor)
+
             ret["symmetry_plane"] = plane_tensor
             
         return ret
@@ -447,6 +480,7 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         return_fundamental_domain=bool(data_cfg.get("return_fundamental_domain", False)),
         soft_cut=bool(data_cfg.get("soft_cut", False)),
         soft_cut_margin=float(data_cfg.get("soft_cut_margin", 0.05)),
+        symmetry_dropout_prob=0.0,
     )
 
     n = len(base_ds)
@@ -490,6 +524,7 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         return_fundamental_domain=bool(data_cfg.get("return_fundamental_domain", False)),
         soft_cut=bool(data_cfg.get("soft_cut", False)),
         soft_cut_margin=float(data_cfg.get("soft_cut_margin", 0.05)),
+        symmetry_dropout_prob=float(data_cfg.get("symmetry_dropout_prob", 0.0)),
     )
 
     eval_ds_full = base_ds
@@ -508,3 +543,44 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
             "test": idx_test,
         },
     }
+
+from torch.utils.data.dataloader import default_collate
+
+def shapenet_collate_fn(batch):
+    """
+    Custom collate function to handle variable point cloud sizes.
+    Instead of padding (which repeats points and can alter KNN density),
+    this groups the batch into sub-batches based on the number of points.
+    Returns a list of collated batches.
+    """
+    if not batch or not isinstance(batch[0], dict) or "points" not in batch[0]:
+        return default_collate(batch)
+        
+    groups = {}
+    for item in batch:
+        n = item["points"].shape[0]
+        if n not in groups:
+            groups[n] = []
+            
+        cloned_item = {}
+        for k, v in item.items():
+            if isinstance(v, torch.Tensor):
+                cloned_item[k] = v.clone()
+            else:
+                cloned_item[k] = v
+                
+        groups[n].append(cloned_item)
+        
+    result = []
+    for g in groups.values():
+        collated = {}
+        for k in g[0].keys():
+            if isinstance(g[0][k], torch.Tensor):
+                collated[k] = torch.stack([item[k] for item in g], dim=0)
+            elif isinstance(g[0][k], (int, float, str, bool)):
+                collated[k] = torch.tensor([item[k] for item in g])
+            else:
+                collated[k] = [item[k] for item in g]
+        result.append(collated)
+        
+    return result

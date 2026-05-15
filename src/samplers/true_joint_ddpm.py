@@ -157,3 +157,107 @@ class TrueJointSymmetricDDPM_Sampler:
         if return_plane:
             return x0_full, plane_final
         return x0_full
+
+    @torch.no_grad()
+    def sample_with_fixed_planes(
+        self,
+        model: nn.Module,
+        cfg: dict,
+        target_planes: torch.Tensor,
+        num_samples: int = 16,
+        num_points: int = 2048,
+        device: torch.device | str = "cuda",
+        alpha_bars: torch.Tensor | None = None,
+    ):
+        joint_cfg = cfg.get("joint_symmetry", {}) or {}
+        geometry_mode = str(joint_cfg.get("geometry_mode", cfg.get("model", {}).get("joint_geometry_mode", "half"))).lower()
+
+        is_half = (geometry_mode == "half")
+        N_gen = (num_points // 2) if is_half else num_points
+
+        num_planes = target_planes.shape[1] if target_planes.dim() > 2 else 1
+
+        if self.noise_type is not None:
+            x_t = self.noise_type.sample((num_samples, N_gen, 3), device)
+            plane_t = self.noise_type.sample((num_samples, *target_planes.shape[1:]), device) if target_planes.dim() > 2 else self.noise_type.sample((num_samples, 4), device)
+        else:
+            x_t = torch.randn(num_samples, N_gen, 3, device=device)
+            plane_t = torch.randn_like(target_planes)
+            
+        plane_t[..., 3] = 0.0
+
+        for t in tqdm(reversed(range(self.T)), desc="Fixed Plane Sampling", total=self.T):
+            t_batch = torch.full((num_samples,), t, dtype=torch.long, device=device)
+            
+            result = model(x_t=x_t, plane_t=plane_t, t=t_batch)
+            eps_pred_points = result["eps_points"]
+            
+            cfg_scale = float(cfg.get("sampler", {}).get("cfg_scale", 1.0))
+            if cfg_scale > 1.0:
+                uncond_plane = torch.zeros_like(plane_t)
+                result_uncond = model(x_t=x_t, plane_t=uncond_plane, t=t_batch)
+                eps_uncond = result_uncond["eps_points"]
+                eps_pred_points = eps_uncond + cfg_scale * (eps_pred_points - eps_uncond)
+            
+            x_t = self.base_sampler.step_from_eps(x_t, eps_pred_points, t)
+            
+            if t > 0:
+                alpha_t = self.alphas[t]
+                abar_t = self.alpha_bars[t]
+                abar_t_prev = self.alpha_bars[t-1]
+                beta_t = self.betas[t]
+                
+                w_t = torch.sqrt(alpha_t) * (1.0 - abar_t_prev) / (1.0 - abar_t)
+                w_0 = torch.sqrt(abar_t_prev) * beta_t / (1.0 - abar_t)
+                
+                posterior_mean = w_t * plane_t + w_0 * target_planes
+                
+                posterior_variance = beta_t * (1.0 - abar_t_prev) / (1.0 - abar_t)
+                noise = torch.randn_like(plane_t)
+                
+                plane_t = posterior_mean + torch.sqrt(posterior_variance) * noise
+            else:
+                plane_t = target_planes
+                
+            plane_t[..., 3] = 0.0
+
+        x0 = x_t.clamp(-2, 2)
+        plane_final = target_planes
+        
+        if is_half or num_planes > 1:
+            from src.utils.symmetry_planes import reflect_points
+            
+            x0_full_list = []
+            if plane_final.dim() == 2:
+                plane_iter = plane_final.unsqueeze(1)
+            else:
+                plane_iter = plane_final
+                
+            for b in range(num_samples):
+                pts_list = [x0[b]]
+                p_batch = plane_iter[b]
+                
+                unique_planes = []
+                for p_idx in range(p_batch.shape[0]):
+                    p_curr = p_batch[p_idx]
+                    is_duplicate = False
+                    for p_uniq in unique_planes:
+                        dot = torch.abs(torch.dot(p_curr[:3], p_uniq[:3]))
+                        offset_diff = torch.abs(p_curr[3] - p_uniq[3])
+                        if dot > 0.95 and offset_diff < 0.05:
+                            is_duplicate = True
+                            break
+                    if not is_duplicate:
+                        unique_planes.append(p_curr)
+                
+                for p_curr in unique_planes:
+                    reflected = [reflect_points(pts.unsqueeze(0), p_curr.unsqueeze(0)).squeeze(0) for pts in pts_list]
+                    pts_list = pts_list + reflected
+                from src.utils.symmetry_planes import resample_point_cloud
+                x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points)
+                x0_full_list.append(x0_b_full)
+            x0_full = torch.stack(x0_full_list, dim=0)
+        else:
+            x0_full = x0
+
+        return x0_full, plane_final

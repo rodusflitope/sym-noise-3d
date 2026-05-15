@@ -367,6 +367,12 @@ def parse_args() -> ap.Namespace:
             "If omitted, AE_CHECKPOINT from the environment will be used."
         ),
     )
+    p.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to a checkpoint (.pt file) to resume training or fine-tune.",
+    )
     return p.parse_args()
 
 
@@ -400,6 +406,11 @@ def main() -> None:
         print("[train] MODE: Direct Point Cloud Diffusion")
 
     model = build_model(cfg).to(device)
+    if args.resume:
+        from src.utils.checkpoint import load_ckpt
+        print(f"[train] Resuming/Fine-tuning from checkpoint: {args.resume}")
+        model = load_ckpt(model, args.resume, map_location=device)
+        
     print("[train] model params:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
 
     T = cfg["diffusion"]["T"]
@@ -431,6 +442,7 @@ def main() -> None:
     
     if use_symmetry_classes and hasattr(ds, "dataset") and hasattr(ds.dataset, "classes") and ds.dataset.classes is not None:
         from src.data import HomogeneousClassBatchSampler
+        from src.data.shapenet import shapenet_collate_fn
         subset_classes = [ds.dataset.classes[i] for i in ds.indices]
         batch_sampler = HomogeneousClassBatchSampler(
             classes=subset_classes,
@@ -444,8 +456,10 @@ def main() -> None:
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=persistent_workers,
+            collate_fn=shapenet_collate_fn,
         )
     else:
+        from src.data.shapenet import shapenet_collate_fn
         dl = DataLoader(
             ds,
             batch_size=cfg["train"]["batch_size"],
@@ -454,12 +468,14 @@ def main() -> None:
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=persistent_workers,
+            collate_fn=shapenet_collate_fn,
         )
 
     dl_val = None
     if ds_val is not None:
         if use_symmetry_classes and hasattr(ds_val, "dataset") and hasattr(ds_val.dataset, "classes") and ds_val.dataset.classes is not None:
             from src.data import HomogeneousClassBatchSampler
+            from src.data.shapenet import shapenet_collate_fn
             subset_classes_val = [ds_val.dataset.classes[i] for i in ds_val.indices]
             batch_sampler_val = HomogeneousClassBatchSampler(
                 classes=subset_classes_val,
@@ -473,8 +489,10 @@ def main() -> None:
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=persistent_workers,
+                collate_fn=shapenet_collate_fn,
             )
         else:
+            from src.data.shapenet import shapenet_collate_fn
             dl_val = DataLoader(
                 ds_val,
                 batch_size=cfg["train"]["batch_size"],
@@ -483,6 +501,7 @@ def main() -> None:
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=persistent_workers,
+                collate_fn=shapenet_collate_fn,
             )
 
     ae_ok_types = (LionAutoencoder,)
@@ -584,183 +603,185 @@ def main() -> None:
         epoch_loss_recon_sum = 0.0
         epoch_loss_plane_cons_sum = 0.0
 
-        for batch in dl:
-            x0, plane0 = unpack_batch(batch, device)
-            mse_z = torch.tensor(0.0, device=device)
-            mse_h = torch.tensor(0.0, device=device)
-            loss_diff = torch.tensor(0.0, device=device)
-            loss_sym = torch.tensor(0.0, device=device)
-            loss_plane = torch.tensor(0.0, device=device)
-            loss_recon = torch.tensor(0.0, device=device)
-            loss_plane_cons = torch.tensor(0.0, device=device)
-            B = x0.shape[0]
-            t = sample_timesteps(B, T, device)
-            
-            with autocast_ctx():
-                if use_two_priors:
-                    with torch.no_grad():
-                        z0, h0 = autoencoder.encode_split(x0, sample=True)
-
-                    t_z = sample_timesteps(B, T, device)
-                    t_h = sample_timesteps(B, T, device)
-
-                    z_t, eps_z = forward.add_noise(z0, t_z)
-                    h_t, eps_h = forward.add_noise(h0, t_h)
-
-                    eps_pred_z = model.ddm_z(z_t, t_z)
-                    eps_pred_h = model.ddm_h(h_t, z0, t_h)
-
-                    mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
-                    mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
-                    w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
-                    w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
-                    loss = (w_z * mse_z) + (w_h * mse_h)
-                elif use_sym_plane:
-                    x_t, eps = forward.add_noise(x0, t)
-                    result = model(x_t, t)
-                    loss, loss_diff, loss_sym = sym_plane_loss_fn(
-                        result, eps, x_t, x0, alpha_bars[t], current_step=global_step
-                    )
-                elif use_joint_sym_plane:
-                    joint_mode_cfg = get_joint_mode_config(cfg)
-                    plane_target = resolve_plane_target(
-                        cfg,
-                        batch_size=B,
-                        device=x0.device,
-                        dtype=x0.dtype,
-                        plane0=plane0,
-                    )
-                    if plane_target is None:
-                        raise ValueError("Joint symmetry training requires a plane target (dataset labels or fixed axis)")
-                    x_t, eps = forward.add_noise(x0, t)
-                    if infer_plane_mode_enabled(cfg):
-                        plane_t, eps_plane = forward.add_noise(plane_target, t)
-                        selection_plane = select_training_plane(plane_target, cfg, global_step, plane_t=plane_t)
-                    else:
-                        plane_t, eps_plane = None, None
-                        selection_plane = plane_target
-                    if joint_mode_cfg.geometry_mode == "half":
-                        ref_mode = get_selection_reference_mode(cfg, context="train")
-                        if ref_mode == "x0":
-                            selection_reference_points = x0
-                        elif ref_mode in {"xt", "x_t"}:
-                            selection_reference_points = x_t
-                        else:
-                            raise ValueError("Invalid train_selection_reference_mode. Expected 'x0' or 'x_t'")
-                    else:
-                        selection_reference_points = None
-                    result = model(
-                        x_t,
-                        plane_t,
-                        t,
-                        alpha_bars[t],
-                        selection_plane=selection_plane,
-                        selection_reference_points=selection_reference_points,
-                    )
-                    loss, loss_diff, loss_plane, loss_recon, loss_plane_cons = joint_sym_plane_loss_fn(
-                        result,
-                        eps,
-                        eps_plane,
-                        x_t,
-                        x0,
-                        plane_target,
-                        alpha_bars[t],
-                        current_step=global_step,
-                    )
-                elif use_true_joint_sym_plane:
-                    joint_mode_cfg = cfg.get("joint_symmetry", {}) or {}
-                    plane_target = resolve_plane_target(
-                        cfg,
-                        batch_size=B,
-                        device=x0.device,
-                        dtype=x0.dtype,
-                        plane0=plane0,
-                    )
-                    if plane_target is None:
-                        raise ValueError("True Joint symmetry training requires a plane target")
-                    
-                    geo_mode = model.geometry_mode if hasattr(model, "geometry_mode") else "half"
-                    
-                    if geo_mode == "half":
-                        soft_cut = bool(joint_mode_cfg.get("soft_cut", False))
-                        soft_cut_margin = float(joint_mode_cfg.get("soft_cut_margin", 0.05)) if soft_cut else 0.0
-                        from src.utils.symmetry_planes import select_signed_half
-                        with torch.no_grad():
-                            _, indices = select_signed_half(x0, plane_target, prefer_positive=True, margin=soft_cut_margin)
-                            x0_input = torch.gather(x0, 1, indices.unsqueeze(-1).expand(-1, -1, x0.shape[-1]))
-                    else:
-                        x0_input = x0
-
-                    x_t, eps = forward.add_noise(x0_input, t)
-                    plane_t, eps_plane = forward.add_noise(plane_target, t)
-                    
-                    # Force the offset to 0 for true joint diffusion since model doesn't predict it
-                    plane_t[..., 3] = 0.0
-                    eps_plane[..., 3] = 0.0
-                    
-                    result = model(
-                        x_t=x_t,
-                        plane_t=plane_t,
-                        t=t,
-                    )
-                    
-                    loss, loss_diff, loss_plane, loss_recon, loss_plane_cons, loss_boundary = true_joint_sym_plane_loss_fn(
-                        result,
-                        eps_points=eps,
-                        eps_plane=eps_plane,
-                        x_t=x_t,
-                        plane_t=plane_t,
-                        x0=x0,
-                        x0_input=x0_input,
-                        plane0=plane_target,
-                        alpha_bar_t=alpha_bars[t],
-                        current_step=global_step,
-                    )
-                elif use_latent:
-                    with torch.no_grad():
-                        if isinstance(autoencoder, LionAutoencoder):
-                            z0 = autoencoder.encode(x0, sample=True)
-                        else:
-                            z0 = autoencoder.encode(x0)
-                    z_t, eps = forward.add_noise(z0, t)
-                    eps_pred = model(z_t, t)
-                    assert loss_fn is not None
-                    loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
-                else:
-                    x_t, eps = forward.add_noise(x0, t)
-                    kwargs = {}
-                    if use_symmetry_classes and isinstance(batch, dict) and "symmetry_plane_mask" in batch:
-                        kwargs["c"] = batch["symmetry_plane_mask"].to(device)
-                    eps_pred = model(x_t, t, **kwargs)
-                    assert loss_fn is not None
-                    loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step, x_t=x_t)
-
-
-            opt.zero_grad(set_to_none=True)
-            if scaler.is_enabled():
-                scaler.scale(loss).backward()
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                scaler.step(opt)
-                scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                opt.step()
+        for batch_item in dl:
+            sub_batches = batch_item if isinstance(batch_item, list) else [batch_item]
+            for batch in sub_batches:
+                x0, plane0 = unpack_batch(batch, device)
+                mse_z = torch.tensor(0.0, device=device)
+                mse_h = torch.tensor(0.0, device=device)
+                loss_diff = torch.tensor(0.0, device=device)
+                loss_sym = torch.tensor(0.0, device=device)
+                loss_plane = torch.tensor(0.0, device=device)
+                loss_recon = torch.tensor(0.0, device=device)
+                loss_plane_cons = torch.tensor(0.0, device=device)
+                B = x0.shape[0]
+                t = sample_timesteps(B, T, device)
                 
-            if scheduler is not None:
-                if scaler.is_enabled():
-                    scale_tmp = scaler.get_scale()
-                    if scale_tmp == scaler.get_scale():
-                        scheduler.step()
-                else:
-                    scheduler.step()
+                with autocast_ctx():
+                    if use_two_priors:
+                        with torch.no_grad():
+                            z0, h0 = autoencoder.encode_split(x0, sample=True)
 
-            if ema is not None:
-                ema.update_parameters(model)
-                if ema_buffer_pairs is not None:
-                    for eb, b in ema_buffer_pairs:
-                        eb.copy_(b)
+                        t_z = sample_timesteps(B, T, device)
+                        t_h = sample_timesteps(B, T, device)
+
+                        z_t, eps_z = forward.add_noise(z0, t_z)
+                        h_t, eps_h = forward.add_noise(h0, t_h)
+
+                        eps_pred_z = model.ddm_z(z_t, t_z)
+                        eps_pred_h = model.ddm_h(h_t, z0, t_h)
+
+                        mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
+                        mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
+                        w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
+                        w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
+                        loss = (w_z * mse_z) + (w_h * mse_h)
+                    elif use_sym_plane:
+                        x_t, eps = forward.add_noise(x0, t)
+                        result = model(x_t, t)
+                        loss, loss_diff, loss_sym = sym_plane_loss_fn(
+                            result, eps, x_t, x0, alpha_bars[t], current_step=global_step
+                        )
+                    elif use_joint_sym_plane:
+                        joint_mode_cfg = get_joint_mode_config(cfg)
+                        plane_target = resolve_plane_target(
+                            cfg,
+                            batch_size=B,
+                            device=x0.device,
+                            dtype=x0.dtype,
+                            plane0=plane0,
+                        )
+                        if plane_target is None:
+                            raise ValueError("Joint symmetry training requires a plane target (dataset labels or fixed axis)")
+                        x_t, eps = forward.add_noise(x0, t)
+                        if infer_plane_mode_enabled(cfg):
+                            plane_t, eps_plane = forward.add_noise(plane_target, t)
+                            selection_plane = select_training_plane(plane_target, cfg, global_step, plane_t=plane_t)
+                        else:
+                            plane_t, eps_plane = None, None
+                            selection_plane = plane_target
+                        if joint_mode_cfg.geometry_mode == "half":
+                            ref_mode = get_selection_reference_mode(cfg, context="train")
+                            if ref_mode == "x0":
+                                selection_reference_points = x0
+                            elif ref_mode in {"xt", "x_t"}:
+                                selection_reference_points = x_t
+                            else:
+                                raise ValueError("Invalid train_selection_reference_mode. Expected 'x0' or 'x_t'")
+                        else:
+                            selection_reference_points = None
+                        result = model(
+                            x_t,
+                            plane_t,
+                            t,
+                            alpha_bars[t],
+                            selection_plane=selection_plane,
+                            selection_reference_points=selection_reference_points,
+                        )
+                        loss, loss_diff, loss_plane, loss_recon, loss_plane_cons = joint_sym_plane_loss_fn(
+                            result,
+                            eps,
+                            eps_plane,
+                            x_t,
+                            x0,
+                            plane_target,
+                            alpha_bars[t],
+                            current_step=global_step,
+                        )
+                    elif use_true_joint_sym_plane:
+                        joint_mode_cfg = cfg.get("joint_symmetry", {}) or {}
+                        plane_target = resolve_plane_target(
+                            cfg,
+                            batch_size=B,
+                            device=x0.device,
+                            dtype=x0.dtype,
+                            plane0=plane0,
+                        )
+                        if plane_target is None:
+                            raise ValueError("True Joint symmetry training requires a plane target")
+                        
+                        geo_mode = model.geometry_mode if hasattr(model, "geometry_mode") else "half"
+                        
+                        if geo_mode == "half":
+                            soft_cut = bool(joint_mode_cfg.get("soft_cut", False))
+                            soft_cut_margin = float(joint_mode_cfg.get("soft_cut_margin", 0.05)) if soft_cut else 0.0
+                            from src.utils.symmetry_planes import select_signed_half
+                            with torch.no_grad():
+                                _, indices = select_signed_half(x0, plane_target, prefer_positive=True, margin=soft_cut_margin)
+                                x0_input = torch.gather(x0, 1, indices.unsqueeze(-1).expand(-1, -1, x0.shape[-1]))
+                        else:
+                            x0_input = x0
+
+                        x_t, eps = forward.add_noise(x0_input, t)
+                        plane_t, eps_plane = forward.add_noise(plane_target, t)
+                        
+                        # Force the offset to 0 for true joint diffusion since model doesn't predict it
+                        plane_t[..., 3] = 0.0
+                        eps_plane[..., 3] = 0.0
+                        
+                        result = model(
+                            x_t=x_t,
+                            plane_t=plane_t,
+                            t=t,
+                        )
+                        
+                        loss, loss_diff, loss_plane, loss_recon, loss_plane_cons, loss_boundary = true_joint_sym_plane_loss_fn(
+                            result,
+                            eps_points=eps,
+                            eps_plane=eps_plane,
+                            x_t=x_t,
+                            plane_t=plane_t,
+                            x0=x0,
+                            x0_input=x0_input,
+                            plane0=plane_target,
+                            alpha_bar_t=alpha_bars[t],
+                            current_step=global_step,
+                        )
+                    elif use_latent:
+                        with torch.no_grad():
+                            if isinstance(autoencoder, LionAutoencoder):
+                                z0 = autoencoder.encode(x0, sample=True)
+                            else:
+                                z0 = autoencoder.encode(x0)
+                        z_t, eps = forward.add_noise(z0, t)
+                        eps_pred = model(z_t, t)
+                        assert loss_fn is not None
+                        loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+                    else:
+                        x_t, eps = forward.add_noise(x0, t)
+                        kwargs = {}
+                        if use_symmetry_classes and isinstance(batch, dict) and "symmetry_plane_mask" in batch:
+                            kwargs["c"] = batch["symmetry_plane_mask"].to(device)
+                        eps_pred = model(x_t, t, **kwargs)
+                        assert loss_fn is not None
+                        loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step, x_t=x_t)
+
+
+                opt.zero_grad(set_to_none=True)
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    opt.step()
+                    
+                if scheduler is not None:
+                    if scaler.is_enabled():
+                        scale_tmp = scaler.get_scale()
+                        if scale_tmp == scaler.get_scale():
+                            scheduler.step()
+                    else:
+                        scheduler.step()
+
+                if ema is not None:
+                    ema.update_parameters(model)
+                    if ema_buffer_pairs is not None:
+                        for eb, b in ema_buffer_pairs:
+                            eb.copy_(b)
 
             global_step += 1
             epoch_loss_sum += loss.item()
@@ -833,150 +854,152 @@ def main() -> None:
             g_val = torch.Generator()
             g_val.manual_seed(seed_val)
             with torch.no_grad():
-                for batch in dl_val:
-                    x0, plane0 = unpack_batch(batch, device)
-                    B = x0.shape[0]
-                    t = torch.randint(low=0, high=T, size=(B,), generator=g_val, dtype=torch.long).to(device)
+                for batch_item in dl_val:
+                    sub_batches = batch_item if isinstance(batch_item, list) else [batch_item]
+                    for batch in sub_batches:
+                        x0, plane0 = unpack_batch(batch, device)
+                        B = x0.shape[0]
+                        t = torch.randint(low=0, high=T, size=(B,), generator=g_val, dtype=torch.long).to(device)
 
-                    with autocast_ctx():
-                        if use_two_priors:
-                            z0, h0 = autoencoder.encode_split(x0, sample=False)
-                            t_z = torch.randint(0, T, (B,), generator=g_val, dtype=torch.long).to(device)
-                            t_h = torch.randint(0, T, (B,), generator=g_val, dtype=torch.long).to(device)
-                            z_t, eps_z = forward.add_noise(z0, t_z)
-                            h_t, eps_h = forward.add_noise(h0, t_h)
-                            eps_pred_z = model_to_eval.ddm_z(z_t, t_z)
-                            eps_pred_h = model_to_eval.ddm_h(h_t, z0, t_h)
-                            mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
-                            mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
-                            w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
-                            w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
-                            l = (w_z * mse_z) + (w_h * mse_h)
-                            v_mse_z_sum += float(mse_z.detach().item())
-                            v_mse_h_sum += float(mse_h.detach().item())
-                        elif use_sym_plane:
-                            x_t, eps = forward.add_noise(x0, t)
-                            result = model_to_eval(x_t, t)
-                            l, ld, ls = sym_plane_loss_fn(
-                                result, eps, x_t, x0, alpha_bars[t], current_step=global_step
-                            )
-                            v_loss_diff_sum += float(ld.item())
-                            v_loss_sym_sum += float(ls.item())
-                        elif use_joint_sym_plane:
-                            joint_mode_cfg = get_joint_mode_config(cfg)
-                            plane_target = resolve_plane_target(
-                                cfg,
-                                batch_size=B,
-                                device=x0.device,
-                                dtype=x0.dtype,
-                                plane0=plane0,
-                            )
-                            if plane_target is None:
-                                raise ValueError("Joint symmetry validation requires a plane target (dataset labels or fixed axis)")
-                            x_t, eps = forward.add_noise(x0, t)
-                            if infer_plane_mode_enabled(cfg):
-                                plane_t, eps_plane = forward.add_noise(plane_target, t)
-                                selection_plane = select_training_plane(plane_target, cfg, global_step, plane_t=plane_t)
-                            else:
-                                plane_t, eps_plane = None, None
-                                selection_plane = plane_target
-                            if joint_mode_cfg.geometry_mode == "half":
-                                ref_mode = get_selection_reference_mode(cfg, context="train")
-                                if ref_mode == "x0":
-                                    selection_reference_points = x0
-                                elif ref_mode in {"xt", "x_t"}:
-                                    selection_reference_points = x_t
+                        with autocast_ctx():
+                            if use_two_priors:
+                                z0, h0 = autoencoder.encode_split(x0, sample=False)
+                                t_z = torch.randint(0, T, (B,), generator=g_val, dtype=torch.long).to(device)
+                                t_h = torch.randint(0, T, (B,), generator=g_val, dtype=torch.long).to(device)
+                                z_t, eps_z = forward.add_noise(z0, t_z)
+                                h_t, eps_h = forward.add_noise(h0, t_h)
+                                eps_pred_z = model_to_eval.ddm_z(z_t, t_z)
+                                eps_pred_h = model_to_eval.ddm_h(h_t, z0, t_h)
+                                mse_z = torch.mean((eps_pred_z - eps_z) ** 2)
+                                mse_h = torch.mean((eps_pred_h - eps_h) ** 2)
+                                w_z = float(cfg.get("loss", {}).get("w_z", 1.0))
+                                w_h = float(cfg.get("loss", {}).get("w_h", 1.0))
+                                l = (w_z * mse_z) + (w_h * mse_h)
+                                v_mse_z_sum += float(mse_z.detach().item())
+                                v_mse_h_sum += float(mse_h.detach().item())
+                            elif use_sym_plane:
+                                x_t, eps = forward.add_noise(x0, t)
+                                result = model_to_eval(x_t, t)
+                                l, ld, ls = sym_plane_loss_fn(
+                                    result, eps, x_t, x0, alpha_bars[t], current_step=global_step
+                                )
+                                v_loss_diff_sum += float(ld.item())
+                                v_loss_sym_sum += float(ls.item())
+                            elif use_joint_sym_plane:
+                                joint_mode_cfg = get_joint_mode_config(cfg)
+                                plane_target = resolve_plane_target(
+                                    cfg,
+                                    batch_size=B,
+                                    device=x0.device,
+                                    dtype=x0.dtype,
+                                    plane0=plane0,
+                                )
+                                if plane_target is None:
+                                    raise ValueError("Joint symmetry validation requires a plane target (dataset labels or fixed axis)")
+                                x_t, eps = forward.add_noise(x0, t)
+                                if infer_plane_mode_enabled(cfg):
+                                    plane_t, eps_plane = forward.add_noise(plane_target, t)
+                                    selection_plane = select_training_plane(plane_target, cfg, global_step, plane_t=plane_t)
                                 else:
-                                    raise ValueError("Invalid train_selection_reference_mode. Expected 'x0' or 'x_t'")
+                                    plane_t, eps_plane = None, None
+                                    selection_plane = plane_target
+                                if joint_mode_cfg.geometry_mode == "half":
+                                    ref_mode = get_selection_reference_mode(cfg, context="train")
+                                    if ref_mode == "x0":
+                                        selection_reference_points = x0
+                                    elif ref_mode in {"xt", "x_t"}:
+                                        selection_reference_points = x_t
+                                    else:
+                                        raise ValueError("Invalid train_selection_reference_mode. Expected 'x0' or 'x_t'")
+                                else:
+                                    selection_reference_points = None
+                                result = model_to_eval(
+                                    x_t,
+                                    plane_t,
+                                    t,
+                                    alpha_bars[t],
+                                    selection_plane=selection_plane,
+                                    selection_reference_points=selection_reference_points,
+                                )
+                                l, ld, lp, lr, lc = joint_sym_plane_loss_fn(
+                                    result,
+                                    eps,
+                                    eps_plane,
+                                    x_t,
+                                    x0,
+                                    plane_target,
+                                    alpha_bars[t],
+                                    current_step=global_step,
+                                )
+                                v_loss_diff_sum += float(ld.item())
+                                v_loss_plane_sum += float(lp.item())
+                                v_loss_recon_sum += float(lr.item())
+                                v_loss_plane_cons_sum += float(lc.item())
+                            elif use_true_joint_sym_plane:
+                                plane_target = resolve_plane_target(
+                                    cfg,
+                                    batch_size=B,
+                                    device=x0.device,
+                                    dtype=x0.dtype,
+                                    plane0=plane0,
+                                )
+                                if plane_target is None:
+                                    raise ValueError("True Joint symmetry validation requires a plane target")
+                                
+                                geo_mode = model_to_eval.geometry_mode if hasattr(model_to_eval, "geometry_mode") else "half"
+                                
+                                if geo_mode == "half":
+                                    from src.utils.symmetry_planes import select_signed_half
+                                    _, indices = select_signed_half(x0, plane_target, prefer_positive=True)
+                                    x0_input = torch.gather(x0, 1, indices.unsqueeze(-1).expand(-1, -1, x0.shape[-1]))
+                                else:
+                                    x0_input = x0
+
+                                x_t, eps = forward.add_noise(x0_input, t)
+                                plane_t, eps_plane = forward.add_noise(plane_target, t)
+
+                                # Force the offset to 0 for true joint diffusion since model doesn't predict it
+                                plane_t[..., 3] = 0.0
+                                eps_plane[..., 3] = 0.0
+                                
+                                result = model_to_eval(
+                                    x_t=x_t,
+                                    plane_t=plane_t,
+                                    t=t,
+                                )
+                                
+                                l, ld, lp, lr, lc, lb = true_joint_sym_plane_loss_fn(
+                                    result,
+                                    eps_points=eps,
+                                    eps_plane=eps_plane,
+                                    x_t=x_t,
+                                    plane_t=plane_t,
+                                    x0=x0,
+                                    x0_input=x0_input,
+                                    plane0=plane_target,
+                                    alpha_bar_t=alpha_bars[t],
+                                )
+                                v_loss_diff_sum += float(ld.item())
+                                v_loss_plane_sum += float(lp.item())
+                                v_loss_recon_sum += float(lr.item())
+                                v_loss_plane_cons_sum += float(lc.item())
+                            elif use_latent:
+                                z0 = autoencoder.encode(x0)
+                                z_t, eps = forward.add_noise(z0, t)
+                                eps_pred = model_to_eval(z_t, t)
+                                assert loss_fn is not None
+                                l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
                             else:
-                                selection_reference_points = None
-                            result = model_to_eval(
-                                x_t,
-                                plane_t,
-                                t,
-                                alpha_bars[t],
-                                selection_plane=selection_plane,
-                                selection_reference_points=selection_reference_points,
-                            )
-                            l, ld, lp, lr, lc = joint_sym_plane_loss_fn(
-                                result,
-                                eps,
-                                eps_plane,
-                                x_t,
-                                x0,
-                                plane_target,
-                                alpha_bars[t],
-                                current_step=global_step,
-                            )
-                            v_loss_diff_sum += float(ld.item())
-                            v_loss_plane_sum += float(lp.item())
-                            v_loss_recon_sum += float(lr.item())
-                            v_loss_plane_cons_sum += float(lc.item())
-                        elif use_true_joint_sym_plane:
-                            plane_target = resolve_plane_target(
-                                cfg,
-                                batch_size=B,
-                                device=x0.device,
-                                dtype=x0.dtype,
-                                plane0=plane0,
-                            )
-                            if plane_target is None:
-                                raise ValueError("True Joint symmetry validation requires a plane target")
-                            
-                            geo_mode = model_to_eval.geometry_mode if hasattr(model_to_eval, "geometry_mode") else "half"
-                            
-                            if geo_mode == "half":
-                                from src.utils.symmetry_planes import select_signed_half
-                                _, indices = select_signed_half(x0, plane_target, prefer_positive=True)
-                                x0_input = torch.gather(x0, 1, indices.unsqueeze(-1).expand(-1, -1, x0.shape[-1]))
-                            else:
-                                x0_input = x0
+                                x_t, eps = forward.add_noise(x0, t)
+                                kwargs = {}
+                                if use_symmetry_classes and isinstance(batch, dict) and "symmetry_plane_mask" in batch:
+                                    kwargs["c"] = batch["symmetry_plane_mask"].to(device)
+                                eps_pred = model_to_eval(x_t, t, **kwargs)
+                                assert loss_fn is not None
+                                l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
 
-                            x_t, eps = forward.add_noise(x0_input, t)
-                            plane_t, eps_plane = forward.add_noise(plane_target, t)
-
-                            # Force the offset to 0 for true joint diffusion since model doesn't predict it
-                            plane_t[..., 3] = 0.0
-                            eps_plane[..., 3] = 0.0
-                            
-                            result = model_to_eval(
-                                x_t=x_t,
-                                plane_t=plane_t,
-                                t=t,
-                            )
-                            
-                            l, ld, lp, lr, lc, lb = true_joint_sym_plane_loss_fn(
-                                result,
-                                eps_points=eps,
-                                eps_plane=eps_plane,
-                                x_t=x_t,
-                                plane_t=plane_t,
-                                x0=x0,
-                                x0_input=x0_input,
-                                plane0=plane_target,
-                                alpha_bar_t=alpha_bars[t],
-                            )
-                            v_loss_diff_sum += float(ld.item())
-                            v_loss_plane_sum += float(lp.item())
-                            v_loss_recon_sum += float(lr.item())
-                            v_loss_plane_cons_sum += float(lc.item())
-                        elif use_latent:
-                            z0 = autoencoder.encode(x0)
-                            z_t, eps = forward.add_noise(z0, t)
-                            eps_pred = model_to_eval(z_t, t)
-                            assert loss_fn is not None
-                            l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
-                        else:
-                            x_t, eps = forward.add_noise(x0, t)
-                            kwargs = {}
-                            if use_symmetry_classes and isinstance(batch, dict) and "symmetry_plane_mask" in batch:
-                                kwargs["c"] = batch["symmetry_plane_mask"].to(device)
-                            eps_pred = model_to_eval(x_t, t, **kwargs)
-                            assert loss_fn is not None
-                            l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
-
-                    v_sum += float(l.item())
-                    v_steps += 1
+                        v_sum += float(l.item())
+                        v_steps += 1
             val_loss = v_sum / max(1, v_steps)
             if use_two_priors:
                 val_mse_z = v_mse_z_sum / max(1, v_steps)
