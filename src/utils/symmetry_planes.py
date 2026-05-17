@@ -46,6 +46,35 @@ def normalize_plane(plane: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     return out
 
 
+def plane_activity_mask(plane: torch.Tensor, threshold: float = 1e-5) -> torch.Tensor:
+    if plane.shape[-1] != 4:
+        raise ValueError(f"plane must have last dim 4, got {tuple(plane.shape)}")
+    return plane[..., :3].norm(dim=-1) > float(threshold)
+
+
+def zero_inactive_planes(plane: torch.Tensor, threshold: float = 1e-5) -> torch.Tensor:
+    mask = plane_activity_mask(plane, threshold=threshold)
+    return torch.where(mask.unsqueeze(-1), plane, torch.zeros_like(plane))
+
+
+def normalize_active_planes(plane: torch.Tensor, eps: float = 1e-8, threshold: float = 1e-5) -> torch.Tensor:
+    squeeze = False
+    if plane.ndim == 1:
+        plane = plane.unsqueeze(0)
+        squeeze = True
+    n = plane[..., :3]
+    d = plane[..., 3:4]
+    norm = n.norm(dim=-1, keepdim=True)
+    norm_safe = norm.clamp(min=eps)
+    normalized = torch.cat([n / norm_safe, d / norm_safe], dim=-1)
+    normalized = canonicalize_plane(normalized)
+    active = norm > float(threshold)
+    out = torch.where(active.expand_as(normalized), normalized, torch.zeros_like(normalized))
+    if squeeze:
+        return out.squeeze(0)
+    return out
+
+
 def plane_to_normal_offset(plane: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     plane = normalize_plane(plane)
     return plane[..., :3], plane[..., 3:4]

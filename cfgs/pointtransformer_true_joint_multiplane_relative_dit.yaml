@@ -1,4 +1,4 @@
-exp_name: "pointtransformer-true-joint-multiplane-dit-soft-cut"
+exp_name: "pointtransformer-true-joint-multiplane-relative-dit"
 seed: 10
 device: "auto"
 
@@ -28,7 +28,7 @@ data:
   soft_cut_margin: 0.05
 
 model:
-  name: "pointtransformer_true_joint_multiplane_dit"
+  name: "pointtransformer_true_joint_multiplane_relative_dit"
   hidden_dim: 128
   time_dim: 128
   num_planes: 3
@@ -57,7 +57,7 @@ loss:
 
 train:
   batch_size: 16
-  epochs: 100
+  epochs: 200
   log_every: 50
   num_points: 2048
   num_workers: 2

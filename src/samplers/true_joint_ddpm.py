@@ -5,6 +5,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from src.samplers.ddpm import DDPM_Sampler
+from src.utils.symmetry_planes import normalize_active_planes, normalize_plane, reflect_points, resample_point_cloud
 
 
 class TrueJointSymmetricDDPM_Sampler:
@@ -31,6 +32,12 @@ class TrueJointSymmetricDDPM_Sampler:
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         joint_cfg = cfg.get("joint_symmetry", {}) or {}
         geometry_mode = str(joint_cfg.get("geometry_mode", cfg.get("model", {}).get("joint_geometry_mode", "half"))).lower()
+        inactive_plane_norm_threshold = float(joint_cfg.get("inactive_plane_norm_threshold", 0.15))
+        reflection_plane_norm_threshold = float(joint_cfg.get("reflection_plane_norm_threshold", 0.5))
+        renormalize_planes = bool(joint_cfg.get("renormalize_planes_during_sampling", False))
+        plane_renorm_every = max(1, int(joint_cfg.get("plane_renorm_every", 50)))
+        use_presence_for_reflection = bool(joint_cfg.get("use_presence_logits_for_reflection", joint_cfg.get("use_presence_logits", False)))
+        presence_threshold = float(joint_cfg.get("presence_threshold", 0.5))
 
         is_half = (geometry_mode == "half")
         N_gen = (num_points // 2) if is_half else num_points
@@ -53,10 +60,9 @@ class TrueJointSymmetricDDPM_Sampler:
             
         plane_t[..., 3] = 0.0 # Start with plane at the origin
 
-        from src.utils.symmetry_planes import normalize_plane
-
         guided_inference = bool(joint_cfg.get("guided_inference", False))
         guide_scale = float(joint_cfg.get("guide_scale", 10.0))
+        plane_presence_logits_last = None
 
         for t in tqdm(reversed(range(self.T)), desc="True Joint DDPM Sampling", total=self.T):
             t_batch = torch.full((num_samples,), t, dtype=torch.long, device=device)
@@ -69,29 +75,40 @@ class TrueJointSymmetricDDPM_Sampler:
                     result = model(x_t=x_t_in, plane_t=plane_t_in, t=t_batch)
                     eps_pred_points = result["eps_points"]
                     eps_pred_plane = result["eps_plane"]
+                    if "plane_presence_logits" in result:
+                        plane_presence_logits_last = result["plane_presence_logits"].detach()
                     
                     abar = self.alpha_bars[t_batch].view(-1, 1, 1)
                     x0_pred = (x_t_in - torch.sqrt(1.0 - abar) * eps_pred_points) / torch.sqrt(abar)
                     
-                    plane_abar = self.alpha_bars[t_batch].view(-1, 1)
+                    plane_abar = self.alpha_bars[t_batch].view(*([-1] + [1] * (plane_t_in.dim() - 1)))
                     plane_x0_pred = (plane_t_in - torch.sqrt(1.0 - plane_abar) * eps_pred_plane) / torch.sqrt(plane_abar)
-                    from src.utils.symmetry_planes import normalize_plane
-                    plane_x0_pred = normalize_plane(plane_x0_pred)
+                    plane_x0_pred = normalize_active_planes(plane_x0_pred, threshold=inactive_plane_norm_threshold)
                     
                     boundary_frac = float(joint_cfg.get("boundary_frac", 0.05))
                     boundary_margin = float(joint_cfg.get("boundary_margin", 0.01))
                     
                     recon_plane_iter = plane_x0_pred.unsqueeze(1) if plane_x0_pred.dim() == 2 else plane_x0_pred
-                    loss_boundary_acc = 0.0
+                    loss_boundary_acc = torch.zeros((), device=x0_pred.device, dtype=x0_pred.dtype)
+                    active_plane_count = 0
                     for p_idx in range(recon_plane_iter.shape[1]):
                         p_curr = recon_plane_iter[:, p_idx, :]
+                        active_plane = torch.norm(p_curr[:, :3], dim=-1) > inactive_plane_norm_threshold
+                        if not bool(active_plane.any()):
+                            continue
                         normals = p_curr[:, :3].unsqueeze(1)
                         offsets = p_curr[:, 3].unsqueeze(1).unsqueeze(2)
                         dists_to_plane = torch.abs(torch.bmm(x0_pred, normals.transpose(1, 2)) + offsets).squeeze(-1)
                         min_dists, _ = torch.topk(dists_to_plane, k=max(1, int(x0_pred.shape[1] * boundary_frac)), dim=1, largest=False)
-                        loss_boundary_acc += torch.mean(torch.relu(min_dists - boundary_margin))
+                        per_sample = torch.relu(min_dists - boundary_margin).mean(dim=1)
+                        weight = active_plane.to(dtype=per_sample.dtype)
+                        loss_boundary_acc += (per_sample * weight).sum() / weight.sum().clamp(min=1.0)
+                        active_plane_count += 1
                     
-                    loss = loss_boundary_acc / float(recon_plane_iter.shape[1])
+                    if active_plane_count > 0:
+                        loss = loss_boundary_acc / float(active_plane_count)
+                    else:
+                        loss = torch.zeros((), device=x0_pred.device, dtype=x0_pred.dtype)
                     
                 if loss > 0:
                     grad_x = torch.autograd.grad(loss, x_t_in)[0]
@@ -103,21 +120,22 @@ class TrueJointSymmetricDDPM_Sampler:
                 result = model(x_t=x_t, plane_t=plane_t, t=t_batch)
                 eps_pred_points = result["eps_points"]
                 eps_pred_plane = result["eps_plane"]
+                if "plane_presence_logits" in result:
+                    plane_presence_logits_last = result["plane_presence_logits"].detach()
 
             x_t = self.base_sampler.step_from_eps(x_t, eps_pred_points, t)
             plane_t = self.base_sampler.step_from_eps(plane_t, eps_pred_plane, t)
             plane_t[..., 3] = 0.0 # Force offset to 0 during sampling
-            
-            # Normalize plane occasionally or at the end to keep it numerically stable
-            if t % 50 == 0 or t == 0:
-                plane_t = normalize_plane(plane_t)
+            if renormalize_planes and (t % plane_renorm_every == 0 or t == 0):
+                plane_t = normalize_active_planes(plane_t, threshold=inactive_plane_norm_threshold)
 
         x0 = x_t.clamp(-2, 2)
-        plane_final = normalize_plane(plane_t)
+        plane_final = plane_t
+        presence_probs_final = torch.sigmoid(plane_presence_logits_last) if plane_presence_logits_last is not None else None
 
-        if is_half or num_planes > 1:
-            from src.utils.symmetry_planes import reflect_points
-            
+        return_fundamental_only = getattr(self, 'return_fundamental_only', False)
+
+        if (is_half or num_planes > 1) and not return_fundamental_only:
             x0_full_list = []
             if plane_final.dim() == 2:
                 plane_iter = plane_final.unsqueeze(1)
@@ -126,15 +144,21 @@ class TrueJointSymmetricDDPM_Sampler:
                 
             for b in range(num_samples):
                 pts_list = [x0[b]]
-                p_batch = plane_iter[b]
+                p_batch = plane_iter[b].clone() # Clocamos para no mutar el tensor original in-place
                 
-                # Filter unique planes to avoid redundant reflections
                 unique_planes = []
                 for p_idx in range(p_batch.shape[0]):
+                    if use_presence_for_reflection and presence_probs_final is not None and presence_probs_final.dim() == 2:
+                        if float(presence_probs_final[b, p_idx].item()) < presence_threshold:
+                            continue
                     p_curr = p_batch[p_idx]
+                    magnitude = torch.norm(p_curr[:3])
+                    if magnitude < reflection_plane_norm_threshold:
+                        continue 
+                    p_curr = normalize_plane(p_curr)
+                    
                     is_duplicate = False
                     for p_uniq in unique_planes:
-                        # Check if normals are parallel and offsets are similar
                         dot = torch.abs(torch.dot(p_curr[:3], p_uniq[:3]))
                         offset_diff = torch.abs(p_curr[3] - p_uniq[3])
                         if dot > 0.95 and offset_diff < 0.05:
@@ -146,7 +170,6 @@ class TrueJointSymmetricDDPM_Sampler:
                 for p_curr in unique_planes:
                     reflected = [reflect_points(pts.unsqueeze(0), p_curr.unsqueeze(0)).squeeze(0) for pts in pts_list]
                     pts_list = pts_list + reflected
-                from src.utils.symmetry_planes import resample_point_cloud
                 # resample_point_cloud expects [N, 3], not [B, N, 3]
                 x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points)
                 x0_full_list.append(x0_b_full)
@@ -171,6 +194,8 @@ class TrueJointSymmetricDDPM_Sampler:
     ):
         joint_cfg = cfg.get("joint_symmetry", {}) or {}
         geometry_mode = str(joint_cfg.get("geometry_mode", cfg.get("model", {}).get("joint_geometry_mode", "half"))).lower()
+        inactive_plane_norm_threshold = float(joint_cfg.get("inactive_plane_norm_threshold", 0.15))
+        reflection_plane_norm_threshold = float(joint_cfg.get("reflection_plane_norm_threshold", 0.5))
 
         is_half = (geometry_mode == "half")
         N_gen = (num_points // 2) if is_half else num_points
@@ -224,9 +249,9 @@ class TrueJointSymmetricDDPM_Sampler:
         x0 = x_t.clamp(-2, 2)
         plane_final = target_planes
         
-        if is_half or num_planes > 1:
-            from src.utils.symmetry_planes import reflect_points
-            
+        return_fundamental_only = getattr(self, 'return_fundamental_only', False)
+        
+        if (is_half or num_planes > 1) and not return_fundamental_only:
             x0_full_list = []
             if plane_final.dim() == 2:
                 plane_iter = plane_final.unsqueeze(1)
@@ -240,6 +265,10 @@ class TrueJointSymmetricDDPM_Sampler:
                 unique_planes = []
                 for p_idx in range(p_batch.shape[0]):
                     p_curr = p_batch[p_idx]
+                    if torch.norm(p_curr[:3]) < reflection_plane_norm_threshold:
+                        continue
+                    p_curr = normalize_plane(p_curr)
+                        
                     is_duplicate = False
                     for p_uniq in unique_planes:
                         dot = torch.abs(torch.dot(p_curr[:3], p_uniq[:3]))
@@ -253,7 +282,6 @@ class TrueJointSymmetricDDPM_Sampler:
                 for p_curr in unique_planes:
                     reflected = [reflect_points(pts.unsqueeze(0), p_curr.unsqueeze(0)).squeeze(0) for pts in pts_list]
                     pts_list = pts_list + reflected
-                from src.utils.symmetry_planes import resample_point_cloud
                 x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points)
                 x0_full_list.append(x0_b_full)
             x0_full = torch.stack(x0_full_list, dim=0)

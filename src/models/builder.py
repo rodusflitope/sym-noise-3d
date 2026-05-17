@@ -286,6 +286,8 @@ def build_model(cfg):
 
         joint_cfg = cfg.get("joint_symmetry", {}) or {}
         geometry_mode = str(joint_cfg.get("geometry_mode", cfg["model"].get("joint_geometry_mode", "half"))).lower()
+        inactive_plane_norm_threshold = float(joint_cfg.get("inactive_plane_norm_threshold", 1e-5))
+        use_presence_logits = bool(joint_cfg.get("use_presence_logits", cfg["model"].get("use_presence_logits", False)))
 
         return PointTransformerTrueJointMultiplaneDiT(
             hidden_dim=hidden_dim,
@@ -295,7 +297,34 @@ def build_model(cfg):
             num_layers=num_layers,
             use_fourier_features=use_fourier_features,
             use_symmetric_attention=use_symmetric_attention,
-            geometry_mode=geometry_mode
+            geometry_mode=geometry_mode,
+            inactive_plane_norm_threshold=inactive_plane_norm_threshold,
+            use_presence_logits=use_presence_logits,
+        )
+    elif name == "pointtransformer_true_joint_multiplane_relative_dit":
+        from .pointtransformer_true_joint_multiplane_relative_dit import PointTransformerTrueJointMultiplaneRelativeDiT
+
+        hidden_dim = int(cfg["model"]["hidden_dim"])
+        time_dim = int(cfg["model"]["time_dim"])
+        num_planes = int(cfg["data"].get("num_symmetry_planes", 1))
+        num_heads = int(cfg["model"].get("num_heads", 4))
+        num_layers = int(cfg["model"].get("num_layers", 2))
+        use_symmetric_attention = bool(cfg["model"].get("use_symmetric_attention", False))
+
+        joint_cfg = cfg.get("joint_symmetry", {}) or {}
+        geometry_mode = str(joint_cfg.get("geometry_mode", cfg["model"].get("joint_geometry_mode", "half"))).lower()
+        inactive_plane_norm_threshold = float(joint_cfg.get("inactive_plane_norm_threshold", 1e-5))
+        use_presence_logits = bool(joint_cfg.get("use_presence_logits", cfg["model"].get("use_presence_logits", False)))
+
+        return PointTransformerTrueJointMultiplaneRelativeDiT(
+            hidden_dim=hidden_dim,
+            time_dim=time_dim,
+            num_planes=num_planes,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            use_symmetric_attention=use_symmetric_attention,
+            geometry_mode=geometry_mode,
+            inactive_plane_norm_threshold=inactive_plane_norm_threshold,
+            use_presence_logits=use_presence_logits,
         )
     raise ValueError(f"Unknown model: {name}")
-

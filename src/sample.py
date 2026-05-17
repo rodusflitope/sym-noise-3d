@@ -14,6 +14,7 @@ from src.models import (
     PVCNNTrueJoint,
     PointTransformerTrueJointDiT,
     PointTransformerTrueJointMultiplaneDiT,
+    PointTransformerTrueJointMultiplaneRelativeDiT,
     PointTransformerSymClassDiT,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
@@ -132,6 +133,7 @@ def parse_args():
                    help="Checkpoint del autoencoder para modo latente (opcional: usa AE_CHECKPOINT si no se pasa)")
     p.add_argument("--symmetry_class", type=int, default=None)
     p.add_argument("--test_disentanglement", action="store_true", help="Probar disentanglement con planos rotados fijos.")
+    p.add_argument("--return_fundamental_only", action="store_true", help="Retornar solo el dominio fundamental (sin reflejar).")
     p.add_argument("--num_samples", type=int, default=None, help="Sobrescribe la cantidad de samples a generar.")
     return p.parse_args()
 
@@ -326,22 +328,33 @@ def main():
                 alpha_bars=alpha_bars,
             )
             joint_debug = _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples, T, joint_selection_mode, joint_selection_reference_mode)
-        elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT)) and not use_latent:
+        elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT)) and not use_latent:
             true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
+            if args.return_fundamental_only:
+                print("[sample] FORZANDO SOLO DOMINIO FUNDAMENTAL (sin reflejar).")
+                true_joint_sampler.return_fundamental_only = True
+                
             if args.test_disentanglement:
                 print("[sample] TEST DISENTANGLEMENT: Forzando planos canónicos fijos.")
                 num_planes = getattr(model, "num_planes", 1)
+                sampler_cfg = cfg.get("sampler", {}) or {}
+                disentangle_plane_index = int(sampler_cfg.get("disentangle_plane_index", 0))
+                disentangle_plane_normal = sampler_cfg.get("disentangle_plane_normal", [1.0, 0.0, 0.0])
+                if not isinstance(disentangle_plane_normal, (list, tuple)) or len(disentangle_plane_normal) != 3:
+                    raise ValueError("sampler.disentangle_plane_normal must be a list of 3 values")
+                plane_normal = torch.tensor(disentangle_plane_normal, device=device, dtype=torch.float32)
+                norm = plane_normal.norm().clamp(min=1e-8)
+                plane_normal = plane_normal / norm
                 
                 if num_planes > 1:
                     target_planes = torch.zeros((num_samples, num_planes, 4), device=device)
-                    # El dataset hace padding con el primer plano si la figura no tiene más simetrías.
-                    # NUNCA le pases [0,0,1] a una mesa porque las mesas no son simétricas arriba/abajo. 
-                    # Eso causa un colapso Out-of-Distribution (OOD) en la red.
-                    # Vamos a forzar que TODOS los planos sean [1,0,0] (Simetría en X)
-                    target_planes[:, :, :3] = torch.tensor([1.0, 0.0, 0.0]) 
+                    if disentangle_plane_index < 0 or disentangle_plane_index >= num_planes:
+                        raise ValueError(f"sampler.disentangle_plane_index={disentangle_plane_index} is out of range [0, {num_planes - 1}]")
+                    # Activate only one slot; keep the rest OFF ([0,0,0,0]).
+                    target_planes[:, disentangle_plane_index, :3] = plane_normal
                 else:
                     target_planes = torch.zeros((num_samples, 4), device=device)
-                    target_planes[:, :3] = torch.tensor([1.0, 0.0, 0.0]) # Plano X
+                    target_planes[:, :3] = plane_normal
                 
                 out = true_joint_sampler.sample_with_fixed_planes(
                     model,

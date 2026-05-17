@@ -1,4 +1,4 @@
-exp_name: "pointtransformer-true-joint-multiplane-dit-soft-cut"
+exp_name: "pointtransformer-true-joint-multiplane-dit-soft-cut-presence"
 seed: 10
 device: "auto"
 
@@ -42,6 +42,9 @@ joint_symmetry:
   plane_mode: "diffusion"
   inactive_plane_norm_threshold: 0.15
   renormalize_planes_during_sampling: false
+  use_presence_logits: true
+  use_presence_logits_for_reflection: true
+  presence_threshold: 0.5
 
 loss:
   name: "true_joint_symmetry_plane_loss"
@@ -54,10 +57,14 @@ loss:
   recon_cd_sigma: 0.15
   weighting: "none"
   metric: "cd"
+  plane_matching: "none"
+  mask_plane_loss_by_presence: true
+  lambda_plane_presence: 1.0
+  presence_pos_weight: 2.0
 
 train:
   batch_size: 16
-  epochs: 100
+  epochs: 200
   log_every: 50
   num_points: 2048
   num_workers: 2

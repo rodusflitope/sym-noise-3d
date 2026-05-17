@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from itertools import permutations
+
 import torch
 import torch.nn.functional as F
 
 from src.losses.losses import min_snr_weight, p2_weight, snr_weight, truncated_snr_weight
 from src.metrics.metrics import chamfer_distance, earth_movers_distance, square_distance
-from src.utils.symmetry_planes import normalize_plane, reflect_points
+from src.utils.symmetry_planes import normalize_active_planes, reflect_points
+
+try:
+    from scipy.optimize import linear_sum_assignment as scipy_linear_sum_assignment
+except Exception:
+    scipy_linear_sum_assignment = None
 
 def weighted_chamfer_distance(x: torch.Tensor, y: torch.Tensor, weight_x: torch.Tensor, weight_y: torch.Tensor) -> torch.Tensor:
     dist_sq = square_distance(x, y)
@@ -37,6 +44,15 @@ class TrueJointSymmetryPlaneLoss:
         k: float = 1.0,
         min_snr: float = 0.01,
         max_snr: float = 100.0,
+        plane_matching: str = "none",
+        hungarian_backend: str = "auto",
+        matching_normal_weight: float = 1.0,
+        matching_offset_weight: float = 0.25,
+        matching_presence_weight: float = 0.25,
+        mask_plane_loss_by_presence: bool = False,
+        lambda_plane_presence: float = 0.0,
+        presence_pos_weight: float = 1.0,
+        inactive_plane_norm_threshold: float = 1e-5,
     ):
         self.lambda_diff = float(lambda_diff)
         self.lambda_plane = float(lambda_plane)
@@ -57,6 +73,126 @@ class TrueJointSymmetryPlaneLoss:
         self.k = float(k)
         self.min_snr = float(min_snr)
         self.max_snr = float(max_snr)
+        self.plane_matching = str(plane_matching).strip().lower()
+        self.hungarian_backend = str(hungarian_backend).strip().lower()
+        self.matching_normal_weight = float(matching_normal_weight)
+        self.matching_offset_weight = float(matching_offset_weight)
+        self.matching_presence_weight = float(matching_presence_weight)
+        self.mask_plane_loss_by_presence = bool(mask_plane_loss_by_presence)
+        self.lambda_plane_presence = float(lambda_plane_presence)
+        self.presence_pos_weight = float(presence_pos_weight)
+        self.inactive_plane_norm_threshold = float(inactive_plane_norm_threshold)
+        self._perm_bank_cache: dict[int, torch.Tensor] = {}
+
+        if self.plane_matching not in {"none", "hungarian"}:
+            raise ValueError("loss.plane_matching must be 'none' or 'hungarian'")
+        if self.hungarian_backend not in {"auto", "scipy", "bruteforce"}:
+            raise ValueError("loss.hungarian_backend must be 'auto', 'scipy', or 'bruteforce'")
+
+    def _presence_target(self, plane: torch.Tensor) -> torch.Tensor:
+        return (torch.norm(plane[..., :3], dim=-1) > self.inactive_plane_norm_threshold).to(dtype=plane.dtype)
+
+    def _gather_slots(self, tensor: torch.Tensor | None, slot_idx: torch.Tensor) -> torch.Tensor | None:
+        if tensor is None:
+            return None
+        if tensor.dim() < 2:
+            return tensor
+        if tensor.shape[1] != slot_idx.shape[1]:
+            return tensor
+        if tensor.dim() == 2:
+            return torch.gather(tensor, 1, slot_idx)
+        view_shape = [slot_idx.shape[0], slot_idx.shape[1]] + [1] * (tensor.dim() - 2)
+        gather_idx = slot_idx.view(*view_shape).expand(-1, -1, *tensor.shape[2:])
+        return torch.gather(tensor, 1, gather_idx)
+
+    def _plane_matching_cost(
+        self,
+        pred_plane_x0: torch.Tensor,
+        gt_plane: torch.Tensor,
+        pred_presence_prob: torch.Tensor | None,
+    ) -> torch.Tensor:
+        pred_plane_x0 = normalize_active_planes(pred_plane_x0, threshold=self.inactive_plane_norm_threshold)
+        gt_plane = normalize_active_planes(gt_plane, threshold=self.inactive_plane_norm_threshold)
+
+        normal_cost = ((pred_plane_x0[:, :, None, :3] - gt_plane[:, None, :, :3]) ** 2).sum(dim=-1)
+        offset_cost = torch.abs(pred_plane_x0[:, :, None, 3] - gt_plane[:, None, :, 3])
+        cost = (self.matching_normal_weight * normal_cost) + (self.matching_offset_weight * offset_cost)
+
+        if self.matching_presence_weight > 0.0:
+            gt_presence = self._presence_target(gt_plane)
+            if pred_presence_prob is None:
+                pred_presence = (torch.norm(pred_plane_x0[..., :3], dim=-1) > self.inactive_plane_norm_threshold).to(pred_plane_x0.dtype)
+            else:
+                pred_presence = pred_presence_prob
+            cost = cost + (self.matching_presence_weight * torch.abs(pred_presence[:, :, None] - gt_presence[:, None, :]))
+        return cost
+
+    def _perm_bank(self, num_planes: int, device: torch.device) -> torch.Tensor:
+        bank = self._perm_bank_cache.get(int(num_planes))
+        if bank is None:
+            bank = torch.tensor(list(permutations(range(int(num_planes)))), dtype=torch.long)
+            self._perm_bank_cache[int(num_planes)] = bank
+        return bank.to(device=device)
+
+    def _solve_assignment_bruteforce(self, cost: torch.Tensor) -> torch.Tensor:
+        bsz, num_planes, _ = cost.shape
+        perm_bank = self._perm_bank(num_planes, device=cost.device)
+        gt_idx = torch.arange(num_planes, device=cost.device, dtype=torch.long)
+        score_list = []
+        for k in range(perm_bank.shape[0]):
+            perm = perm_bank[k]
+            score_list.append(cost[:, perm, gt_idx].sum(dim=-1))
+        scores = torch.stack(score_list, dim=1)
+        best_idx = scores.argmin(dim=1)
+        return perm_bank[best_idx]
+
+    def _solve_assignment_scipy(self, cost: torch.Tensor) -> torch.Tensor:
+        if scipy_linear_sum_assignment is None:
+            raise RuntimeError("scipy is not available for hungarian_backend='scipy'")
+        bsz, num_planes, _ = cost.shape
+        out = torch.empty((bsz, num_planes), dtype=torch.long, device=cost.device)
+        cost_np = cost.detach().cpu().numpy()
+        for b in range(bsz):
+            rows, cols = scipy_linear_sum_assignment(cost_np[b])
+            pred_for_gt = torch.empty(num_planes, dtype=torch.long)
+            pred_for_gt[torch.as_tensor(cols, dtype=torch.long)] = torch.as_tensor(rows, dtype=torch.long)
+            out[b] = pred_for_gt.to(device=cost.device)
+        return out
+
+    def _solve_assignment(self, cost: torch.Tensor) -> torch.Tensor:
+        if self.hungarian_backend == "bruteforce":
+            return self._solve_assignment_bruteforce(cost)
+        if self.hungarian_backend == "scipy":
+            return self._solve_assignment_scipy(cost)
+        # auto
+        if cost.shape[1] <= 7:
+            return self._solve_assignment_bruteforce(cost)
+        if scipy_linear_sum_assignment is not None:
+            return self._solve_assignment_scipy(cost)
+        return self._solve_assignment_bruteforce(cost)
+
+    def _align_predicted_planes(
+        self,
+        eps_plane_pred: torch.Tensor,
+        plane_x0_pred: torch.Tensor,
+        plane_target: torch.Tensor,
+        presence_logits: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if self.plane_matching != "hungarian":
+            return eps_plane_pred, plane_x0_pred, presence_logits
+        if eps_plane_pred.dim() != 3 or plane_x0_pred.dim() != 3 or plane_target.dim() != 3:
+            return eps_plane_pred, plane_x0_pred, presence_logits
+
+        pred_presence_prob = None
+        if presence_logits is not None:
+            pred_presence_prob = torch.sigmoid(presence_logits)
+        cost = self._plane_matching_cost(plane_x0_pred, plane_target, pred_presence_prob)
+        slot_idx = self._solve_assignment(cost)
+        return (
+            self._gather_slots(eps_plane_pred, slot_idx),
+            self._gather_slots(plane_x0_pred, slot_idx),
+            self._gather_slots(presence_logits, slot_idx),
+        )
 
     def _timestep_weight(self, alpha_bar_t: torch.Tensor, mode: str) -> torch.Tensor:
         if mode in {"none", ""}:
@@ -89,57 +225,113 @@ class TrueJointSymmetryPlaneLoss:
     ):
         eps_points_pred = model_output["eps_points"]
         eps_plane_pred = model_output["eps_plane"]
+        presence_logits = model_output.get("plane_presence_logits")
 
         loss_diff_raw = F.mse_loss(eps_points_pred, eps_points, reduction="none")
-        loss_plane_raw = F.mse_loss(eps_plane_pred, eps_plane, reduction="none")
+        loss_diff_per = loss_diff_raw.mean(dim=tuple(range(1, loss_diff_raw.dim())))
+        weight = None
         if alpha_bar_t is not None:
             weight = self._timestep_weight(alpha_bar_t, self.weighting)
-            loss_diff = (loss_diff_raw * weight.view(-1, 1, 1)).mean()
-            weight_plane_view = [-1] + [1] * (loss_plane_raw.dim() - 1)
-            loss_plane = (loss_plane_raw * weight.view(*weight_plane_view)).mean()
+            loss_diff = (loss_diff_per * weight).mean()
         else:
-            loss_diff = loss_diff_raw.mean()
-            loss_plane = loss_plane_raw.mean()
+            loss_diff = loss_diff_per.mean()
+
+        loss_plane = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
         loss_recon = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
         loss_plane_consistency = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
         loss_boundary = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
+        loss_plane_presence = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
+
+        if plane_t is None or alpha_bar_t is None:
+            raise ValueError("true joint loss requires plane_t and alpha_bar_t")
+        if plane0 is None:
+            raise ValueError("true joint loss requires plane0")
+
+        batch_size = plane_t.shape[0]
+        abar_plane = alpha_bar_t.view(*([-1] + [1] * (plane_t.dim() - 1)))
+        plane_x0_pred = (plane_t - torch.sqrt((1.0 - abar_plane).clamp(min=1e-8)) * eps_plane_pred) / torch.sqrt(abar_plane.clamp(min=1e-8))
+        plane_x0_pred = normalize_active_planes(plane_x0_pred, threshold=self.inactive_plane_norm_threshold)
+
+        eps_plane_pred, plane_x0_pred, presence_logits = self._align_predicted_planes(
+            eps_plane_pred=eps_plane_pred,
+            plane_x0_pred=plane_x0_pred,
+            plane_target=plane0,
+            presence_logits=presence_logits,
+        )
+
+        loss_plane_raw = F.mse_loss(eps_plane_pred, eps_plane, reduction="none")
+        plane_reduce_dims = tuple(range(1, loss_plane_raw.dim()))
+        if self.mask_plane_loss_by_presence:
+            presence_target = self._presence_target(plane0)
+            active = presence_target.unsqueeze(-1)
+            per_sample_num = (loss_plane_raw * active).sum(dim=plane_reduce_dims)
+            per_sample_den = (active.sum(dim=tuple(range(1, active.dim()))).clamp(min=1.0) * float(loss_plane_raw.shape[-1]))
+            loss_plane_per = per_sample_num / per_sample_den
+        else:
+            loss_plane_per = loss_plane_raw.mean(dim=plane_reduce_dims)
+        if weight is not None:
+            loss_plane = (loss_plane_per * weight).mean()
+        else:
+            loss_plane = loss_plane_per.mean()
+
+        if self.lambda_plane_presence > 0.0:
+            if presence_logits is None:
+                raise ValueError("loss.lambda_plane_presence > 0 requires model_output['plane_presence_logits']")
+            presence_target = self._presence_target(plane0)
+            pos_weight = torch.tensor(self.presence_pos_weight, dtype=presence_logits.dtype, device=presence_logits.device)
+            bce_raw = F.binary_cross_entropy_with_logits(
+                presence_logits,
+                presence_target,
+                pos_weight=pos_weight,
+                reduction="none",
+            )
+            loss_presence_per = bce_raw.mean(dim=1)
+            if weight is not None:
+                loss_plane_presence = (loss_presence_per * weight).mean()
+            else:
+                loss_plane_presence = loss_presence_per.mean()
 
         need_x0_pred = self.lambda_recon > 0.0 or self.lambda_plane_consistency > 0.0 or self.lambda_boundary > 0.0
         if need_x0_pred:
-            if x_t is None or plane_t is None or alpha_bar_t is None:
-                raise ValueError("true joint recon/consistency losses require x_t, plane_t, and alpha_bar_t")
+            if x_t is None:
+                raise ValueError("true joint recon/consistency losses require x_t")
             batch_size = x_t.shape[0]
             abar_points = alpha_bar_t.view(batch_size, 1, 1)
-            abar_plane = alpha_bar_t.view(*([-1] + [1] * (plane_t.dim() - 1)))
             x0_pred = (x_t - torch.sqrt((1.0 - abar_points).clamp(min=1e-8)) * eps_points_pred) / torch.sqrt(abar_points.clamp(min=1e-8))
-            plane_x0_pred = (plane_t - torch.sqrt((1.0 - abar_plane).clamp(min=1e-8)) * eps_plane_pred) / torch.sqrt(abar_plane.clamp(min=1e-8))
-            plane_x0_pred = normalize_plane(plane_x0_pred)
 
             if self.lambda_plane_consistency > 0.0:
-                if plane0 is None:
-                    raise ValueError("loss.lambda_plane_consistency > 0 requires plane0")
-                plane_target = normalize_plane(plane0)
+                plane_target = normalize_active_planes(plane0, threshold=self.inactive_plane_norm_threshold)
                 normal_cos = F.cosine_similarity(plane_x0_pred[..., :3], plane_target[..., :3], dim=-1)
                 loss_plane_normal = (1.0 - normal_cos).mean()
                 loss_plane_offset = F.smooth_l1_loss(plane_x0_pred[..., 3], plane_target[..., 3])
                 loss_plane_consistency = (self.plane_normal_weight * loss_plane_normal) + (self.plane_offset_weight * loss_plane_offset)
 
             if self.lambda_boundary > 0.0:
-                recon_plane = normalize_plane(plane0) if plane0 is not None else plane_x0_pred
+                recon_plane = normalize_active_planes(plane0, threshold=self.inactive_plane_norm_threshold)
                 if recon_plane.dim() == 2:
                     recon_plane_iter = recon_plane.unsqueeze(1)
                 else:
                     recon_plane_iter = recon_plane
                 
-                loss_boundary_acc = 0.0
+                loss_boundary_acc = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
+                active_plane_count = 0
                 for p_idx in range(recon_plane_iter.shape[1]):
                     p_curr = recon_plane_iter[:, p_idx, :]
+                    active_plane = (torch.norm(p_curr[:, :3], dim=-1) > self.inactive_plane_norm_threshold)
+                    if not bool(active_plane.any()):
+                        continue
                     normals = p_curr[:, :3].unsqueeze(1)
                     offsets = p_curr[:, 3].unsqueeze(1).unsqueeze(2)
                     dists_to_plane = torch.abs(torch.bmm(x0_pred, normals.transpose(1, 2)) + offsets).squeeze(-1)
                     min_dists, _ = torch.topk(dists_to_plane, k=max(1, int(x0_pred.shape[1] * self.boundary_frac)), dim=1, largest=False)
-                    loss_boundary_acc += torch.mean(torch.relu(min_dists - self.boundary_margin))
-                loss_boundary = loss_boundary_acc / float(recon_plane_iter.shape[1])
+                    per_sample = torch.relu(min_dists - self.boundary_margin).mean(dim=1)
+                    weight_active = active_plane.to(per_sample.dtype)
+                    loss_boundary_acc += (per_sample * weight_active).sum() / weight_active.sum().clamp(min=1.0)
+                    active_plane_count += 1
+                if active_plane_count > 0:
+                    loss_boundary = loss_boundary_acc / float(active_plane_count)
+                else:
+                    loss_boundary = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
             else:
                 loss_boundary = torch.zeros((), device=loss_diff.device, dtype=loss_diff.dtype)
 
@@ -151,8 +343,8 @@ class TrueJointSymmetryPlaneLoss:
                     weight_x = torch.ones(x0_reconstructed.shape[:2], device=x0_reconstructed.device)
                     weight_y = torch.ones(x0.shape[:2], device=x0.device)
                 else:
-                    recon_plane = normalize_plane(plane0) if plane0 is not None else plane_x0_pred
-                    if self.warmup_steps > 0 and current_step is not None and plane0 is not None:
+                    recon_plane = normalize_active_planes(plane0, threshold=self.inactive_plane_norm_threshold)
+                    if self.warmup_steps > 0 and current_step is not None:
                         warmup_progress = min(1.0, float(current_step) / float(self.warmup_steps))
                         if warmup_progress < 1.0:
                             with torch.no_grad():
@@ -164,7 +356,7 @@ class TrueJointSymmetryPlaneLoss:
                                 use_pred_expanded = use_pred_expanded.unsqueeze(-1)
                             use_pred_expanded = use_pred_expanded.expand_as(recon_plane)
                             recon_plane = torch.where(use_pred_expanded, plane_x0_pred, recon_plane)
-                            recon_plane = normalize_plane(recon_plane)
+                            recon_plane = normalize_active_planes(recon_plane, threshold=self.inactive_plane_norm_threshold)
                             
                     if recon_plane.dim() == 2:
                         recon_plane_iter = recon_plane.unsqueeze(1)
@@ -174,6 +366,8 @@ class TrueJointSymmetryPlaneLoss:
                     reconstructed_parts = [x0_pred]
                     for p_idx in range(recon_plane_iter.shape[1]):
                         p_curr = recon_plane_iter[:, p_idx, :]
+                        if not bool((torch.norm(p_curr[:, :3], dim=-1) > self.inactive_plane_norm_threshold).any()):
+                            continue
                         reconstructed_parts.append(reflect_points(x0_pred, p_curr))
                     x0_reconstructed = torch.cat(reconstructed_parts, dim=1)
                     
@@ -183,6 +377,8 @@ class TrueJointSymmetryPlaneLoss:
                     # Compute minimum distance to any plane for weighting
                     for p_idx in range(recon_plane_iter.shape[1]):
                         p_curr = recon_plane_iter[:, p_idx, :]
+                        if not bool((torch.norm(p_curr[:, :3], dim=-1) > self.inactive_plane_norm_threshold).any()):
+                            continue
                         normals_recon = p_curr[:, :3].unsqueeze(1)
                         offsets_recon = p_curr[:, 3].unsqueeze(1).unsqueeze(2)
                         
@@ -214,6 +410,7 @@ class TrueJointSymmetryPlaneLoss:
         total_loss = (
             (self.lambda_diff * loss_diff)
             + (self.lambda_plane * loss_plane)
+            + (self.lambda_plane_presence * loss_plane_presence)
             + (recon_weight * loss_recon)
             + (self.lambda_plane_consistency * loss_plane_consistency)
             + (self.lambda_boundary * loss_boundary)
@@ -253,4 +450,13 @@ def build_true_joint_symmetry_plane_loss(cfg: dict) -> TrueJointSymmetryPlaneLos
         k=float(loss_cfg.get("k", 1.0)),
         min_snr=float(loss_cfg.get("min_snr", 0.01)),
         max_snr=float(loss_cfg.get("max_snr", 100.0)),
+        plane_matching=str(loss_cfg.get("plane_matching", "none")).lower(),
+        hungarian_backend=str(loss_cfg.get("hungarian_backend", "auto")).lower(),
+        matching_normal_weight=float(loss_cfg.get("matching_normal_weight", 1.0)),
+        matching_offset_weight=float(loss_cfg.get("matching_offset_weight", 0.25)),
+        matching_presence_weight=float(loss_cfg.get("matching_presence_weight", 0.25)),
+        mask_plane_loss_by_presence=bool(loss_cfg.get("mask_plane_loss_by_presence", False)),
+        lambda_plane_presence=float(loss_cfg.get("lambda_plane_presence", 0.0)),
+        presence_pos_weight=float(loss_cfg.get("presence_pos_weight", 1.0)),
+        inactive_plane_norm_threshold=float(joint_cfg.get("inactive_plane_norm_threshold", 1e-5)),
     )

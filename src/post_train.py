@@ -24,7 +24,7 @@ from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_con
 from src.utils.common import load_cfg, set_seed, get_device
 from src.utils.lr import build_optimizer_and_scheduler
 from src.utils.ema import build_ema_model
-from src.utils.symmetry_planes import gather_points, normalize_plane, reflect_points
+from src.utils.symmetry_planes import gather_points, normalize_plane, reflect_points, zero_inactive_planes
 from src.utils.joint_modes import (
     get_joint_mode_config,
     get_selection_reference_mode,
@@ -712,6 +712,12 @@ def main() -> None:
                     # Force the offset to 0 for true joint diffusion since model doesn't predict it
                     plane_t[..., 3] = 0.0
                     eps_plane[..., 3] = 0.0
+                    mask_inactive_plane_noise = bool(joint_mode_cfg.get("mask_inactive_plane_noise", False))
+                    if mask_inactive_plane_noise:
+                        active_threshold = float(joint_mode_cfg.get("inactive_plane_norm_threshold", 1e-5))
+                        active_mask = plane_target[..., :3].norm(dim=-1) > active_threshold
+                        plane_t = zero_inactive_planes(plane_t * active_mask.unsqueeze(-1), threshold=active_threshold)
+                        eps_plane = zero_inactive_planes(eps_plane * active_mask.unsqueeze(-1), threshold=active_threshold)
                     
                     result = model(
                         x_t=x_t,
@@ -953,6 +959,13 @@ def main() -> None:
                             # Force the offset to 0 for true joint diffusion since model doesn't predict it
                             plane_t[..., 3] = 0.0
                             eps_plane[..., 3] = 0.0
+                            joint_cfg_local = cfg.get("joint_symmetry", {}) or {}
+                            mask_inactive_plane_noise = bool(joint_cfg_local.get("mask_inactive_plane_noise", False))
+                            if mask_inactive_plane_noise:
+                                active_threshold = float(joint_cfg_local.get("inactive_plane_norm_threshold", 1e-5))
+                                active_mask = plane_target[..., :3].norm(dim=-1) > active_threshold
+                                plane_t = zero_inactive_planes(plane_t * active_mask.unsqueeze(-1), threshold=active_threshold)
+                                eps_plane = zero_inactive_planes(eps_plane * active_mask.unsqueeze(-1), threshold=active_threshold)
                             
                             result = model_to_eval(
                                 x_t=x_t,

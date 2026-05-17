@@ -423,9 +423,9 @@ class ShapeNetDataset(Dataset):
                             num_to_take = min(self.num_symmetry_planes, valid_tensor.shape[0])
                             plane_tensor = normalize_plane(valid_tensor[:num_to_take].float())
                             
-                            # Pad by duplicating the first valid plane so it reflects redundantly without changing geometry
+                            # Pad with absolute zeros to teach the network that the plane is OFF
                             if num_to_take < self.num_symmetry_planes:
-                                padding = plane_tensor[0:1].repeat(self.num_symmetry_planes - num_to_take, 1)
+                                padding = torch.zeros((self.num_symmetry_planes - num_to_take, 4), dtype=plane_tensor.dtype, device=plane_tensor.device)
                                 plane_tensor = torch.cat([plane_tensor, padding], dim=0)
             if plane_tensor is None and self.symmetry_plane_cache_required:
                 raise KeyError(f"Missing symmetry plane label for {cache_key}")
@@ -576,9 +576,15 @@ def shapenet_collate_fn(batch):
         collated = {}
         for k in g[0].keys():
             if isinstance(g[0][k], torch.Tensor):
-                collated[k] = torch.stack([item[k] for item in g], dim=0)
+                stacked = torch.stack([item[k] for item in g], dim=0)
+                if torch.utils.data.get_worker_info() is not None:
+                    stacked.share_memory_()
+                collated[k] = stacked
             elif isinstance(g[0][k], (int, float, str, bool)):
-                collated[k] = torch.tensor([item[k] for item in g])
+                stacked = torch.tensor([item[k] for item in g])
+                if torch.utils.data.get_worker_info() is not None:
+                    stacked.share_memory_()
+                collated[k] = stacked
             else:
                 collated[k] = [item[k] for item in g]
         result.append(collated)
