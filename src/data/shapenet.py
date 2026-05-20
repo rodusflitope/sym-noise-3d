@@ -411,22 +411,15 @@ class ShapeNetDataset(Dataset):
                             planes_data = torch.tensor(planes_data, dtype=points_tensor.dtype)
                             
                         if isinstance(planes_data, torch.Tensor) and planes_data.ndim >= 2:
-                            valid_planes = []
-                            for i in range(min(planes_data.shape[0], self.num_symmetry_planes)):
-                                if (c >> i) & 1:
-                                    valid_planes.append(planes_data[i])
-                            
-                            if len(valid_planes) == 0:
-                                valid_planes.append(planes_data[0]) # Fallback to first plane if mask is empty
-                                
-                            valid_tensor = torch.stack(valid_planes)
-                            num_to_take = min(self.num_symmetry_planes, valid_tensor.shape[0])
-                            plane_tensor = normalize_plane(valid_tensor[:num_to_take].float())
-                            
-                            # Pad with absolute zeros to teach the network that the plane is OFF
-                            if num_to_take < self.num_symmetry_planes:
-                                padding = torch.zeros((self.num_symmetry_planes - num_to_take, 4), dtype=plane_tensor.dtype, device=plane_tensor.device)
-                                plane_tensor = torch.cat([plane_tensor, padding], dim=0)
+                            # Keep active planes in their original slots, and pad inactive ones with [0.0, 0.0, 0.0, 0.0]
+                            # to align with self.num_symmetry_planes and the symmetry_plane_mask!
+                            plane_list = []
+                            for i in range(self.num_symmetry_planes):
+                                if i < planes_data.shape[0] and ((c >> i) & 1):
+                                    plane_list.append(normalize_plane(planes_data[i].float()))
+                                else:
+                                    plane_list.append(torch.zeros(4, dtype=points_tensor.dtype, device=points_tensor.device))
+                            plane_tensor = torch.stack(plane_list)
             if plane_tensor is None and self.symmetry_plane_cache_required:
                 raise KeyError(f"Missing symmetry plane label for {cache_key}")
             if plane_tensor is None:

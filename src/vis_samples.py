@@ -57,6 +57,8 @@ def _draw_plane(ax, plane, color="#2ec4b6"):
         for i in range(plane.shape[0]):
             _draw_plane(ax, plane[i], color=color)
         return
+    if float(np.linalg.norm(plane[:3])) < 1e-5:
+        return
     plane_x, plane_y, plane_z = _plane_patch_points(plane)
     ax.plot_surface(plane_x, plane_z, plane_y, color=color, alpha=0.18, linewidth=0, shade=False)
 

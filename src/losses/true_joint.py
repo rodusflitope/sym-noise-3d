@@ -301,9 +301,23 @@ class TrueJointSymmetryPlaneLoss:
 
             if self.lambda_plane_consistency > 0.0:
                 plane_target = normalize_active_planes(plane0, threshold=self.inactive_plane_norm_threshold)
-                normal_cos = F.cosine_similarity(plane_x0_pred[..., :3], plane_target[..., :3], dim=-1)
-                loss_plane_normal = (1.0 - normal_cos).mean()
-                loss_plane_offset = F.smooth_l1_loss(plane_x0_pred[..., 3], plane_target[..., 3])
+                # Compute active plane mask (batch_size, num_planes)
+                active_mask = (plane_target[..., :3].norm(dim=-1) > self.inactive_plane_norm_threshold).float()
+                
+                # Replace inactive slots with dummy non-zero normals to avoid NaN gradients in F.cosine_similarity
+                dummy_normal = torch.tensor([1.0, 0.0, 0.0], dtype=plane_target.dtype, device=plane_target.device).view(1, 1, 3)
+                plane_target_safe = torch.where(active_mask.unsqueeze(-1) > 0.5, plane_target[..., :3], dummy_normal)
+                plane_pred_safe = torch.where(active_mask.unsqueeze(-1) > 0.5, plane_x0_pred[..., :3], dummy_normal)
+                
+                normal_cos = F.cosine_similarity(plane_pred_safe, plane_target_safe, dim=-1)
+                loss_plane_normal_raw = 1.0 - normal_cos
+                loss_plane_normal_masked = loss_plane_normal_raw * active_mask
+                loss_plane_normal = loss_plane_normal_masked.sum() / active_mask.sum().clamp(min=1.0)
+                
+                loss_plane_offset_raw = F.smooth_l1_loss(plane_x0_pred[..., 3], plane_target[..., 3], reduction="none")
+                loss_plane_offset_masked = loss_plane_offset_raw * active_mask
+                loss_plane_offset = loss_plane_offset_masked.sum() / active_mask.sum().clamp(min=1.0)
+                
                 loss_plane_consistency = (self.plane_normal_weight * loss_plane_normal) + (self.plane_offset_weight * loss_plane_offset)
 
             if self.lambda_boundary > 0.0:

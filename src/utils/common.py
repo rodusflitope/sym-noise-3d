@@ -1,4 +1,5 @@
 import os, random, pathlib, yaml, torch
+from datetime import datetime
 import numpy as np
 
 def load_cfg(path: str):
@@ -16,6 +17,14 @@ def get_device(pref: str = "auto") -> torch.device:
     if pref == "cuda": return torch.device("cuda:0")
     if pref == "cpu":  return torch.device("cpu")
     return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+def get_date_tag(now: datetime | None = None) -> str:
+    dt = now or datetime.now()
+    return dt.strftime("%Y-%m-%d")
+
+def resolve_dated_root(root: str | pathlib.Path, date_tag: str | None = None) -> pathlib.Path:
+    tag = date_tag or get_date_tag()
+    return pathlib.Path(root) / tag
 
 
 def kl_coeff(step: int, total_step: float, constant_step: float, min_kl_coeff: float, max_kl_coeff: float) -> float:

@@ -7,7 +7,7 @@ import pathlib
 import torch
 from typing import Optional
 
-from src.utils.common import load_cfg, get_device, set_seed
+from src.utils.common import load_cfg, get_device, set_seed, resolve_dated_root
 from src.models import (
     build_model,
     PointAutoencoder,
@@ -143,7 +143,7 @@ def _eval_out_path(
     use_latent: bool,
 ) -> pathlib.Path:
     repo_root = _get_repo_root()
-    evals_root = repo_root / "evals"
+    evals_root = resolve_dated_root(repo_root / "evals")
     run_name = pathlib.Path(ckpt_path).parent.name
     ckpt_stem = pathlib.Path(ckpt_path).stem
 

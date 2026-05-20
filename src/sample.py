@@ -1,7 +1,7 @@
 import argparse, torch, pathlib, numpy as np
 import os
 from src.data import build_datasets_from_config
-from src.utils.common import load_cfg, get_device, set_seed
+from src.utils.common import load_cfg, get_device, set_seed, resolve_dated_root
 from src.models import (
     build_model,
     PointAutoencoder,
@@ -128,7 +128,7 @@ def parse_args():
     p = ap.ArgumentParser(description="Baseline Diffusion - Sample")
     p.add_argument("--cfg", type=str, default="cfgs/default.yaml")
     p.add_argument("--ckpt", type=str, default=None,
-                   help="Ruta al checkpoint .pt (si no, usa runs/<exp_name>/last.pt)")
+                   help="Ruta al checkpoint .pt (si no, usa runs/<YYYY-MM-DD>/<exp_name>/last.pt)")
     p.add_argument("--ae_ckpt", type=str, default=None,
                    help="Checkpoint del autoencoder para modo latente (opcional: usa AE_CHECKPOINT si no se pasa)")
     p.add_argument("--symmetry_class", type=int, default=None)
@@ -252,7 +252,8 @@ def main():
     
     ckpt = args.ckpt
     if ckpt is None:
-        ckpt = str(pathlib.Path(temp_cfg["train"]["out_dir"]) / temp_cfg["exp_name"] / "last.pt")
+        run_root = resolve_dated_root(temp_cfg["train"]["out_dir"])
+        ckpt = str(run_root / temp_cfg["exp_name"] / "last.pt")
 
     p = pathlib.Path(ckpt)
     if p.is_dir():
@@ -507,7 +508,8 @@ def main():
         planes_np = None
 
     run_name = pathlib.Path(ckpt).parent.name
-    save_dir = pathlib.Path(cfg["sampler"]["save_dir"]) / run_name
+    save_root = resolve_dated_root(cfg["sampler"]["save_dir"])
+    save_dir = save_root / run_name
     save_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"[sample] Saving samples to: {save_dir}")

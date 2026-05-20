@@ -21,7 +21,7 @@ from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPr
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
 from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_config
-from src.utils.common import load_cfg, set_seed, get_device
+from src.utils.common import load_cfg, set_seed, get_device, resolve_dated_root
 from src.utils.lr import build_optimizer_and_scheduler
 from src.utils.ema import build_ema_model
 from src.utils.symmetry_planes import gather_points, normalize_plane, reflect_points, zero_inactive_planes
@@ -385,8 +385,10 @@ def main() -> None:
     print(f"[train] device = {device}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_name = f"{cfg['exp_name']}_{timestamp}"
+    exp_name = str(cfg["exp_name"])
+    run_root = resolve_dated_root(cfg["train"]["out_dir"])
     print(f"[train] experiment name = {exp_name}")
+    print(f"[train] output dir = {run_root / exp_name}")
 
     use_latent = cfg.get("use_latent_diffusion", False)
     autoencoder = None
@@ -429,7 +431,7 @@ def main() -> None:
     ds_val = datasets["val"]
     splits = datasets["indices"]
 
-    split_path = pathlib.Path(cfg["train"]["out_dir"]) / exp_name / "splits.json"
+    split_path = run_root / exp_name / "splits.json"
     split_path.parent.mkdir(parents=True, exist_ok=True)
     with open(split_path, "w", encoding="utf-8") as f:
         json.dump(splits, f)
@@ -504,7 +506,7 @@ def main() -> None:
         validate_joint_configuration(cfg, context="train")
     joint_debug_cfg = _joint_debug_cfg(cfg)
     debug_batch = None
-    debug_history_path = pathlib.Path(cfg["train"]["out_dir"]) / exp_name / "conditional_plane_debug.jsonl"
+    debug_history_path = run_root / exp_name / "conditional_plane_debug.jsonl"
     if use_joint_sym_plane and joint_debug_cfg["enabled"]:
         if not infer_plane_mode_enabled(cfg):
             joint_debug_cfg["enabled"] = False
@@ -1097,9 +1099,9 @@ def main() -> None:
         ema_state = ema.module.state_dict() if ema is not None else None
         
         if epoch % 10 == 0:
-            save_ckpt(model, cfg["train"]["out_dir"], exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata, ema_state=ema_state)
+            save_ckpt(model, run_root, exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata, ema_state=ema_state)
             
-        save_ckpt(model, cfg["train"]["out_dir"], exp_name, "last.pt", metadata=ckpt_metadata, ema_state=ema_state)
+        save_ckpt(model, run_root, exp_name, "last.pt", metadata=ckpt_metadata, ema_state=ema_state)
 
         sel = val_loss if val_loss is not None else avg_epoch_loss
         if sel < best_loss:
@@ -1107,11 +1109,11 @@ def main() -> None:
             training_history["best_epoch"] = epoch
             training_history["best_loss"] = best_loss
             ckpt_path = save_ckpt(
-                model, cfg["train"]["out_dir"], exp_name, "best.pt", metadata=ckpt_metadata, ema_state=ema_state
+                model, run_root, exp_name, "best.pt", metadata=ckpt_metadata, ema_state=ema_state
             )
             print(f"Mejor modelo guardado en: {ckpt_path} (loss={best_loss:.6f})")
 
-        save_training_history(cfg["train"]["out_dir"], exp_name, training_history)
+        save_training_history(run_root, exp_name, training_history)
 
         if use_joint_sym_plane and joint_debug_cfg["enabled"] and (epoch % max(1, joint_debug_cfg["print_every"]) == 0):
             model_to_debug = ema.module if ema is not None else model
@@ -1137,7 +1139,7 @@ def main() -> None:
 
     total_time = time.time() - train_start_time
     training_history["total_time"] = total_time
-    save_training_history(cfg["train"]["out_dir"], exp_name, training_history)
+    save_training_history(run_root, exp_name, training_history)
     print(
         f"\nEntrenamiento finalizado. Tiempo total: {total_time:.2f}s ({total_time / 60:.2f}min)"
     )

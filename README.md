@@ -56,7 +56,7 @@ python src/train_autoencoder.py --cfg cfgs/latent_diffusion.yaml
 ```
 
 Outputs:
-- Checkpoints under `runs/ae_<exp_name>_<timestamp>/` (e.g. `best.pt`, `last.pt`, `epoch_XXX.pt`).
+- Checkpoints under `runs/YYYY-MM-DD/ae_<exp_name>/` (e.g. `best.pt`, `last.pt`, `epoch_XXX.pt`).
 - `splits.json` with the train/val/test indices used.
 
 You will need the path to `best.pt` (or another AE checkpoint) for latent diffusion training.
@@ -72,18 +72,18 @@ Recommended command (explicit AE checkpoint):
 
 ```pwsh
 & .venv/Scripts/Activate.ps1
-python src/train.py --cfg cfgs/latent_diffusion.yaml --ae_ckpt runs/ae_latent-diffusion_YYYYMMDD_HHMMSS/best.pt
+python src/train.py --cfg cfgs/latent_diffusion.yaml --ae_ckpt runs/YYYY-MM-DD/ae_latent-diffusion/best.pt
 ```
 
 Alternatively, set the environment variable `AE_CHECKPOINT` and omit `--ae_ckpt`:
 
 ```pwsh
-$env:AE_CHECKPOINT = "C:/Dev/sym-noise-3d/runs/ae_latent-diffusion_YYYYMMDD_HHMMSS/best.pt"
+$env:AE_CHECKPOINT = "C:/Dev/sym-noise-3d/runs/YYYY-MM-DD/ae_latent-diffusion/best.pt"
 python src/train.py --cfg cfgs/latent_diffusion.yaml
 ```
 
 Outputs:
-- Diffusion checkpoints under `runs/<exp_name>_<timestamp>/`.
+- Diffusion checkpoints under `runs/YYYY-MM-DD/<exp_name>/`.
 - Training history JSON (losses per epoch, best epoch, etc.).
 
 ## 4. Diffusion training in point space (baseline)
@@ -108,8 +108,10 @@ Example (point-space or latent-space, depending on config):
 
 ```pwsh
 & .venv/Scripts/Activate.ps1
-python src/sample.py --cfg cfgs/pointnet.yaml --ckpt runs/pointnet-baseline_YYYYMMDD_HHMMSS/best.pt
+python src/sample.py --cfg cfgs/pointnet.yaml --ckpt runs/YYYY-MM-DD/pointnet-baseline/best.pt
 ```
+
+Samples are saved under `samples/YYYY-MM-DD/<run_name>/`.
 
 Key options (set in the YAML under `sampler`):
 - `name`: `ddpm` or `ddim`.
@@ -126,15 +128,17 @@ Point-space example:
 
 ```pwsh
 & .venv/Scripts/Activate.ps1
-python src/eval.py --cfg cfgs/pointnet.yaml --ckpt runs/pointnet-baseline_YYYYMMDD_HHMMSS/best.pt --metric cd
+python src/eval.py --cfg cfgs/pointnet.yaml --ckpt runs/YYYY-MM-DD/pointnet-baseline/best.pt --metric cd
 ```
 
 Latent diffusion example (requires both AE and diffusion checkpoints):
 
 ```pwsh
 & .venv/Scripts/Activate.ps1
-python src/eval.py --cfg cfgs/latent_diffusion.yaml --ckpt runs/latent-diffusion_YYYYMMDD_HHMMSS/best.pt --metric cd --ae_ckpt runs/ae_latent-diffusion_YYYYMMDD_HHMMSS/best.pt
+python src/eval.py --cfg cfgs/latent_diffusion.yaml --ckpt runs/YYYY-MM-DD/latent-diffusion/best.pt --metric cd --ae_ckpt runs/YYYY-MM-DD/ae_latent-diffusion/best.pt
 ```
+
+Eval outputs are saved under `evals/YYYY-MM-DD/<run_name>/`.
 
 ## 7. Quick pipeline tests
 
@@ -148,7 +152,7 @@ python tests/test_03_model_forward.py --cfg cfgs/pointnet.yaml
 python tests/test_04_denoising.py --cfg cfgs/pointnet.yaml
 
 # Autoencoder reconstruction test (needs trained AE)
-python tests/test_05_autoencoder_reconstruction.py --cfg cfgs/latent_diffusion.yaml --ckpt runs/ae_latent-diffusion_YYYYMMDD_HHMMSS/best.pt
+python tests/test_05_autoencoder_reconstruction.py --cfg cfgs/latent_diffusion.yaml --ckpt runs/YYYY-MM-DD/ae_latent-diffusion/best.pt
 ```
 
 These tests write visualizations to `tests/outputs/` for manual inspection.

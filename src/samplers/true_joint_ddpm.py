@@ -38,6 +38,7 @@ class TrueJointSymmetricDDPM_Sampler:
         plane_renorm_every = max(1, int(joint_cfg.get("plane_renorm_every", 50)))
         use_presence_for_reflection = bool(joint_cfg.get("use_presence_logits_for_reflection", joint_cfg.get("use_presence_logits", False)))
         presence_threshold = float(joint_cfg.get("presence_threshold", 0.5))
+        prune_inactive_planes_on_output = bool(joint_cfg.get("prune_inactive_planes_on_output", True))
 
         is_half = (geometry_mode == "half")
         N_gen = (num_points // 2) if is_half else num_points
@@ -132,6 +133,17 @@ class TrueJointSymmetricDDPM_Sampler:
         x0 = x_t.clamp(-2, 2)
         plane_final = plane_t
         presence_probs_final = torch.sigmoid(plane_presence_logits_last) if plane_presence_logits_last is not None else None
+        if prune_inactive_planes_on_output:
+            if plane_final.dim() == 2:
+                active_mask = torch.norm(plane_final[:, :3], dim=-1) >= reflection_plane_norm_threshold
+                if use_presence_for_reflection and presence_probs_final is not None and presence_probs_final.dim() == 2:
+                    active_mask = active_mask & (presence_probs_final[:, 0] >= presence_threshold)
+                plane_final = torch.where(active_mask.unsqueeze(-1), plane_final, torch.zeros_like(plane_final))
+            else:
+                active_mask = torch.norm(plane_final[..., :3], dim=-1) >= reflection_plane_norm_threshold
+                if use_presence_for_reflection and presence_probs_final is not None and presence_probs_final.dim() == 2:
+                    active_mask = active_mask & (presence_probs_final >= presence_threshold)
+                plane_final = torch.where(active_mask.unsqueeze(-1), plane_final, torch.zeros_like(plane_final))
 
         return_fundamental_only = getattr(self, 'return_fundamental_only', False)
 
@@ -196,6 +208,7 @@ class TrueJointSymmetricDDPM_Sampler:
         geometry_mode = str(joint_cfg.get("geometry_mode", cfg.get("model", {}).get("joint_geometry_mode", "half"))).lower()
         inactive_plane_norm_threshold = float(joint_cfg.get("inactive_plane_norm_threshold", 0.15))
         reflection_plane_norm_threshold = float(joint_cfg.get("reflection_plane_norm_threshold", 0.5))
+        prune_inactive_planes_on_output = bool(joint_cfg.get("prune_inactive_planes_on_output", True))
 
         is_half = (geometry_mode == "half")
         N_gen = (num_points // 2) if is_half else num_points
@@ -210,6 +223,10 @@ class TrueJointSymmetricDDPM_Sampler:
             plane_t = torch.randn_like(target_planes)
             
         plane_t[..., 3] = 0.0
+        
+        # Zero out inactive slots right from the start!
+        active_mask = (target_planes[..., :3].norm(dim=-1) > 1e-5).unsqueeze(-1)
+        plane_t = plane_t * active_mask
 
         for t in tqdm(reversed(range(self.T)), desc="Fixed Plane Sampling", total=self.T):
             t_batch = torch.full((num_samples,), t, dtype=torch.long, device=device)
@@ -245,9 +262,16 @@ class TrueJointSymmetricDDPM_Sampler:
                 plane_t = target_planes
                 
             plane_t[..., 3] = 0.0
+            plane_t = plane_t * active_mask
 
         x0 = x_t.clamp(-2, 2)
         plane_final = target_planes
+        if prune_inactive_planes_on_output:
+            if plane_final.dim() == 2:
+                active_mask = torch.norm(plane_final[:, :3], dim=-1) >= reflection_plane_norm_threshold
+            else:
+                active_mask = torch.norm(plane_final[..., :3], dim=-1) >= reflection_plane_norm_threshold
+            plane_final = torch.where(active_mask.unsqueeze(-1), plane_final, torch.zeros_like(plane_final))
         
         return_fundamental_only = getattr(self, 'return_fundamental_only', False)
         

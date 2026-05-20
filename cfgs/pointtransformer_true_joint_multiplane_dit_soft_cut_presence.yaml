@@ -40,11 +40,12 @@ model:
 joint_symmetry:
   geometry_mode: "full"
   plane_mode: "diffusion"
-  inactive_plane_norm_threshold: 0.15
+  inactive_plane_norm_threshold: 1e-5
   renormalize_planes_during_sampling: false
   use_presence_logits: true
   use_presence_logits_for_reflection: true
   presence_threshold: 0.5
+  mask_inactive_plane_noise: true
 
 loss:
   name: "true_joint_symmetry_plane_loss"

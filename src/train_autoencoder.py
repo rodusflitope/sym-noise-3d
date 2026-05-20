@@ -18,7 +18,7 @@ except Exception:
 from src.data import build_datasets_from_config
 from src.metrics import chamfer_distance, earth_movers_distance, reflection_symmetry_distance
 from src.models import LionAutoencoder, PointAutoencoder
-from src.utils.common import load_cfg, set_seed, get_device, kl_coeff
+from src.utils.common import load_cfg, set_seed, get_device, kl_coeff, resolve_dated_root
 from src.utils.lr import build_optimizer_and_scheduler
 from src.utils.checkpoint import save_ckpt, save_training_history
 
@@ -212,8 +212,9 @@ def main() -> None:
         )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_name = f"ae_{cfg['exp_name']}_{timestamp}"
-    out_dir = pathlib.Path(cfg["train"]["out_dir"]) / exp_name
+    exp_name = f"ae_{cfg['exp_name']}"
+    run_root = resolve_dated_root(cfg["train"]["out_dir"])
+    out_dir = run_root / exp_name
     out_dir.mkdir(parents=True, exist_ok=True)
     
     split_path = out_dir / "splits.json"
@@ -559,7 +560,7 @@ def main() -> None:
         if epoch % 10 == 0:
             save_ckpt(autoencoder, cfg["train"]["out_dir"], exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata)
             
-        save_ckpt(autoencoder, cfg["train"]["out_dir"], exp_name, "last.pt", metadata=ckpt_metadata)
+        save_ckpt(autoencoder, run_root, exp_name, "last.pt", metadata=ckpt_metadata)
 
         sel = val_loss if val_loss is not None else avg_loss
         if sel < best_loss:
@@ -568,7 +569,7 @@ def main() -> None:
             training_history["best_loss"] = best_loss
             ckpt_path = save_ckpt(
                 autoencoder,
-                cfg["train"]["out_dir"],
+                run_root,
                 exp_name,
                 "best.pt",
                 metadata=ckpt_metadata,
@@ -596,7 +597,7 @@ def main() -> None:
             "kl_weight": float(last_kl_weight),
         }
         training_history["epochs"].append(epoch_metadata)
-        save_training_history(cfg["train"]["out_dir"], exp_name, training_history)
+        save_training_history(run_root, exp_name, training_history)
         print(
             f"[ae] epoch {epoch} avg_loss={avg_loss:.6f} avg_recon={avg_recon:.6f} "
             + (f"| val_loss(recon)={val_loss:.6f}" if val_loss is not None else "")
@@ -609,7 +610,7 @@ def main() -> None:
         
     total_time = None
     training_history["total_time"] = total_time
-    save_training_history(cfg["train"]["out_dir"], exp_name, training_history)
+    save_training_history(run_root, exp_name, training_history)
 
 
 if __name__ == "__main__":
