@@ -45,7 +45,7 @@ joint_symmetry:
   use_presence_logits: true
   use_presence_logits_for_reflection: true
   presence_threshold: 0.5
-  mask_inactive_plane_noise: true
+  mask_inactive_plane_noise: false
 
 loss:
   name: "true_joint_symmetry_plane_loss"
@@ -59,7 +59,7 @@ loss:
   weighting: "none"
   metric: "cd"
   plane_matching: "none"
-  mask_plane_loss_by_presence: true
+  mask_plane_loss_by_presence: false
   lambda_plane_presence: 1.0
   presence_pos_weight: 2.0
 

@@ -54,12 +54,16 @@ class PointTransformerTrueJointDiT(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, 3)
         )
+        nn.init.zeros_(self.to_out[-1].weight)
+        nn.init.zeros_(self.to_out[-1].bias)
 
         self.plane_out = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, 3)
         )
+        nn.init.zeros_(self.plane_out[-1].weight)
+        nn.init.zeros_(self.plane_out[-1].bias)
 
     def forward(self, x_t: torch.Tensor, plane_t: torch.Tensor, t: torch.LongTensor, **kwargs):
         B, N, _ = x_t.shape
@@ -83,7 +87,9 @@ class PointTransformerTrueJointDiT(nn.Module):
         eps_points = self.to_out(feats)
         
         pooled_feat = feats.mean(dim=1)
-        eps_normal = self.plane_out(pooled_feat)
+        # Add skip connection from c so the network can easily predict eps_normals 
+        # from the plane_t conditioning without being overwhelmed by x_t variance.
+        eps_normal = self.plane_out(pooled_feat + c)
         eps_offset = torch.zeros(B, 1, device=eps_normal.device)
         eps_plane = torch.cat([eps_normal, eps_offset], dim=1)
 

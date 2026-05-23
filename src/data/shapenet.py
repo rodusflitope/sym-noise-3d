@@ -110,11 +110,13 @@ class ShapeNetDataset(Dataset):
         soft_cut: bool = False,
         soft_cut_margin: float = 0.05,
         symmetry_dropout_prob: float = 0.0,
+        legacy_pack_planes: bool = False,
     ) -> None:
         super().__init__()
         self.root_dir = Path(root_dir)
         self.num_points = num_points
         self.augment = augment
+        self.legacy_pack_planes = legacy_pack_planes
         self.symmetry_dropout_prob = symmetry_dropout_prob
         self.rotate_prob = rotate_prob
         self.flip_prob = flip_prob
@@ -414,11 +416,18 @@ class ShapeNetDataset(Dataset):
                             # Keep active planes in their original slots, and pad inactive ones with [0.0, 0.0, 0.0, 0.0]
                             # to align with self.num_symmetry_planes and the symmetry_plane_mask!
                             plane_list = []
-                            for i in range(self.num_symmetry_planes):
-                                if i < planes_data.shape[0] and ((c >> i) & 1):
-                                    plane_list.append(normalize_plane(planes_data[i].float()))
-                                else:
+                            if self.legacy_pack_planes:
+                                for i in range(self.num_symmetry_planes):
+                                    if i < planes_data.shape[0] and ((c >> i) & 1):
+                                        plane_list.append(normalize_plane(planes_data[i].float()))
+                                while len(plane_list) < self.num_symmetry_planes:
                                     plane_list.append(torch.zeros(4, dtype=points_tensor.dtype, device=points_tensor.device))
+                            else:
+                                for i in range(self.num_symmetry_planes):
+                                    if i < planes_data.shape[0] and ((c >> i) & 1):
+                                        plane_list.append(normalize_plane(planes_data[i].float()))
+                                    else:
+                                        plane_list.append(torch.zeros(4, dtype=points_tensor.dtype, device=points_tensor.device))
                             plane_tensor = torch.stack(plane_list)
             if plane_tensor is None and self.symmetry_plane_cache_required:
                 raise KeyError(f"Missing symmetry plane label for {cache_key}")
@@ -474,6 +483,7 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         soft_cut=bool(data_cfg.get("soft_cut", False)),
         soft_cut_margin=float(data_cfg.get("soft_cut_margin", 0.05)),
         symmetry_dropout_prob=0.0,
+        legacy_pack_planes=bool(data_cfg.get("legacy_pack_planes", False)),
     )
 
     n = len(base_ds)
@@ -518,6 +528,7 @@ def build_datasets_from_config(cfg: dict[str, Any]) -> dict[str, Subset | list[i
         soft_cut=bool(data_cfg.get("soft_cut", False)),
         soft_cut_margin=float(data_cfg.get("soft_cut_margin", 0.05)),
         symmetry_dropout_prob=float(data_cfg.get("symmetry_dropout_prob", 0.0)),
+        legacy_pack_planes=bool(data_cfg.get("legacy_pack_planes", False)),
     )
 
     eval_ds_full = base_ds

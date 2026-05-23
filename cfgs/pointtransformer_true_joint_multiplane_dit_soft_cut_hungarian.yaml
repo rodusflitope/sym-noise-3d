@@ -43,7 +43,7 @@ joint_symmetry:
   inactive_plane_norm_threshold: 1e-5
   renormalize_planes_during_sampling: false
   use_presence_logits: false
-  mask_inactive_plane_noise: true
+  mask_inactive_plane_noise: false
 
 loss:
   name: "true_joint_symmetry_plane_loss"

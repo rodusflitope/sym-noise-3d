@@ -21,6 +21,9 @@ def build_loss(cfg):
     elif name in {"huber", "huber_loss"}:
         delta = loss_cfg.get("delta", 0.1)
         base_loss_fn = lambda pred, target, **kwargs: F.huber_loss(pred, target, delta=delta, reduction='none')
+    elif name == "true_joint_symmetry_plane_loss_legacy":
+        from .true_joint_legacy import build_true_joint_symmetry_plane_loss_legacy
+        return build_true_joint_symmetry_plane_loss_legacy(cfg)
     else:
         raise ValueError(f"Unknown loss function: {name}")
 

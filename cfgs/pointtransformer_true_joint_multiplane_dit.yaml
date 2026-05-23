@@ -50,10 +50,11 @@ loss:
   recon_cd_sigma: 0.15
   weighting: "none"
   metric: "cd"
+  mask_plane_loss_by_presence: true
 
 train:
   batch_size: 16
-  epochs: 400
+  epochs: 100
   log_every: 50
   num_points: 2048
   num_workers: 2

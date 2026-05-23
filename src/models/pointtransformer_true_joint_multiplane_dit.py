@@ -61,12 +61,17 @@ class PointTransformerTrueJointMultiplaneDiT(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, 3)
         )
+        nn.init.zeros_(self.to_out[-1].weight)
+        nn.init.zeros_(self.to_out[-1].bias)
 
         self.plane_out = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, 3 * num_planes)
         )
+        nn.init.zeros_(self.plane_out[-1].weight)
+        nn.init.zeros_(self.plane_out[-1].bias)
+
         if self.use_presence_logits:
             self.presence_head = nn.Linear(hidden_dim, num_planes)
         else:
@@ -105,7 +110,9 @@ class PointTransformerTrueJointMultiplaneDiT(nn.Module):
         eps_points = self.to_out(feats)
         
         pooled_feat = feats.mean(dim=1)
-        eps_normals = self.plane_out(pooled_feat).view(B, self.num_planes, 3)
+        # Add skip connection from c so the network can easily predict eps_normals 
+        # from the plane_t conditioning without being overwhelmed by x_t variance.
+        eps_normals = self.plane_out(pooled_feat + c).view(B, self.num_planes, 3)
         
         eps_offsets = torch.zeros(B, self.num_planes, 1, device=eps_normals.device)
         eps_plane = torch.cat([eps_normals, eps_offsets], dim=-1) # (B, num_planes, 4)

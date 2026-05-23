@@ -6,25 +6,47 @@ import math
 import os
 import pathlib
 import time
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader
 
-from contextlib import nullcontext
-
 from src.data import build_datasets_from_config
-from src.losses import build_joint_symmetry_plane_loss, build_loss, build_sym_learned_plane_loss, build_true_joint_symmetry_plane_loss
+from src.losses import (
+    build_joint_symmetry_plane_loss,
+    build_loss,
+    build_sym_learned_plane_loss,
+    build_true_joint_symmetry_plane_loss,
+)
 from src.metrics.metrics import chamfer_distance, earth_movers_distance
-from src.models import build_model, PointAutoencoder, LionAutoencoder, LionTwoPriorsDDM, PVCNNSymLearnedPlane, PTSymLearnedPlane, PVCNNJointSymPlane, PTJointSymPlane, PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT
+from src.models import (
+    LionAutoencoder,
+    LionTwoPriorsDDM,
+    PointAutoencoder,
+    PointTransformerTrueJointDiT,
+    PointTransformerTrueJointMultiplaneDiT,
+    PointTransformerTrueJointMultiplaneDiTLegacy,
+    PointTransformerTrueJointMultiplaneRelativeDiT,
+    PTJointSymPlane,
+    PTSymLearnedPlane,
+    PVCNNJointSymPlane,
+    PVCNNSymLearnedPlane,
+    PVCNNTrueJoint,
+    build_model,
+)
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
-from src.utils.checkpoint import save_ckpt, save_training_history, load_ckpt_config
-from src.utils.common import load_cfg, set_seed, get_device, resolve_dated_root
-from src.utils.lr import build_optimizer_and_scheduler
+from src.utils.checkpoint import load_ckpt_config, save_ckpt, save_training_history
+from src.utils.common import (
+    get_device,
+    get_run_id,
+    load_cfg,
+    resolve_dated_root,
+    set_seed,
+)
 from src.utils.ema import build_ema_model
-from src.utils.symmetry_planes import gather_points, normalize_plane, reflect_points, zero_inactive_planes
 from src.utils.joint_modes import (
     get_joint_mode_config,
     get_selection_reference_mode,
@@ -32,6 +54,13 @@ from src.utils.joint_modes import (
     resolve_plane_target,
     select_training_plane,
     validate_joint_configuration,
+)
+from src.utils.lr import build_optimizer_and_scheduler
+from src.utils.symmetry_planes import (
+    gather_points,
+    normalize_plane,
+    reflect_points,
+    zero_inactive_planes,
 )
 
 
@@ -50,7 +79,9 @@ def _format_plane(plane: torch.Tensor) -> str:
     return "[{:.4f}, {:.4f}, {:.4f}, {:.4f}]".format(*values)
 
 
-def _prepare_debug_batch(ds, device: torch.device, batch_size: int) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+def _prepare_debug_batch(
+    ds, device: torch.device, batch_size: int
+) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
     if ds is None:
         return None
     items = []
@@ -70,7 +101,11 @@ def _prepare_debug_batch(ds, device: torch.device, batch_size: int) -> Optional[
 
 def _joint_debug_cfg(cfg: dict) -> dict:
     debug_cfg = cfg.get("debug", {}) or {}
-    plane_cfg = (debug_cfg.get("conditional_plane_monitor", {}) or debug_cfg.get("joint_plane_monitor", {}) or {})
+    plane_cfg = (
+        debug_cfg.get("conditional_plane_monitor", {})
+        or debug_cfg.get("joint_plane_monitor", {})
+        or {}
+    )
     return {
         "enabled": bool(plane_cfg.get("enabled", False)),
         "source": str(plane_cfg.get("source", "val")).lower(),
@@ -110,9 +145,15 @@ def _resolve_debug_timesteps(spec, T: int) -> list[int]:
     return out
 
 
-def _batch_jaccard(indices_a: torch.Tensor, indices_b: torch.Tensor, num_points: int) -> torch.Tensor:
-    mask_a = torch.zeros(indices_a.shape[0], num_points, dtype=torch.bool, device=indices_a.device)
-    mask_b = torch.zeros(indices_b.shape[0], num_points, dtype=torch.bool, device=indices_b.device)
+def _batch_jaccard(
+    indices_a: torch.Tensor, indices_b: torch.Tensor, num_points: int
+) -> torch.Tensor:
+    mask_a = torch.zeros(
+        indices_a.shape[0], num_points, dtype=torch.bool, device=indices_a.device
+    )
+    mask_b = torch.zeros(
+        indices_b.shape[0], num_points, dtype=torch.bool, device=indices_b.device
+    )
     mask_a.scatter_(1, indices_a, True)
     mask_b.scatter_(1, indices_b, True)
     intersection = (mask_a & mask_b).sum(dim=1).float()
@@ -120,7 +161,13 @@ def _batch_jaccard(indices_a: torch.Tensor, indices_b: torch.Tensor, num_points:
     return intersection / union
 
 
-def _build_noisy_state(x0: torch.Tensor, plane0: torch.Tensor, eps_points: torch.Tensor, eps_plane: torch.Tensor, alpha_bar_t: torch.Tensor):
+def _build_noisy_state(
+    x0: torch.Tensor,
+    plane0: torch.Tensor,
+    eps_points: torch.Tensor,
+    eps_plane: torch.Tensor,
+    alpha_bar_t: torch.Tensor,
+):
     sqrt_ab_points = torch.sqrt(alpha_bar_t).view(1, 1, 1)
     sqrt_1m_points = torch.sqrt((1.0 - alpha_bar_t).clamp(min=1e-8)).view(1, 1, 1)
     x_t = (sqrt_ab_points * x0) + (sqrt_1m_points * eps_points)
@@ -153,16 +200,22 @@ def run_joint_plane_debug_snapshot(
 
     with torch.no_grad():
         for timestep in timesteps:
-            t = torch.full((batch_size,), int(timestep), dtype=torch.long, device=x0.device)
+            t = torch.full(
+                (batch_size,), int(timestep), dtype=torch.long, device=x0.device
+            )
             alpha_t = alpha_bars[t]
-            x_t, plane_t = _build_noisy_state(x0, plane0, eps_points, eps_plane, alpha_t[0])
+            x_t, plane_t = _build_noisy_state(
+                x0, plane0, eps_points, eps_plane, alpha_t[0]
+            )
             result = model(x_t, plane_t, t, alpha_t, selection_plane=None)
             plane_pred = normalize_plane(result["plane_x0_pred"])
             if first_plane_pred_0 is None:
                 first_plane_pred_0 = plane_pred[0].detach().clone()
             active_plane = normalize_plane(result.get("selection_plane", plane_pred))
 
-            cos = torch.nn.functional.cosine_similarity(plane_pred[:, :3], plane0[:, :3], dim=-1).clamp(min=-1.0, max=1.0)
+            cos = torch.nn.functional.cosine_similarity(
+                plane_pred[:, :3], plane0[:, :3], dim=-1
+            ).clamp(min=-1.0, max=1.0)
             angle_deg = torch.rad2deg(torch.acos(cos))
             offset_abs = (plane_pred[:, 3] - plane0[:, 3]).abs()
 
@@ -183,7 +236,9 @@ def run_joint_plane_debug_snapshot(
             else:
                 x_half = gather_points(x_t, indices)
             abar = alpha_t.view(batch_size, 1, 1)
-            x0_half = (x_half - torch.sqrt((1.0 - abar).clamp(min=1e-8)) * eps_half) / torch.sqrt(abar.clamp(min=1e-8))
+            x0_half = (
+                x_half - torch.sqrt((1.0 - abar).clamp(min=1e-8)) * eps_half
+            ) / torch.sqrt(abar.clamp(min=1e-8))
             if get_joint_mode_config(cfg).geometry_mode == "full":
                 x0_reconstructed = x0_half
             else:
@@ -198,10 +253,16 @@ def run_joint_plane_debug_snapshot(
 
             jaccard_mean = float("nan")
             if timestep > 0:
-                t_prev = torch.full((batch_size,), int(timestep - 1), dtype=torch.long, device=x0.device)
+                t_prev = torch.full(
+                    (batch_size,), int(timestep - 1), dtype=torch.long, device=x0.device
+                )
                 alpha_prev = alpha_bars[t_prev]
-                x_prev, plane_prev = _build_noisy_state(x0, plane0, eps_points, eps_plane, alpha_prev[0])
-                result_prev = model(x_prev, plane_prev, t_prev, alpha_prev, selection_plane=None)
+                x_prev, plane_prev = _build_noisy_state(
+                    x0, plane0, eps_points, eps_plane, alpha_prev[0]
+                )
+                result_prev = model(
+                    x_prev, plane_prev, t_prev, alpha_prev, selection_plane=None
+                )
                 jaccard = _batch_jaccard(indices, result_prev["indices"], num_points)
                 jaccard_mean = float(jaccard.mean().item())
 
@@ -221,13 +282,29 @@ def run_joint_plane_debug_snapshot(
         return None
 
     mean_cos = sum(float(item["mean_cos"]) for item in step_metrics) / len(step_metrics)
-    mean_abs_offset = sum(float(item["mean_abs_offset"]) for item in step_metrics) / len(step_metrics)
-    mean_angle_deg = sum(float(item["mean_angle_deg"]) for item in step_metrics) / len(step_metrics)
-    mean_side_imbalance = sum(float(item["mean_side_imbalance"]) for item in step_metrics) / len(step_metrics)
-    mean_recon = sum(float(item["mean_recon"]) for item in step_metrics) / len(step_metrics)
+    mean_abs_offset = sum(
+        float(item["mean_abs_offset"]) for item in step_metrics
+    ) / len(step_metrics)
+    mean_angle_deg = sum(float(item["mean_angle_deg"]) for item in step_metrics) / len(
+        step_metrics
+    )
+    mean_side_imbalance = sum(
+        float(item["mean_side_imbalance"]) for item in step_metrics
+    ) / len(step_metrics)
+    mean_recon = sum(float(item["mean_recon"]) for item in step_metrics) / len(
+        step_metrics
+    )
 
-    valid_jaccard = [float(item["mean_jaccard_t_to_t_minus_1"]) for item in step_metrics if not math.isnan(float(item["mean_jaccard_t_to_t_minus_1"]))]
-    mean_jaccard = float(sum(valid_jaccard) / len(valid_jaccard)) if valid_jaccard else float("nan")
+    valid_jaccard = [
+        float(item["mean_jaccard_t_to_t_minus_1"])
+        for item in step_metrics
+        if not math.isnan(float(item["mean_jaccard_t_to_t_minus_1"]))
+    ]
+    mean_jaccard = (
+        float(sum(valid_jaccard) / len(valid_jaccard))
+        if valid_jaccard
+        else float("nan")
+    )
 
     metrics = {
         "epoch": int(epoch),
@@ -240,10 +317,20 @@ def run_joint_plane_debug_snapshot(
         "mean_recon": float(mean_recon),
         "mean_jaccard_t_to_t_minus_1": float(mean_jaccard),
         "gt_plane_0": [float(v) for v in plane0[0].detach().cpu().tolist()],
-        "pred_plane_0": [float(v) for v in (first_plane_pred_0 if first_plane_pred_0 is not None else plane0[0]).detach().cpu().tolist()],
+        "pred_plane_0": [
+            float(v)
+            for v in (
+                first_plane_pred_0 if first_plane_pred_0 is not None else plane0[0]
+            )
+            .detach()
+            .cpu()
+            .tolist()
+        ],
         "steps": step_metrics,
     }
-    print(f"[joint-plane-debug] epoch={epoch} step={global_step} | timesteps={metrics['timesteps']}")
+    print(
+        f"[joint-plane-debug] epoch={epoch} step={global_step} | timesteps={metrics['timesteps']}"
+    )
     print(
         f"[joint-plane-debug] mean_cos={metrics['mean_cos']:.6f} | mean_angle_deg={metrics['mean_angle_deg']:.6f} "
         f"| mean_abs_offset={metrics['mean_abs_offset']:.6f} | mean_side_imbalance={metrics['mean_side_imbalance']:.6f} "
@@ -260,6 +347,7 @@ def run_joint_plane_debug_snapshot(
     if first_plane_pred_0 is not None:
         print(f"[joint-plane-debug] pred_plane_0={_format_plane(first_plane_pred_0)}")
     return metrics
+
 
 def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
     ae_cfg = cfg.get("autoencoder", {})
@@ -295,11 +383,15 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
         if ae_type in {"lion", "lion_pvcnn"}:
             ckpt_g = ckpt_ae.get("global_latent_dim", None)
             ckpt_l = ckpt_ae.get("local_latent_dim", None)
-            if ckpt_g is not None and int(ckpt_g) != int(ae_cfg.get("global_latent_dim", 128)):
+            if ckpt_g is not None and int(ckpt_g) != int(
+                ae_cfg.get("global_latent_dim", 128)
+            ):
                 raise ValueError(
                     f"AE global_latent_dim mismatch: ckpt={ckpt_g} cfg={ae_cfg.get('global_latent_dim', 128)}."
                 )
-            if ckpt_l is not None and int(ckpt_l) != int(ae_cfg.get("local_latent_dim", 16)):
+            if ckpt_l is not None and int(ckpt_l) != int(
+                ae_cfg.get("local_latent_dim", 16)
+            ):
                 raise ValueError(
                     f"AE local_latent_dim mismatch: ckpt={ckpt_l} cfg={ae_cfg.get('local_latent_dim', 16)}."
                 )
@@ -313,7 +405,10 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
             if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
                 log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
             elif isinstance(clip_cfg, dict):
-                log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
+                log_sigma_clip = (
+                    float(clip_cfg.get("min", -10.0)),
+                    float(clip_cfg.get("max", 2.0)),
+                )
         ae = LionAutoencoder(
             num_points=num_points,
             input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
@@ -327,19 +422,32 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
             log_sigma_clip=log_sigma_clip,
             skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
             pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
-            hard_symmetry_enabled=bool(((ae_cfg.get("symmetry", {}) or {}).get("hard", {}) or {}).get("enabled", False)),
+            hard_symmetry_enabled=bool(
+                ((ae_cfg.get("symmetry", {}) or {}).get("hard", {}) or {}).get(
+                    "enabled", False
+                )
+            ),
             symmetry_axis=int((ae_cfg.get("symmetry", {}) or {}).get("axis", 0)),
         ).to(device)
     elif ae_type == "point_mlp":
-        latent_dim = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
+        latent_dim = int(
+            ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256))
+        )
         ae_hidden_dim = int(ae_cfg.get("hidden_dim", 128))
-        ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim).to(device)
+        ae = PointAutoencoder(
+            num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim
+        ).to(device)
     else:
         raise ValueError(f"Unknown autoencoder.type: {ae_type}")
 
     state = torch.load(ae_ckpt, map_location=device)
     if isinstance(state, dict):
-        state_dict = state.get("model_state_dict") or state.get("state_dict") or state.get("model") or state
+        state_dict = (
+            state.get("model_state_dict")
+            or state.get("state_dict")
+            or state.get("model")
+            or state
+        )
     else:
         state_dict = state
     ae.load_state_dict(state_dict, strict=True)
@@ -352,7 +460,9 @@ def load_autoencoder(cfg, device, ae_ckpt: str | None = None):
 
 
 def sample_timesteps(batch_size: int, T: int, device: torch.device) -> torch.Tensor:
-    return torch.randint(low=0, high=T, size=(batch_size,), device=device, dtype=torch.long)
+    return torch.randint(
+        low=0, high=T, size=(batch_size,), device=device, dtype=torch.long
+    )
 
 
 def parse_args() -> ap.Namespace:
@@ -386,9 +496,11 @@ def main() -> None:
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_name = str(cfg["exp_name"])
+    run_id = get_run_id()
+    run_name = f"{exp_name}_{run_id}"
     run_root = resolve_dated_root(cfg["train"]["out_dir"])
-    print(f"[train] experiment name = {exp_name}")
-    print(f"[train] output dir = {run_root / exp_name}")
+    print(f"[train] experiment name = {run_name}")
+    print(f"[train] output dir = {run_root / run_name}")
 
     use_latent = cfg.get("use_latent_diffusion", False)
     autoencoder = None
@@ -410,10 +522,13 @@ def main() -> None:
     model = build_model(cfg).to(device)
     if args.resume:
         from src.utils.checkpoint import load_ckpt
+
         print(f"[train] Resuming/Fine-tuning from checkpoint: {args.resume}")
         model = load_ckpt(model, args.resume, map_location=device)
-        
-    print("[train] model params:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
+
+    print(
+        "[train] model params:", sum(p.numel() for p in model.parameters()) / 1e6, "M"
+    )
 
     T = cfg["diffusion"]["T"]
     betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
@@ -432,25 +547,31 @@ def main() -> None:
     ds_val = datasets["val"]
     splits = datasets["indices"]
 
-    split_path = run_root / exp_name / "splits.json"
+    split_path = run_root / run_name / "splits.json"
     split_path.parent.mkdir(parents=True, exist_ok=True)
     with open(split_path, "w", encoding="utf-8") as f:
         json.dump(splits, f)
 
     num_workers = int(cfg["train"].get("num_workers", 4))
     persistent_workers = bool(num_workers > 0)
-    
+
     use_symmetry_classes = cfg.get("data", {}).get("use_symmetry_classes", False)
-    
-    if use_symmetry_classes and hasattr(ds, "dataset") and hasattr(ds.dataset, "classes") and ds.dataset.classes is not None:
+
+    if (
+        use_symmetry_classes
+        and hasattr(ds, "dataset")
+        and hasattr(ds.dataset, "classes")
+        and ds.dataset.classes is not None
+    ):
         from src.data import HomogeneousClassBatchSampler
         from src.data.shapenet import shapenet_collate_fn
+
         subset_classes = [ds.dataset.classes[i] for i in ds.indices]
         batch_sampler = HomogeneousClassBatchSampler(
             classes=subset_classes,
             batch_size=cfg["train"]["batch_size"],
             shuffle=True,
-            drop_last=False
+            drop_last=False,
         )
         dl = DataLoader(
             ds,
@@ -462,6 +583,7 @@ def main() -> None:
         )
     else:
         from src.data.shapenet import shapenet_collate_fn
+
         dl = DataLoader(
             ds,
             batch_size=cfg["train"]["batch_size"],
@@ -475,15 +597,21 @@ def main() -> None:
 
     dl_val = None
     if ds_val is not None:
-        if use_symmetry_classes and hasattr(ds_val, "dataset") and hasattr(ds_val.dataset, "classes") and ds_val.dataset.classes is not None:
+        if (
+            use_symmetry_classes
+            and hasattr(ds_val, "dataset")
+            and hasattr(ds_val.dataset, "classes")
+            and ds_val.dataset.classes is not None
+        ):
             from src.data import HomogeneousClassBatchSampler
             from src.data.shapenet import shapenet_collate_fn
+
             subset_classes_val = [ds_val.dataset.classes[i] for i in ds_val.indices]
             batch_sampler_val = HomogeneousClassBatchSampler(
                 classes=subset_classes_val,
                 batch_size=cfg["train"]["batch_size"],
                 shuffle=False,
-                drop_last=False
+                drop_last=False,
             )
             dl_val = DataLoader(
                 ds_val,
@@ -495,6 +623,7 @@ def main() -> None:
             )
         else:
             from src.data.shapenet import shapenet_collate_fn
+
             dl_val = DataLoader(
                 ds_val,
                 batch_size=cfg["train"]["batch_size"],
@@ -507,28 +636,47 @@ def main() -> None:
             )
 
     ae_ok_types = (LionAutoencoder,)
-    use_two_priors = bool(use_latent and isinstance(model, LionTwoPriorsDDM) and isinstance(autoencoder, ae_ok_types))
+    use_two_priors = bool(
+        use_latent
+        and isinstance(model, LionTwoPriorsDDM)
+        and isinstance(autoencoder, ae_ok_types)
+    )
     use_sym_plane = isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane))
     use_joint_sym_plane = isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane))
-    use_true_joint_sym_plane = isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT))
+    use_true_joint_sym_plane = isinstance(
+        model,
+        (
+            PVCNNTrueJoint,
+            PointTransformerTrueJointDiT,
+            PointTransformerTrueJointMultiplaneDiT,
+            PointTransformerTrueJointMultiplaneRelativeDiT,
+            PointTransformerTrueJointMultiplaneDiTLegacy,
+        ),
+    )
     if use_joint_sym_plane or use_true_joint_sym_plane:
         validate_joint_configuration(cfg, context="train")
     joint_debug_cfg = _joint_debug_cfg(cfg)
     debug_batch = None
-    debug_history_path = run_root / exp_name / "conditional_plane_debug.jsonl"
+    debug_history_path = run_root / run_name / "conditional_plane_debug.jsonl"
     if use_joint_sym_plane and joint_debug_cfg["enabled"]:
         if not infer_plane_mode_enabled(cfg):
             joint_debug_cfg["enabled"] = False
-            print("[train] Joint plane debug disabled: plane_mode='conditioning' is active")
+            print(
+                "[train] Joint plane debug disabled: plane_mode='conditioning' is active"
+            )
     if use_joint_sym_plane and joint_debug_cfg["enabled"]:
-        debug_source = ds_val if joint_debug_cfg["source"] == "val" and ds_val is not None else ds
-        debug_batch = _prepare_debug_batch(debug_source, device, joint_debug_cfg["batch_size"])
+        debug_source = (
+            ds_val if joint_debug_cfg["source"] == "val" and ds_val is not None else ds
+        )
+        debug_batch = _prepare_debug_batch(
+            debug_source, device, joint_debug_cfg["batch_size"]
+        )
         print(
             f"[train] Joint plane debug enabled: source={joint_debug_cfg['source']} "
             f"batch_size={joint_debug_cfg['batch_size']} timesteps={joint_debug_cfg['timesteps']} metric={joint_debug_cfg['metric']} "
             f"print_every={joint_debug_cfg['print_every']}"
         )
-    
+
     sym_plane_loss_fn = None
     joint_sym_plane_loss_fn = None
     true_joint_sym_plane_loss_fn = None
@@ -542,9 +690,22 @@ def main() -> None:
         true_joint_sym_plane_loss_fn = build_true_joint_symmetry_plane_loss(cfg)
         print("[train] MODE: True Joint Symmetric Plane Diffusion")
 
-    loss_fn = None if (use_two_priors or use_sym_plane or use_joint_sym_plane or use_true_joint_sym_plane) else build_loss(cfg)
-    steps_per_epoch = math.ceil(len(ds) / cfg["train"]["batch_size"]) if len(ds) > 0 else 0
-    opt, scheduler, total_steps = build_optimizer_and_scheduler(cfg, model, steps_per_epoch)
+    loss_fn = (
+        None
+        if (
+            use_two_priors
+            or use_sym_plane
+            or use_joint_sym_plane
+            or use_true_joint_sym_plane
+        )
+        else build_loss(cfg)
+    )
+    steps_per_epoch = (
+        math.ceil(len(ds) / cfg["train"]["batch_size"]) if len(ds) > 0 else 0
+    )
+    opt, scheduler, total_steps = build_optimizer_and_scheduler(
+        cfg, model, steps_per_epoch
+    )
 
     ema_cfg = cfg.get("ema", {}) or {}
     ema = None
@@ -554,7 +715,9 @@ def main() -> None:
         decay = float(ema_cfg.get("decay", ema_cfg.get("beta", 0.999)))
         warmup_steps = int(ema_cfg.get("warmup_steps", 0) or 0)
         warmup_init = float(ema_cfg.get("warmup_init", 0.0))
-        print(f"[train] EMA enabled: decay={decay} warmup_steps={warmup_steps} warmup_init={warmup_init}")
+        print(
+            f"[train] EMA enabled: decay={decay} warmup_steps={warmup_steps} warmup_init={warmup_init}"
+        )
 
     print("\nIniciando entrenamiento...")
     train_start_time = time.time()
@@ -563,20 +726,32 @@ def main() -> None:
     amp_enabled = bool(amp_cfg.get("amp", False)) and (device.type == "cuda")
     amp_dtype_name = str(amp_cfg.get("amp_dtype", "fp16")).lower()
     if amp_dtype_name not in {"fp16", "bf16"}:
-        raise ValueError(f"train.amp_dtype must be 'fp16' or 'bf16', got: {amp_dtype_name}")
+        raise ValueError(
+            f"train.amp_dtype must be 'fp16' or 'bf16', got: {amp_dtype_name}"
+        )
     amp_dtype = torch.float16 if amp_dtype_name == "fp16" else torch.bfloat16
     amp_mod = getattr(torch, "amp", None)
-    amp_grad_scaler = getattr(amp_mod, "GradScaler", None) if amp_mod is not None else None
+    amp_grad_scaler = (
+        getattr(amp_mod, "GradScaler", None) if amp_mod is not None else None
+    )
     amp_autocast = getattr(amp_mod, "autocast", None) if amp_mod is not None else None
     if amp_grad_scaler is not None and amp_autocast is not None:
-        scaler = amp_grad_scaler("cuda", enabled=bool(amp_enabled and amp_dtype == torch.float16))
+        scaler = amp_grad_scaler(
+            "cuda", enabled=bool(amp_enabled and amp_dtype == torch.float16)
+        )
         autocast_ctx = (
-            (lambda: amp_autocast("cuda", dtype=amp_dtype)) if amp_enabled else (lambda: nullcontext())
+            (lambda: amp_autocast("cuda", dtype=amp_dtype))
+            if amp_enabled
+            else (lambda: nullcontext())
         )
     else:
-        scaler = torch.cuda.amp.GradScaler(enabled=bool(amp_enabled and amp_dtype == torch.float16))
+        scaler = torch.cuda.amp.GradScaler(
+            enabled=bool(amp_enabled and amp_dtype == torch.float16)
+        )
         autocast_ctx = (
-            (lambda: torch.cuda.amp.autocast(dtype=amp_dtype)) if amp_enabled else (lambda: nullcontext())
+            (lambda: torch.cuda.amp.autocast(dtype=amp_dtype))
+            if amp_enabled
+            else (lambda: nullcontext())
         )
     if amp_enabled:
         print(f"[train] AMP enabled: dtype={amp_dtype_name}")
@@ -584,6 +759,8 @@ def main() -> None:
     training_history: dict[str, object] = {
         "config": cfg,
         "timestamp": timestamp,
+        "run_id": run_id,
+        "run_name": run_name,
         "epochs": [],
         "best_epoch": None,
         "best_loss": None,
@@ -618,7 +795,7 @@ def main() -> None:
                 loss_plane_cons = torch.tensor(0.0, device=device)
                 B = x0.shape[0]
                 t = sample_timesteps(B, T, device)
-                
+
                 with autocast_ctx():
                     if use_two_priors:
                         with torch.no_grad():
@@ -642,7 +819,12 @@ def main() -> None:
                         x_t, eps = forward.add_noise(x0, t)
                         result = model(x_t, t)
                         loss, loss_diff, loss_sym = sym_plane_loss_fn(
-                            result, eps, x_t, x0, alpha_bars[t], current_step=global_step
+                            result,
+                            eps,
+                            x_t,
+                            x0,
+                            alpha_bars[t],
+                            current_step=global_step,
                         )
                     elif use_joint_sym_plane:
                         joint_mode_cfg = get_joint_mode_config(cfg)
@@ -654,22 +836,30 @@ def main() -> None:
                             plane0=plane0,
                         )
                         if plane_target is None:
-                            raise ValueError("Joint symmetry training requires a plane target (dataset labels or fixed axis)")
+                            raise ValueError(
+                                "Joint symmetry training requires a plane target (dataset labels or fixed axis)"
+                            )
                         x_t, eps = forward.add_noise(x0, t)
                         if infer_plane_mode_enabled(cfg):
                             plane_t, eps_plane = forward.add_noise(plane_target, t)
-                            selection_plane = select_training_plane(plane_target, cfg, global_step, plane_t=plane_t)
+                            selection_plane = select_training_plane(
+                                plane_target, cfg, global_step, plane_t=plane_t
+                            )
                         else:
                             plane_t, eps_plane = None, None
                             selection_plane = plane_target
                         if joint_mode_cfg.geometry_mode == "half":
-                            ref_mode = get_selection_reference_mode(cfg, context="train")
+                            ref_mode = get_selection_reference_mode(
+                                cfg, context="train"
+                            )
                             if ref_mode == "x0":
                                 selection_reference_points = x0
                             elif ref_mode in {"xt", "x_t"}:
                                 selection_reference_points = x_t
                             else:
-                                raise ValueError("Invalid train_selection_reference_mode. Expected 'x0' or 'x_t'")
+                                raise ValueError(
+                                    "Invalid train_selection_reference_mode. Expected 'x0' or 'x_t'"
+                                )
                         else:
                             selection_reference_points = None
                         result = model(
@@ -680,15 +870,17 @@ def main() -> None:
                             selection_plane=selection_plane,
                             selection_reference_points=selection_reference_points,
                         )
-                        loss, loss_diff, loss_plane, loss_recon, loss_plane_cons = joint_sym_plane_loss_fn(
-                            result,
-                            eps,
-                            eps_plane,
-                            x_t,
-                            x0,
-                            plane_target,
-                            alpha_bars[t],
-                            current_step=global_step,
+                        loss, loss_diff, loss_plane, loss_recon, loss_plane_cons = (
+                            joint_sym_plane_loss_fn(
+                                result,
+                                eps,
+                                eps_plane,
+                                x_t,
+                                x0,
+                                plane_target,
+                                alpha_bars[t],
+                                current_step=global_step,
+                            )
                         )
                     elif use_true_joint_sym_plane:
                         joint_mode_cfg = cfg.get("joint_symmetry", {}) or {}
@@ -700,41 +892,82 @@ def main() -> None:
                             plane0=plane0,
                         )
                         if plane_target is None:
-                            raise ValueError("True Joint symmetry training requires a plane target")
-                        
-                        geo_mode = model.geometry_mode if hasattr(model, "geometry_mode") else "half"
-                        
+                            raise ValueError(
+                                "True Joint symmetry training requires a plane target"
+                            )
+
+                        geo_mode = (
+                            model.geometry_mode
+                            if hasattr(model, "geometry_mode")
+                            else "half"
+                        )
+
                         if geo_mode == "half":
                             soft_cut = bool(joint_mode_cfg.get("soft_cut", False))
-                            soft_cut_margin = float(joint_mode_cfg.get("soft_cut_margin", 0.05)) if soft_cut else 0.0
+                            soft_cut_margin = (
+                                float(joint_mode_cfg.get("soft_cut_margin", 0.05))
+                                if soft_cut
+                                else 0.0
+                            )
                             from src.utils.symmetry_planes import select_signed_half
+
                             with torch.no_grad():
-                                _, indices = select_signed_half(x0, plane_target, prefer_positive=True, margin=soft_cut_margin)
-                                x0_input = torch.gather(x0, 1, indices.unsqueeze(-1).expand(-1, -1, x0.shape[-1]))
+                                _, indices = select_signed_half(
+                                    x0,
+                                    plane_target,
+                                    prefer_positive=True,
+                                    margin=soft_cut_margin,
+                                )
+                                x0_input = torch.gather(
+                                    x0,
+                                    1,
+                                    indices.unsqueeze(-1).expand(-1, -1, x0.shape[-1]),
+                                )
                         else:
                             x0_input = x0
 
                         x_t, eps = forward.add_noise(x0_input, t)
                         plane_t, eps_plane = forward.add_noise(plane_target, t)
-                        
+
                         # Force the offset to 0 for true joint diffusion since model doesn't predict it
                         plane_t[..., 3] = 0.0
                         eps_plane[..., 3] = 0.0
                         # Keep inactive-slot noise by default (correct DDPM objective for x0=0 slots).
-                        mask_inactive_plane_noise = bool(joint_mode_cfg.get("mask_inactive_plane_noise", False))
+                        mask_inactive_plane_noise = bool(
+                            joint_mode_cfg.get("mask_inactive_plane_noise", False)
+                        )
                         if mask_inactive_plane_noise:
-                            active_threshold = float(joint_mode_cfg.get("inactive_plane_norm_threshold", 1e-5))
-                            active_mask = plane_target[..., :3].norm(dim=-1) > active_threshold
-                            plane_t = zero_inactive_planes(plane_t * active_mask.unsqueeze(-1), threshold=active_threshold)
-                            eps_plane = zero_inactive_planes(eps_plane * active_mask.unsqueeze(-1), threshold=active_threshold)
-                        
+                            active_threshold = float(
+                                joint_mode_cfg.get(
+                                    "inactive_plane_norm_threshold", 1e-5
+                                )
+                            )
+                            active_mask = (
+                                plane_target[..., :3].norm(dim=-1) > active_threshold
+                            )
+                            plane_t = zero_inactive_planes(
+                                plane_t * active_mask.unsqueeze(-1),
+                                threshold=active_threshold,
+                            )
+                            eps_plane = zero_inactive_planes(
+                                eps_plane * active_mask.unsqueeze(-1),
+                                threshold=active_threshold,
+                            )
+
                         result = model(
                             x_t=x_t,
                             plane_t=plane_t,
                             t=t,
                         )
-                        
-                        loss, loss_diff, loss_plane, loss_recon, loss_plane_cons, loss_boundary = true_joint_sym_plane_loss_fn(
+
+                        (
+                            loss,
+                            loss_diff,
+                            loss_plane,
+                            loss_recon,
+                            loss_plane_cons,
+                            loss_boundary,
+                        ) = true_joint_sym_plane_loss_fn(
                             result,
                             eps_points=eps,
                             eps_plane=eps_plane,
@@ -755,16 +988,30 @@ def main() -> None:
                         z_t, eps = forward.add_noise(z0, t)
                         eps_pred = model(z_t, t)
                         assert loss_fn is not None
-                        loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+                        loss = loss_fn(
+                            eps_pred,
+                            eps,
+                            alpha_bar_t=alpha_bars[t],
+                            current_step=global_step,
+                        )
                     else:
                         x_t, eps = forward.add_noise(x0, t)
                         kwargs = {}
-                        if use_symmetry_classes and isinstance(batch, dict) and "symmetry_plane_mask" in batch:
+                        if (
+                            use_symmetry_classes
+                            and isinstance(batch, dict)
+                            and "symmetry_plane_mask" in batch
+                        ):
                             kwargs["c"] = batch["symmetry_plane_mask"].to(device)
                         eps_pred = model(x_t, t, **kwargs)
                         assert loss_fn is not None
-                        loss = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step, x_t=x_t)
-
+                        loss = loss_fn(
+                            eps_pred,
+                            eps,
+                            alpha_bar_t=alpha_bars[t],
+                            current_step=global_step,
+                            x_t=x_t,
+                        )
 
                 opt.zero_grad(set_to_none=True)
                 if scaler.is_enabled():
@@ -777,7 +1024,7 @@ def main() -> None:
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     opt.step()
-                    
+
                 if scheduler is not None:
                     if scaler.is_enabled():
                         scale_tmp = scaler.get_scale()
@@ -864,17 +1111,25 @@ def main() -> None:
             g_val.manual_seed(seed_val)
             with torch.no_grad():
                 for batch_item in dl_val:
-                    sub_batches = batch_item if isinstance(batch_item, list) else [batch_item]
+                    sub_batches = (
+                        batch_item if isinstance(batch_item, list) else [batch_item]
+                    )
                     for batch in sub_batches:
                         x0, plane0 = unpack_batch(batch, device)
                         B = x0.shape[0]
-                        t = torch.randint(low=0, high=T, size=(B,), generator=g_val, dtype=torch.long).to(device)
+                        t = torch.randint(
+                            low=0, high=T, size=(B,), generator=g_val, dtype=torch.long
+                        ).to(device)
 
                         with autocast_ctx():
                             if use_two_priors:
                                 z0, h0 = autoencoder.encode_split(x0, sample=False)
-                                t_z = torch.randint(0, T, (B,), generator=g_val, dtype=torch.long).to(device)
-                                t_h = torch.randint(0, T, (B,), generator=g_val, dtype=torch.long).to(device)
+                                t_z = torch.randint(
+                                    0, T, (B,), generator=g_val, dtype=torch.long
+                                ).to(device)
+                                t_h = torch.randint(
+                                    0, T, (B,), generator=g_val, dtype=torch.long
+                                ).to(device)
                                 z_t, eps_z = forward.add_noise(z0, t_z)
                                 h_t, eps_h = forward.add_noise(h0, t_h)
                                 eps_pred_z = model_to_eval.ddm_z(z_t, t_z)
@@ -890,7 +1145,12 @@ def main() -> None:
                                 x_t, eps = forward.add_noise(x0, t)
                                 result = model_to_eval(x_t, t)
                                 l, ld, ls = sym_plane_loss_fn(
-                                    result, eps, x_t, x0, alpha_bars[t], current_step=global_step
+                                    result,
+                                    eps,
+                                    x_t,
+                                    x0,
+                                    alpha_bars[t],
+                                    current_step=global_step,
                                 )
                                 v_loss_diff_sum += float(ld.item())
                                 v_loss_sym_sum += float(ls.item())
@@ -904,22 +1164,32 @@ def main() -> None:
                                     plane0=plane0,
                                 )
                                 if plane_target is None:
-                                    raise ValueError("Joint symmetry validation requires a plane target (dataset labels or fixed axis)")
+                                    raise ValueError(
+                                        "Joint symmetry validation requires a plane target (dataset labels or fixed axis)"
+                                    )
                                 x_t, eps = forward.add_noise(x0, t)
                                 if infer_plane_mode_enabled(cfg):
-                                    plane_t, eps_plane = forward.add_noise(plane_target, t)
-                                    selection_plane = select_training_plane(plane_target, cfg, global_step, plane_t=plane_t)
+                                    plane_t, eps_plane = forward.add_noise(
+                                        plane_target, t
+                                    )
+                                    selection_plane = select_training_plane(
+                                        plane_target, cfg, global_step, plane_t=plane_t
+                                    )
                                 else:
                                     plane_t, eps_plane = None, None
                                     selection_plane = plane_target
                                 if joint_mode_cfg.geometry_mode == "half":
-                                    ref_mode = get_selection_reference_mode(cfg, context="train")
+                                    ref_mode = get_selection_reference_mode(
+                                        cfg, context="train"
+                                    )
                                     if ref_mode == "x0":
                                         selection_reference_points = x0
                                     elif ref_mode in {"xt", "x_t"}:
                                         selection_reference_points = x_t
                                     else:
-                                        raise ValueError("Invalid train_selection_reference_mode. Expected 'x0' or 'x_t'")
+                                        raise ValueError(
+                                            "Invalid train_selection_reference_mode. Expected 'x0' or 'x_t'"
+                                        )
                                 else:
                                     selection_reference_points = None
                                 result = model_to_eval(
@@ -953,14 +1223,31 @@ def main() -> None:
                                     plane0=plane0,
                                 )
                                 if plane_target is None:
-                                    raise ValueError("True Joint symmetry validation requires a plane target")
-                                
-                                geo_mode = model_to_eval.geometry_mode if hasattr(model_to_eval, "geometry_mode") else "half"
-                                
+                                    raise ValueError(
+                                        "True Joint symmetry validation requires a plane target"
+                                    )
+
+                                geo_mode = (
+                                    model_to_eval.geometry_mode
+                                    if hasattr(model_to_eval, "geometry_mode")
+                                    else "half"
+                                )
+
                                 if geo_mode == "half":
-                                    from src.utils.symmetry_planes import select_signed_half
-                                    _, indices = select_signed_half(x0, plane_target, prefer_positive=True)
-                                    x0_input = torch.gather(x0, 1, indices.unsqueeze(-1).expand(-1, -1, x0.shape[-1]))
+                                    from src.utils.symmetry_planes import (
+                                        select_signed_half,
+                                    )
+
+                                    _, indices = select_signed_half(
+                                        x0, plane_target, prefer_positive=True
+                                    )
+                                    x0_input = torch.gather(
+                                        x0,
+                                        1,
+                                        indices.unsqueeze(-1).expand(
+                                            -1, -1, x0.shape[-1]
+                                        ),
+                                    )
                                 else:
                                     x0_input = x0
 
@@ -971,19 +1258,36 @@ def main() -> None:
                                 plane_t[..., 3] = 0.0
                                 eps_plane[..., 3] = 0.0
                                 joint_cfg_local = cfg.get("joint_symmetry", {}) or {}
-                                mask_inactive_plane_noise = bool(joint_cfg_local.get("mask_inactive_plane_noise", False))
+                                mask_inactive_plane_noise = bool(
+                                    joint_cfg_local.get(
+                                        "mask_inactive_plane_noise", False
+                                    )
+                                )
                                 if mask_inactive_plane_noise:
-                                    active_threshold = float(joint_cfg_local.get("inactive_plane_norm_threshold", 1e-5))
-                                    active_mask = plane_target[..., :3].norm(dim=-1) > active_threshold
-                                    plane_t = zero_inactive_planes(plane_t * active_mask.unsqueeze(-1), threshold=active_threshold)
-                                    eps_plane = zero_inactive_planes(eps_plane * active_mask.unsqueeze(-1), threshold=active_threshold)
-                                
+                                    active_threshold = float(
+                                        joint_cfg_local.get(
+                                            "inactive_plane_norm_threshold", 1e-5
+                                        )
+                                    )
+                                    active_mask = (
+                                        plane_target[..., :3].norm(dim=-1)
+                                        > active_threshold
+                                    )
+                                    plane_t = zero_inactive_planes(
+                                        plane_t * active_mask.unsqueeze(-1),
+                                        threshold=active_threshold,
+                                    )
+                                    eps_plane = zero_inactive_planes(
+                                        eps_plane * active_mask.unsqueeze(-1),
+                                        threshold=active_threshold,
+                                    )
+
                                 result = model_to_eval(
                                     x_t=x_t,
                                     plane_t=plane_t,
                                     t=t,
                                 )
-                                
+
                                 l, ld, lp, lr, lc, lb = true_joint_sym_plane_loss_fn(
                                     result,
                                     eps_points=eps,
@@ -1004,15 +1308,31 @@ def main() -> None:
                                 z_t, eps = forward.add_noise(z0, t)
                                 eps_pred = model_to_eval(z_t, t)
                                 assert loss_fn is not None
-                                l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+                                l = loss_fn(
+                                    eps_pred,
+                                    eps,
+                                    alpha_bar_t=alpha_bars[t],
+                                    current_step=global_step,
+                                )
                             else:
                                 x_t, eps = forward.add_noise(x0, t)
                                 kwargs = {}
-                                if use_symmetry_classes and isinstance(batch, dict) and "symmetry_plane_mask" in batch:
-                                    kwargs["c"] = batch["symmetry_plane_mask"].to(device)
+                                if (
+                                    use_symmetry_classes
+                                    and isinstance(batch, dict)
+                                    and "symmetry_plane_mask" in batch
+                                ):
+                                    kwargs["c"] = batch["symmetry_plane_mask"].to(
+                                        device
+                                    )
                                 eps_pred = model_to_eval(x_t, t, **kwargs)
                                 assert loss_fn is not None
-                                l = loss_fn(eps_pred, eps, alpha_bar_t=alpha_bars[t], current_step=global_step)
+                                l = loss_fn(
+                                    eps_pred,
+                                    eps,
+                                    alpha_bar_t=alpha_bars[t],
+                                    current_step=global_step,
+                                )
 
                         v_sum += float(l.item())
                         v_steps += 1
@@ -1034,13 +1354,35 @@ def main() -> None:
 
         epoch_time = time.time() - epoch_start_time
         avg_epoch_loss = epoch_loss_sum / epoch_steps
-        avg_epoch_mse_z = (epoch_mse_z_sum / max(1, epoch_steps)) if use_two_priors else None
-        avg_epoch_mse_h = (epoch_mse_h_sum / max(1, epoch_steps)) if use_two_priors else None
-        avg_epoch_loss_diff = (epoch_loss_diff_sum / max(1, epoch_steps)) if (use_sym_plane or use_joint_sym_plane or use_true_joint_sym_plane) else None
-        avg_epoch_loss_sym = (epoch_loss_sym_sum / max(1, epoch_steps)) if use_sym_plane else None
-        avg_epoch_loss_plane = (epoch_loss_plane_sum / max(1, epoch_steps)) if (use_joint_sym_plane or use_true_joint_sym_plane) else None
-        avg_epoch_loss_recon = (epoch_loss_recon_sum / max(1, epoch_steps)) if (use_joint_sym_plane or use_true_joint_sym_plane) else None
-        avg_epoch_loss_plane_cons = (epoch_loss_plane_cons_sum / max(1, epoch_steps)) if (use_joint_sym_plane or use_true_joint_sym_plane) else None
+        avg_epoch_mse_z = (
+            (epoch_mse_z_sum / max(1, epoch_steps)) if use_two_priors else None
+        )
+        avg_epoch_mse_h = (
+            (epoch_mse_h_sum / max(1, epoch_steps)) if use_two_priors else None
+        )
+        avg_epoch_loss_diff = (
+            (epoch_loss_diff_sum / max(1, epoch_steps))
+            if (use_sym_plane or use_joint_sym_plane or use_true_joint_sym_plane)
+            else None
+        )
+        avg_epoch_loss_sym = (
+            (epoch_loss_sym_sum / max(1, epoch_steps)) if use_sym_plane else None
+        )
+        avg_epoch_loss_plane = (
+            (epoch_loss_plane_sum / max(1, epoch_steps))
+            if (use_joint_sym_plane or use_true_joint_sym_plane)
+            else None
+        )
+        avg_epoch_loss_recon = (
+            (epoch_loss_recon_sum / max(1, epoch_steps))
+            if (use_joint_sym_plane or use_true_joint_sym_plane)
+            else None
+        )
+        avg_epoch_loss_plane_cons = (
+            (epoch_loss_plane_cons_sum / max(1, epoch_steps))
+            if (use_joint_sym_plane or use_true_joint_sym_plane)
+            else None
+        )
         if val_loss is not None:
             if use_two_priors and val_mse_z is not None and val_mse_h is not None:
                 print(
@@ -1049,14 +1391,20 @@ def main() -> None:
                     f"| Val loss: {val_loss:.6f} (mse_z={val_mse_z:.6f}, mse_h={val_mse_h:.6f}) "
                     f"| Time: {epoch_time:.2f}s =="
                 )
-            elif use_sym_plane and val_loss_diff is not None and val_loss_sym is not None:
+            elif (
+                use_sym_plane and val_loss_diff is not None and val_loss_sym is not None
+            ):
                 print(
                     f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} "
                     f"(diff={avg_epoch_loss_diff:.6f}, sym={avg_epoch_loss_sym:.6f}) "
                     f"| Val loss: {val_loss:.6f} (diff={val_loss_diff:.6f}, sym={val_loss_sym:.6f}) "
                     f"| Time: {epoch_time:.2f}s =="
                 )
-            elif (use_joint_sym_plane or use_true_joint_sym_plane) and val_loss_diff is not None and val_loss_plane is not None:
+            elif (
+                (use_joint_sym_plane or use_true_joint_sym_plane)
+                and val_loss_diff is not None
+                and val_loss_plane is not None
+            ):
                 print(
                     f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} "
                     f"(diff={avg_epoch_loss_diff:.6f}, plane={avg_epoch_loss_plane:.6f}, recon={avg_epoch_loss_recon:.6f}, plane_cons={avg_epoch_loss_plane_cons:.6f}) "
@@ -1068,7 +1416,9 @@ def main() -> None:
                     f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} | Val loss: {val_loss:.6f} | Time: {epoch_time:.2f}s =="
                 )
         else:
-            print(f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} | Time: {epoch_time:.2f}s ==")
+            print(
+                f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} | Time: {epoch_time:.2f}s =="
+            )
 
         epoch_metadata: dict[str, object] = {
             "epoch": epoch,
@@ -1106,11 +1456,25 @@ def main() -> None:
         }
 
         ema_state = ema.module.state_dict() if ema is not None else None
-        
-        if epoch % 10 == 0:
-            save_ckpt(model, run_root, exp_name, f"epoch_{epoch:03d}.pt", metadata=ckpt_metadata, ema_state=ema_state)
-            
-        save_ckpt(model, run_root, exp_name, "last.pt", metadata=ckpt_metadata, ema_state=ema_state)
+
+        if epoch % 50 == 0:
+            save_ckpt(
+                model,
+                run_root,
+                run_name,
+                f"epoch_{epoch:03d}.pt",
+                metadata=ckpt_metadata,
+                ema_state=ema_state,
+            )
+
+        save_ckpt(
+            model,
+            run_root,
+            run_name,
+            "last.pt",
+            metadata=ckpt_metadata,
+            ema_state=ema_state,
+        )
 
         sel = val_loss if val_loss is not None else avg_epoch_loss
         if sel < best_loss:
@@ -1118,13 +1482,22 @@ def main() -> None:
             training_history["best_epoch"] = epoch
             training_history["best_loss"] = best_loss
             ckpt_path = save_ckpt(
-                model, run_root, exp_name, "best.pt", metadata=ckpt_metadata, ema_state=ema_state
+                model,
+                run_root,
+                run_name,
+                "best.pt",
+                metadata=ckpt_metadata,
+                ema_state=ema_state,
             )
             print(f"Mejor modelo guardado en: {ckpt_path} (loss={best_loss:.6f})")
 
-        save_training_history(run_root, exp_name, training_history)
+        save_training_history(run_root, run_name, training_history)
 
-        if use_joint_sym_plane and joint_debug_cfg["enabled"] and (epoch % max(1, joint_debug_cfg["print_every"]) == 0):
+        if (
+            use_joint_sym_plane
+            and joint_debug_cfg["enabled"]
+            and (epoch % max(1, joint_debug_cfg["print_every"]) == 0)
+        ):
             model_to_debug = ema.module if ema is not None else model
             model_to_debug.eval()
             debug_metrics = run_joint_plane_debug_snapshot(
@@ -1148,7 +1521,7 @@ def main() -> None:
 
     total_time = time.time() - train_start_time
     training_history["total_time"] = total_time
-    save_training_history(run_root, exp_name, training_history)
+    save_training_history(run_root, run_name, training_history)
     print(
         f"\nEntrenamiento finalizado. Tiempo total: {total_time:.2f}s ({total_time / 60:.2f}min)"
     )

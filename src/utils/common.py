@@ -1,4 +1,4 @@
-import os, random, pathlib, yaml, torch
+import os, random, pathlib, uuid, yaml, torch
 from datetime import datetime
 import numpy as np
 
@@ -25,6 +25,9 @@ def get_date_tag(now: datetime | None = None) -> str:
 def resolve_dated_root(root: str | pathlib.Path, date_tag: str | None = None) -> pathlib.Path:
     tag = date_tag or get_date_tag()
     return pathlib.Path(root) / tag
+
+def get_run_id() -> str:
+    return uuid.uuid4().hex[:8]
 
 
 def kl_coeff(step: int, total_step: float, constant_step: float, min_kl_coeff: float, max_kl_coeff: float) -> float:

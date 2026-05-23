@@ -16,6 +16,7 @@ from src.models import (
     PointTransformerTrueJointMultiplaneDiT,
     PointTransformerTrueJointMultiplaneRelativeDiT,
     PointTransformerSymClassDiT,
+    PointTransformerTrueJointMultiplaneDiTLegacy,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.schedulers.forward import ForwardDiffusion
@@ -253,7 +254,21 @@ def main():
     ckpt = args.ckpt
     if ckpt is None:
         run_root = resolve_dated_root(temp_cfg["train"]["out_dir"])
-        ckpt = str(run_root / temp_cfg["exp_name"] / "last.pt")
+        exp_prefix = str(temp_cfg["exp_name"])
+        candidates = []
+        if run_root.exists():
+            for child in run_root.iterdir():
+                if not child.is_dir():
+                    continue
+                if not child.name.startswith(exp_prefix):
+                    continue
+                last_pt = child / "last.pt"
+                if last_pt.exists():
+                    candidates.append(last_pt)
+        if candidates:
+            ckpt = str(max(candidates, key=lambda p: p.stat().st_mtime))
+        else:
+            ckpt = str(run_root / exp_prefix / "last.pt")
 
     p = pathlib.Path(ckpt)
     if p.is_dir():
@@ -329,7 +344,7 @@ def main():
                 alpha_bars=alpha_bars,
             )
             joint_debug = _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples, T, joint_selection_mode, joint_selection_reference_mode)
-        elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT)) and not use_latent:
+        elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT, PointTransformerTrueJointMultiplaneDiTLegacy)) and not use_latent:
             true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
             if args.return_fundamental_only:
                 print("[sample] FORZANDO SOLO DOMINIO FUNDAMENTAL (sin reflejar).")

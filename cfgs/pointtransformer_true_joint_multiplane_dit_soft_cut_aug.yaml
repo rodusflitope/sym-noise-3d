@@ -44,7 +44,7 @@ joint_symmetry:
   geometry_mode: "full"
   plane_mode: "diffusion"
   inactive_plane_norm_threshold: 1e-5
-  mask_inactive_plane_noise: true
+  mask_inactive_plane_noise: false
 
 loss:
   name: "true_joint_symmetry_plane_loss"

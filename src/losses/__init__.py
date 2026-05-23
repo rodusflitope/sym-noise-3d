@@ -15,6 +15,7 @@ from .joint_sym_plane import (
     build_joint_symmetry_plane_loss,
 )
 from .true_joint import TrueJointSymmetryPlaneLoss, build_true_joint_symmetry_plane_loss
+from .true_joint_legacy import build_true_joint_symmetry_plane_loss_legacy
 
 __all__ = [
     "compute_snr",
@@ -29,4 +30,5 @@ __all__ = [
     "build_joint_symmetry_plane_loss",
     "TrueJointSymmetryPlaneLoss",
     "build_true_joint_symmetry_plane_loss",
+    "build_true_joint_symmetry_plane_loss_legacy",
 ]
