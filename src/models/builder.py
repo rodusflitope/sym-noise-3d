@@ -273,30 +273,6 @@ def build_model(cfg):
             sa_blocks=cfg["model"].get("sa_blocks"),
             fp_blocks=cfg["model"].get("fp_blocks"),
         )
-    elif name == "pointtransformer_true_joint_multiplane_dit_legacy":
-        from .pointtransformer_true_joint_multiplane_dit_legacy import PointTransformerTrueJointMultiplaneDiTLegacy
-
-        hidden_dim = int(cfg["model"]["hidden_dim"])
-        time_dim = int(cfg["model"]["time_dim"])
-        num_planes = int(cfg["data"].get("num_symmetry_planes", 1))
-        num_heads = int(cfg["model"].get("num_heads", 4))
-        num_layers = int(cfg["model"].get("num_layers", 2))
-        use_fourier_features = bool(cfg["model"].get("use_fourier_features", False))
-        use_symmetric_attention = bool(cfg["model"].get("use_symmetric_attention", False))
-
-        joint_cfg = cfg.get("joint_symmetry", {}) or {}
-        geometry_mode = str(joint_cfg.get("geometry_mode", cfg["model"].get("joint_geometry_mode", "half"))).lower()
-
-        return PointTransformerTrueJointMultiplaneDiTLegacy(
-            hidden_dim=hidden_dim,
-            time_dim=time_dim,
-            num_planes=num_planes,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            use_fourier_features=use_fourier_features,
-            use_symmetric_attention=use_symmetric_attention,
-            geometry_mode=geometry_mode,
-        )
     elif name == "pointtransformer_true_joint_multiplane_dit":
         from .pointtransformer_true_joint_multiplane_dit import PointTransformerTrueJointMultiplaneDiT
 

@@ -27,7 +27,6 @@ from src.models import (
     PointAutoencoder,
     PointTransformerTrueJointDiT,
     PointTransformerTrueJointMultiplaneDiT,
-    PointTransformerTrueJointMultiplaneDiTLegacy,
     PointTransformerTrueJointMultiplaneRelativeDiT,
     PTJointSymPlane,
     PTSymLearnedPlane,
@@ -650,7 +649,6 @@ def main() -> None:
             PointTransformerTrueJointDiT,
             PointTransformerTrueJointMultiplaneDiT,
             PointTransformerTrueJointMultiplaneRelativeDiT,
-            PointTransformerTrueJointMultiplaneDiTLegacy,
         ),
     )
     if use_joint_sym_plane or use_true_joint_sym_plane:
@@ -1457,7 +1455,7 @@ def main() -> None:
 
         ema_state = ema.module.state_dict() if ema is not None else None
 
-        if epoch % 50 == 0:
+        if (epoch + 1) % 50 == 0:
             save_ckpt(
                 model,
                 run_root,

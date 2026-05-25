@@ -11,13 +11,14 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
         num_planes: int = 3,
         num_heads: int = 4,
         num_layers: int = 2,
+        use_fourier_features: bool = False,
         use_symmetric_attention: bool = False,
         geometry_mode: str = "half",
         inactive_plane_norm_threshold: float = 1e-5,
         use_presence_logits: bool = False,
     ):
         super().__init__()
-        # Fourier features omitted for relative coordinates to keep it simple
+        self.use_fourier_features = use_fourier_features
         self.use_symmetric_attention = use_symmetric_attention
         self.geometry_mode = geometry_mode
         self.num_planes = num_planes
@@ -57,16 +58,12 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, 3)
         )
-        nn.init.zeros_(self.to_out[-1].weight)
-        nn.init.zeros_(self.to_out[-1].bias)
 
         self.plane_out = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, 3 * num_planes)
         )
-        nn.init.zeros_(self.plane_out[-1].weight)
-        nn.init.zeros_(self.plane_out[-1].bias)
         if self.use_presence_logits:
             self.presence_head = nn.Linear(hidden_dim, num_planes)
         else:
@@ -74,6 +71,8 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
 
     def forward(self, x_t: torch.Tensor, plane_t: torch.Tensor, t: torch.LongTensor, **kwargs):
         B, N, _ = x_t.shape
+        
+        t_emb = self.time_embed(t)
         
         # plane_t might be (B, num_planes, 4)
         if plane_t.dim() == 3:
@@ -86,7 +85,7 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
         active = torch.norm(normals, dim=-1, keepdim=True) > self.inactive_plane_norm_threshold
         normals = torch.where(active, normals, torch.zeros_like(normals))
         offsets = torch.where(active.squeeze(-1), offsets, torch.zeros_like(offsets))
-        plane_normals = normals.reshape(B, -1)
+        plane_normals = normals.reshape(B, -1) # (B, num_planes * 3)
             
         # Calcular distancias ortogonales de cada punto a cada plano
         # x_t: (B, N, 3) -> (B, N, 1, 3)
@@ -98,7 +97,6 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
         feats_input = torch.cat([x_t, distances], dim=-1) # (B, N, 3 + num_planes)
         feats = self.point_embed(feats_input)
 
-        t_emb = self.time_embed(t)
         cond = torch.cat([t_emb, plane_normals], dim=-1)
         c = self.cond_proj(cond)
 
@@ -111,9 +109,7 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
         eps_points = self.to_out(feats)
         
         pooled_feat = feats.mean(dim=1)
-        # Add skip connection from c so the network can easily predict eps_normals 
-        # from the plane_t conditioning without being overwhelmed by x_t variance.
-        eps_normals = self.plane_out(pooled_feat + c).view(B, self.num_planes, 3)
+        eps_normals = self.plane_out(pooled_feat).view(B, self.num_planes, 3)
         
         eps_offsets = torch.zeros(B, self.num_planes, 1, device=eps_normals.device)
         eps_plane = torch.cat([eps_normals, eps_offsets], dim=-1) # (B, num_planes, 4)

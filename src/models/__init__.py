@@ -14,7 +14,6 @@ from .pointtransformer_true_joint_dit import PointTransformerTrueJointDiT
 from .pointtransformer_true_joint_multiplane_dit import PointTransformerTrueJointMultiplaneDiT
 from .pointtransformer_true_joint_multiplane_relative_dit import PointTransformerTrueJointMultiplaneRelativeDiT
 from .pointtransformer_sym_class_dit import PointTransformerSymClassDiT
-from .pointtransformer_true_joint_multiplane_dit_legacy import PointTransformerTrueJointMultiplaneDiTLegacy
 from .builder import build_model
 
 try:
@@ -39,7 +38,6 @@ __all__ = [
     "PointTransformerTrueJointMultiplaneDiT",
     "PointTransformerTrueJointMultiplaneRelativeDiT",
     "PointTransformerSymClassDiT",
-    "PointTransformerTrueJointMultiplaneDiTLegacy",
     "build_model",
     "LionTwoPriorsDDM",
 ]
