@@ -3,7 +3,7 @@ import torch.nn as nn
 from .time_embedding import SinusoidalTimeEmbed
 from .pointtransformer_dit import modulate, SymmetricDiTBlock, GenericDiTBlock, GaussianFourierProjection
 
-class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
+class PointTransformerTrueJointMultiplaneDihedralDiT(nn.Module):
     def __init__(
         self,
         hidden_dim: int = 128,

@@ -15,6 +15,8 @@ from src.models import (
     PointTransformerTrueJointDiT,
     PointTransformerTrueJointMultiplaneDiT,
     PointTransformerTrueJointMultiplaneRelativeDiT,
+    PointTransformerTrueJointMultiplaneDihedralDiT,
+    PointTransformerTrueJointMultiplaneSparseDiT,
     PointTransformerSymClassDiT,
 )
 from src.schedulers import build_beta_schedule, build_noise_type
@@ -343,7 +345,7 @@ def main():
                 alpha_bars=alpha_bars,
             )
             joint_debug = _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_samples, T, joint_selection_mode, joint_selection_reference_mode)
-        elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT)) and not use_latent:
+        elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT, PointTransformerTrueJointMultiplaneDihedralDiT, PointTransformerTrueJointMultiplaneSparseDiT)) and not use_latent:
             true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
             if args.return_fundamental_only:
                 print("[sample] FORZANDO SOLO DOMINIO FUNDAMENTAL (sin reflejar).")

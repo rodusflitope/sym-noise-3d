@@ -28,6 +28,8 @@ from src.models import (
     PointTransformerTrueJointDiT,
     PointTransformerTrueJointMultiplaneDiT,
     PointTransformerTrueJointMultiplaneRelativeDiT,
+    PointTransformerTrueJointMultiplaneDihedralDiT,
+    PointTransformerTrueJointMultiplaneSparseDiT,
     PTJointSymPlane,
     PTSymLearnedPlane,
     PVCNNJointSymPlane,
@@ -649,6 +651,8 @@ def main() -> None:
             PointTransformerTrueJointDiT,
             PointTransformerTrueJointMultiplaneDiT,
             PointTransformerTrueJointMultiplaneRelativeDiT,
+            PointTransformerTrueJointMultiplaneDihedralDiT,
+            PointTransformerTrueJointMultiplaneSparseDiT,
         ),
     )
     if use_joint_sym_plane or use_true_joint_sym_plane:

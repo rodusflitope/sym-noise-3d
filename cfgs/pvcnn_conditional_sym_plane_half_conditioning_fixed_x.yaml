@@ -9,7 +9,7 @@ data:
   val_frac: 0.1
   test_frac: 0.1
   use_symmetry_plane_labels: true
-  symmetry_plane_cache_path: "data/symmetry_cache.pt"
+  symmetry_plane_cache_path: "data/symmetry_cache/symmetry_cache_airplane_orthogonal_1p_optimized.pt"
   symmetry_plane_cache_required: true
 
 model:

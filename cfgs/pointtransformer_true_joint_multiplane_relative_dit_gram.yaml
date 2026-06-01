@@ -1,4 +1,4 @@
-exp_name: "pointtransformer-true-joint-multiplane-dit-guided-inference"
+exp_name: "pointtransformer-true-joint-multiplane-relative-dit-gram"
 seed: 10
 device: "auto"
 
@@ -24,9 +24,11 @@ data:
   num_symmetry_planes: 3
   train_sample_symmetric_from_gt: true
   return_fundamental_domain: true
+  soft_cut: true
+  soft_cut_margin: 0.05
 
 model:
-  name: "pointtransformer_true_joint_multiplane_dit"
+  name: "pointtransformer_true_joint_multiplane_relative_dit"
   hidden_dim: 128
   time_dim: 128
   num_planes: 3
@@ -34,14 +36,14 @@ model:
   num_layers: 3
   use_fourier_features: false
   use_symmetric_attention: false
+  use_gram_matrix: true
 
 joint_symmetry:
   geometry_mode: "full"
   plane_mode: "diffusion"
-  guided_inference: true
-  guide_scale: 10.0
-  boundary_frac: 0.05
-  boundary_margin: 0.01
+  inactive_plane_norm_threshold: 1e-5
+  renormalize_planes_during_sampling: false
+  mask_inactive_plane_noise: false
 
 loss:
   name: "true_joint_symmetry_plane_loss"
@@ -57,7 +59,7 @@ loss:
 
 train:
   batch_size: 16
-  epochs: 400
+  epochs: 200
   log_every: 50
   num_points: 2048
   num_workers: 2

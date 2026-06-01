@@ -24,6 +24,9 @@ def build_loss(cfg):
     elif name == "true_joint_symmetry_plane_loss_legacy":
         from .true_joint_legacy import build_true_joint_symmetry_plane_loss_legacy
         return build_true_joint_symmetry_plane_loss_legacy(cfg)
+    elif name == "true_joint_symmetry_plane_loss":
+        from .true_joint import build_true_joint_symmetry_plane_loss
+        return build_true_joint_symmetry_plane_loss(cfg)
     else:
         raise ValueError(f"Unknown loss function: {name}")
 

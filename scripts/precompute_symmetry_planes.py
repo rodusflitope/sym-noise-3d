@@ -29,6 +29,9 @@ def parse_args() -> ap.Namespace:
     parser.add_argument("--save_every", type=int, default=10)
     parser.add_argument("--canonical", action="store_true", help="Use canonical symmetry planes instead of optimizing per-model")
     parser.add_argument("--canonical_offset_reduction", type=str, default=None, choices=["median", "mean"])
+    parser.add_argument("--type", type=str, default=None, choices=["orthogonal", "dihedral", "arbitrary", "per_object"])
+    parser.add_argument("--k", type=int, default=3, help="Order of dihedral symmetry")
+    parser.add_argument("--n", type=int, default=3, help="Number of arbitrary planes")
     return parser.parse_args()
 
 
@@ -38,10 +41,29 @@ def main() -> None:
     data_cfg = cfg.get("data", {}) or {}
     train_cfg = cfg.get("train", {}) or {}
 
-    out_path = args.out or data_cfg.get("symmetry_plane_cache_path", None)
-    if not out_path:
-        raise ValueError("Specify --out or data.symmetry_plane_cache_path in config")
-    out_path = str(Path(out_path))
+    category = "airplane"
+    categories = data_cfg.get("categories", None)
+    if categories and len(categories) > 0:
+        category = categories[0]
+        
+    sym_type = args.type or "orthogonal"
+    if sym_type == "dihedral":
+        num_planes = args.k
+    elif sym_type == "arbitrary":
+        num_planes = args.n
+    elif sym_type == "per_object":
+        num_planes = args.n
+    else:
+        num_planes = data_cfg.get("num_symmetry_planes", 1)
+        
+    use_canonical = args.canonical or bool(data_cfg.get("canonical_symmetry_planes", False))
+    canonical_str = "canonical" if use_canonical else "optimized"
+    
+    auto_out_path = f"data/symmetry_cache/symmetry_cache_{category}_{sym_type}_{num_planes}p_{canonical_str}.pt"
+    
+    out_path = args.out or auto_out_path
+    if not args.out:
+        print(f"[precompute_symmetry_planes] Auto-generated output path: {out_path}")
     out_file = Path(out_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
     print(f"[precompute_symmetry_planes] output file: {out_file}")
@@ -59,7 +81,31 @@ def main() -> None:
     print("[precompute_symmetry_planes] created output directory and initialized partial cache")
 
     use_canonical = args.canonical or bool(data_cfg.get("canonical_symmetry_planes", False))
-    canonical_planes = CANONICAL_SYMMETRY_PLANES if use_canonical else None
+    
+    if args.type is not None:
+        import math
+        if args.type == "orthogonal":
+            canonical_planes = CANONICAL_SYMMETRY_PLANES
+        elif args.type == "dihedral":
+            planes = []
+            for i in range(args.k):
+                angle = i * math.pi / args.k
+                planes.append([math.cos(angle), math.sin(angle), 0.0, 0.0])
+            canonical_planes = torch.tensor(planes, dtype=torch.float32)
+        elif args.type == "arbitrary":
+            normals = torch.randn(args.n, 3)
+            normals = normals / normals.norm(dim=-1, keepdim=True)
+            offsets = torch.zeros(args.n, 1)
+            canonical_planes = torch.cat([normals, offsets], dim=-1)
+        else:
+            canonical_planes = None
+    else:
+        canonical_planes = CANONICAL_SYMMETRY_PLANES if use_canonical else None
+    device_arg = cfg.get("device", "auto")
+    if device_arg == "auto":
+        import torch
+        device_arg = "cuda" if torch.cuda.is_available() else "cpu"
+        
     canonical_offset_reduction = args.canonical_offset_reduction or str(data_cfg.get("canonical_symmetry_offset_reduction", "median"))
     payload = build_symmetry_plane_cache(
         data_cfg.get("root_dir", "data/ShapeNetCore"),
@@ -71,12 +117,13 @@ def main() -> None:
         num_restarts=int(args.num_restarts),
         steps=int(args.steps),
         lr=float(args.lr),
-        device=args.device,
+        device=device_arg,
         progress_every=max(1, int(args.progress_every)),
-        partial_save_path=out_file,
+        partial_save_path=out_path,
         partial_save_every=max(1, int(args.save_every)),
         canonical_planes=canonical_planes,
         canonical_offset_reduction=canonical_offset_reduction,
+        num_planes=num_planes,
     )
     save_symmetry_plane_cache(out_path, payload)
     print(f"[precompute_symmetry_planes] saved {len(payload['planes'])} planes to {Path(out_path)}")

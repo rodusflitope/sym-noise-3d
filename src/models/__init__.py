@@ -13,6 +13,8 @@ from .pointtransformer_dit import PointTransformerDiT
 from .pointtransformer_true_joint_dit import PointTransformerTrueJointDiT
 from .pointtransformer_true_joint_multiplane_dit import PointTransformerTrueJointMultiplaneDiT
 from .pointtransformer_true_joint_multiplane_relative_dit import PointTransformerTrueJointMultiplaneRelativeDiT
+from .pointtransformer_true_joint_multiplane_dihedral_dit import PointTransformerTrueJointMultiplaneDihedralDiT
+from .pointtransformer_true_joint_multiplane_sparse_dit import PointTransformerTrueJointMultiplaneSparseDiT
 from .pointtransformer_sym_class_dit import PointTransformerSymClassDiT
 from .builder import build_model
 
@@ -37,6 +39,8 @@ __all__ = [
     "PointTransformerTrueJointDiT",
     "PointTransformerTrueJointMultiplaneDiT",
     "PointTransformerTrueJointMultiplaneRelativeDiT",
+    "PointTransformerTrueJointMultiplaneDihedralDiT",
+    "PointTransformerTrueJointMultiplaneSparseDiT",
     "PointTransformerSymClassDiT",
     "build_model",
     "LionTwoPriorsDDM",

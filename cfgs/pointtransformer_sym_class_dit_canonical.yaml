@@ -12,7 +12,7 @@ data:
   sample_symmetric: false
   symmetry_axis: 0
   use_symmetry_plane_labels: false
-  symmetry_plane_cache_path: "data/symmetry_cache_table_canonical.pt"
+  symmetry_plane_cache_path: "data/symmetry_cache/symmetry_cache_table_orthogonal_3p_canonical.pt"
   symmetry_plane_cache_required: true
   use_symmetry_classes: true
   canonical_symmetry_planes: true

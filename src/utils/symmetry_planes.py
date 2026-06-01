@@ -125,14 +125,51 @@ def select_fundamental_domain(points: torch.Tensor, planes: torch.Tensor, mask: 
 
 
 def reconstruct_from_fundamental_domain(points: torch.Tensor, planes: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    pts_list = [points]
     planes = normalize_plane(planes.to(device=points.device, dtype=points.dtype))
     mask = mask.to(device=points.device).bool()
+    
+    active_planes = []
     for i in range(min(mask.numel(), planes.shape[0])):
         if bool(mask[i].item()):
-            plane = planes[i]
-            reflected = [reflect_points(pts.unsqueeze(0), plane.unsqueeze(0)).squeeze(0) for pts in pts_list]
-            pts_list = pts_list + reflected
+            active_planes.append(planes[i])
+            
+    if not active_planes:
+        return points
+        
+    matrices = [torch.eye(4, dtype=points.dtype, device=points.device)]
+    
+    for plane in active_planes:
+        n = plane[:3]
+        d = plane[3]
+        R = torch.eye(3, dtype=points.dtype, device=points.device) - 2.0 * torch.outer(n, n)
+        t = 2.0 * d * n
+        
+        H = torch.eye(4, dtype=points.dtype, device=points.device)
+        H[:3, :3] = R
+        H[:3, 3] = t
+        
+        new_matrices = []
+        for M in matrices:
+            new_matrices.append(H @ M)
+        matrices.extend(new_matrices)
+        
+    unique_matrices = []
+    for M in matrices:
+        is_dup = False
+        for U in unique_matrices:
+            if torch.allclose(M, U, atol=1e-4):
+                is_dup = True
+                break
+        if not is_dup:
+            unique_matrices.append(M)
+            
+    pts_list = []
+    homo_points = torch.cat([points, torch.ones((points.shape[0], 1), dtype=points.dtype, device=points.device)], dim=-1)
+    
+    for M in unique_matrices:
+        transformed = (homo_points @ M.T)[:, :3]
+        pts_list.append(transformed)
+        
     return torch.cat(pts_list, dim=0)
 
 
@@ -383,33 +420,130 @@ def estimate_symmetry_plane(
 ) -> dict[str, Any]:
     pts = points.to(device=device, dtype=torch.float32)
     starts = _build_initial_normals(pts)[: max(1, int(num_restarts))]
-    best_plane = None
-    best_loss = float("inf")
-    for init_n in starts:
-        init_n = init_n.to(device=pts.device, dtype=pts.dtype)
-        init_d = torch.median(pts.matmul(init_n))
-        raw_n = torch.nn.Parameter(init_n.clone())
-        raw_d = torch.nn.Parameter(init_d.view(1).clone())
-        opt = torch.optim.Adam([raw_n, raw_d], lr=float(lr))
-        for _ in range(int(steps)):
-            plane = normalize_plane(torch.cat([raw_n, raw_d], dim=0))
-            reflected = reflect_points(pts.unsqueeze(0), plane.unsqueeze(0))
-            loss = chamfer_distance(pts.unsqueeze(0), reflected).mean()
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-        with torch.no_grad():
-            plane = normalize_plane(torch.cat([raw_n, raw_d], dim=0))
-            reflected = reflect_points(pts.unsqueeze(0), plane.unsqueeze(0))
-            loss_val = float(chamfer_distance(pts.unsqueeze(0), reflected).mean().item())
-        if loss_val < best_loss:
-            best_loss = loss_val
-            best_plane = plane.detach().cpu()
-    if best_plane is None:
-        raise RuntimeError("Failed to estimate symmetry plane")
+    B = len(starts)
+    
+    opt_pts = resample_point_cloud(pts, min(1024, pts.shape[0]))
+    opt_pts_expanded = opt_pts.unsqueeze(0).expand(B, -1, -1)
+    
+    starts_t = torch.stack(starts).to(device=pts.device, dtype=pts.dtype)
+    proj = torch.bmm(opt_pts_expanded, starts_t.unsqueeze(2)).squeeze(2)
+    init_d = torch.median(proj, dim=1).values.unsqueeze(1)
+    
+    raw_n = torch.nn.Parameter(starts_t.clone())
+    raw_d = torch.nn.Parameter(init_d.clone())
+    opt = torch.optim.Adam([raw_n, raw_d], lr=float(lr))
+    
+    for _ in range(int(steps)):
+        plane = normalize_plane(torch.cat([raw_n, raw_d], dim=-1))
+        reflected = reflect_points(opt_pts_expanded, plane)
+        loss = chamfer_distance(opt_pts_expanded, reflected).mean()
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+        
+    with torch.no_grad():
+        plane = normalize_plane(torch.cat([raw_n, raw_d], dim=-1))
+        pts_expanded = pts.unsqueeze(0)
+        losses_list = []
+        for i in range(B):
+            reflected = reflect_points(pts_expanded, plane[i:i+1])
+            losses_list.append(chamfer_distance(pts_expanded, reflected))
+        losses = torch.cat(losses_list, dim=0)
+        
+    best_idx = losses.argmin()
+    best_plane = plane[best_idx].detach().cpu()
+    best_loss = float(losses[best_idx].item())
+    
     return {
         "plane": best_plane,
         "score": best_loss,
+    }
+
+def estimate_multiple_symmetry_planes(
+    points: torch.Tensor,
+    *,
+    num_planes: int = 6,
+    num_restarts: int = 16,
+    steps: int = 200,
+    lr: float = 1e-2,
+    device: str | torch.device = "cpu",
+    angular_threshold: float = 0.1,
+) -> dict[str, Any]:
+    pts = points.to(device=device, dtype=torch.float32)
+    opt_pts = resample_point_cloud(pts, min(1024, pts.shape[0]))
+    B = max(1, int(num_restarts))
+    
+    opt_pts_expanded = opt_pts.unsqueeze(0).expand(B, -1, -1)
+    
+    starts = _build_initial_normals(pts)
+    
+    # Add some random directions to ensure we have enough diversity for multiple planes
+    if len(starts) < B:
+        for _ in range(B - len(starts)):
+            vec = torch.randn(3, device=pts.device, dtype=pts.dtype)
+            starts.append(vec / vec.norm().clamp(min=1e-8))
+            
+    starts = torch.stack(starts[:B]).to(device=pts.device, dtype=pts.dtype)
+    
+    proj = torch.bmm(opt_pts_expanded, starts.unsqueeze(2)).squeeze(2)
+    init_d = torch.median(proj, dim=1).values.unsqueeze(1)
+    
+    raw_n = torch.nn.Parameter(starts.clone())
+    raw_d = torch.nn.Parameter(init_d.clone())
+    opt = torch.optim.Adam([raw_n, raw_d], lr=float(lr))
+    
+    for _ in range(int(steps)):
+        plane = normalize_plane(torch.cat([raw_n, raw_d], dim=-1))
+        reflected = reflect_points(opt_pts_expanded, plane)
+        loss = chamfer_distance(opt_pts_expanded, reflected).mean()
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+        
+    with torch.no_grad():
+        plane = normalize_plane(torch.cat([raw_n, raw_d], dim=-1))
+        pts_expanded = pts.unsqueeze(0)
+        losses_list = []
+        for i in range(B):
+            reflected = reflect_points(pts_expanded, plane[i:i+1])
+            losses_list.append(chamfer_distance(pts_expanded, reflected))
+        losses = torch.cat(losses_list, dim=0)
+        
+    optimized_planes = plane.detach().cpu()
+    optimized_scores = losses.detach().cpu().tolist()
+    
+    # Sort planes by score
+    sorted_indices = sorted(range(len(optimized_scores)), key=lambda i: optimized_scores[i])
+    
+    final_planes = []
+    final_scores = []
+    
+    for idx in sorted_indices:
+        plane = optimized_planes[idx]
+        score = optimized_scores[idx]
+        
+        is_distinct = True
+        for fp in final_planes:
+            cos_theta = abs(float(torch.dot(plane[:3], fp[:3])))
+            if cos_theta > 1.0 - angular_threshold:
+                is_distinct = False
+                break
+                
+        if is_distinct:
+            final_planes.append(plane)
+            final_scores.append(score)
+            
+        if len(final_planes) >= num_planes:
+            break
+            
+    # Pad if we didn't find enough distinct planes
+    while len(final_planes) < num_planes:
+        final_planes.append(torch.zeros(4))
+        final_scores.append(float('inf'))
+        
+    return {
+        "planes": torch.stack(final_planes),
+        "scores": final_scores,
     }
 
 
@@ -508,6 +642,16 @@ def evaluate_canonical_symmetry_scores(
             continue
 
         pts_pos_ref = reflect_points(pts_pos.unsqueeze(0), plane.unsqueeze(0)).squeeze(0)
+        
+        # Sub-sample for EMD if there are too many points, since scipy EMD is very slow
+        max_emd_points = 500
+        if pts_pos_ref.shape[0] > max_emd_points:
+            idx_pos = torch.randperm(pts_pos_ref.shape[0])[:max_emd_points]
+            pts_pos_ref = pts_pos_ref[idx_pos]
+        if pts_neg.shape[0] > max_emd_points:
+            idx_neg = torch.randperm(pts_neg.shape[0])[:max_emd_points]
+            pts_neg = pts_neg[idx_neg]
+            
         score = float(earth_movers_distance(pts_pos_ref.unsqueeze(0), pts_neg.unsqueeze(0)).item())
         scores.append(score)
     return {
@@ -554,6 +698,7 @@ def build_symmetry_plane_cache(
     partial_save_every: int = 10,
     canonical_planes: torch.Tensor | None = None,
     canonical_offset_reduction: str = "median",
+    num_planes: int = 1,
 ) -> dict[str, Any]:
     if canonical_planes is not None and sample_symmetric:
         raise ValueError("canonical symmetry precompute cannot be combined with sample_symmetric=True")
@@ -598,20 +743,35 @@ def build_symmetry_plane_cache(
 
             score_repr = ",".join(f"{s:.6f}" for s in result["scores"])
         else:
-            result = estimate_symmetry_plane(
-                points,
-                num_restarts=num_restarts,
-                steps=steps,
-                lr=lr,
-                device=device,
-            )
-            planes[key] = {
-                "plane": normalize_plane(result["plane"]).cpu(),
-                "score": float(result["score"]),
-                "normalization": normalization,
-            }
-
-            score_repr = f"{planes[key]['score']:.6f}"
+            if num_planes > 1:
+                result = estimate_multiple_symmetry_planes(
+                    points,
+                    num_planes=num_planes,
+                    num_restarts=max(num_restarts, 32), # Use more restarts for multiple planes
+                    steps=steps,
+                    lr=lr,
+                    device=device,
+                )
+                planes[key] = {
+                    "planes": result["planes"],
+                    "scores": result["scores"],
+                    "normalization": normalization,
+                }
+                score_repr = ",".join(f"{s:.6f}" for s in result["scores"])
+            else:
+                result = estimate_symmetry_plane(
+                    points,
+                    num_restarts=num_restarts,
+                    steps=steps,
+                    lr=lr,
+                    device=device,
+                )
+                planes[key] = {
+                    "plane": normalize_plane(result["plane"]).cpu(),
+                    "score": float(result["score"]),
+                    "normalization": normalization,
+                }
+                score_repr = f"{planes[key]['score']:.6f}"
         if progress_every > 0 and (index == 1 or index % progress_every == 0 or index == total_models):
             elapsed = time.time() - start_time
             item_elapsed = time.time() - item_start

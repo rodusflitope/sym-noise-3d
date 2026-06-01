@@ -1,9 +1,74 @@
 import torch
 import torch.nn as nn
 from .time_embedding import SinusoidalTimeEmbed
-from .pointtransformer_dit import modulate, SymmetricDiTBlock, GenericDiTBlock, GaussianFourierProjection
+from .pointtransformer_dit import modulate, GenericDiTBlock, GaussianFourierProjection
+import torch.nn.functional as F
 
-class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
+class SparseSymmetryAwareAttention(nn.Module):
+    def __init__(self, hidden_dim, num_heads, soft_cut_margin=0.05):
+        super().__init__()
+        self.num_heads = num_heads
+        self.qkv = nn.Linear(hidden_dim, hidden_dim * 3)
+        self.proj = nn.Linear(hidden_dim, hidden_dim)
+        self.soft_cut_margin = soft_cut_margin
+        
+    def forward(self, x, distances):
+        # x: (B, N, C)
+        # distances: (B, N, P)
+        B, N, C = x.shape
+        qkv = self.qkv(x).chunk(3, dim=-1)
+        q, k, v = map(lambda t: t.view(B, N, self.num_heads, C // self.num_heads).transpose(1, 2), qkv)
+        
+        # Check positive/negative sides with soft margin
+        sign_plus = distances > -self.soft_cut_margin   # (B, N, P)
+        sign_minus = distances < self.soft_cut_margin   # (B, N, P)
+        
+        # Points i and j can attend to each other if they share a valid region.
+        # They share a region if for EVERY plane, they share at least one valid sign (+ or -).
+        shared_plus = sign_plus.unsqueeze(2) & sign_plus.unsqueeze(1) # (B, N, N, P)
+        shared_minus = sign_minus.unsqueeze(2) & sign_minus.unsqueeze(1) # (B, N, N, P)
+        shared_plane = shared_plus | shared_minus # (B, N, N, P)
+        
+        attn_mask = shared_plane.all(dim=-1).unsqueeze(1) # (B, 1, N, N)
+        
+        # Use PyTorch's optimized scaled dot product attention (FlashAttention/memory efficient)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        
+        out = out.transpose(1, 2).reshape(B, N, C)
+        return self.proj(out)
+
+class SparseSymmetryDiTBlock(nn.Module):
+    def __init__(self, hidden_dim, num_heads, soft_cut_margin=0.05):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.attn = SparseSymmetryAwareAttention(hidden_dim, num_heads, soft_cut_margin)
+        self.norm2 = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim * 2, hidden_dim)
+        )
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 6 * hidden_dim, bias=True)
+        )
+        nn.init.zeros_(self.adaLN_modulation[1].weight)
+        nn.init.zeros_(self.adaLN_modulation[1].bias)
+
+    def forward(self, x, coords, c, distances=None):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        
+        x_modulated = modulate(self.norm1(x), shift_msa.unsqueeze(1), scale_msa.unsqueeze(1))
+        # Note: distances is passed instead of coords
+        x = x + gate_msa.unsqueeze(1) * self.attn(x_modulated, distances)
+        
+        x_modulated_mlp = modulate(self.norm2(x), shift_mlp.unsqueeze(1), scale_mlp.unsqueeze(1))
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(x_modulated_mlp)
+        
+        return x
+
+
+class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
     def __init__(
         self,
         hidden_dim: int = 128,
@@ -12,19 +77,21 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
         num_heads: int = 4,
         num_layers: int = 2,
         use_fourier_features: bool = False,
-        use_symmetric_attention: bool = False,
+        use_sparse_attention: bool = False,
         geometry_mode: str = "half",
         inactive_plane_norm_threshold: float = 1e-5,
         use_presence_logits: bool = False,
+        soft_cut_margin: float = 0.05,
         use_gram_matrix: bool = False,
     ):
         super().__init__()
         self.use_fourier_features = use_fourier_features
-        self.use_symmetric_attention = use_symmetric_attention
+        self.use_sparse_attention = use_sparse_attention
         self.geometry_mode = geometry_mode
         self.num_planes = num_planes
         self.inactive_plane_norm_threshold = float(inactive_plane_norm_threshold)
         self.use_presence_logits = bool(use_presence_logits)
+        self.soft_cut_margin = float(soft_cut_margin)
         self.use_gram_matrix = bool(use_gram_matrix)
         
         self.time_embed = SinusoidalTimeEmbed(time_dim)
@@ -48,10 +115,9 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
-
-        BlockClass = SymmetricDiTBlock if self.use_symmetric_attention else GenericDiTBlock
+        BlockClass = SparseSymmetryDiTBlock if self.use_sparse_attention else GenericDiTBlock
         self.layers = nn.ModuleList([
-            BlockClass(hidden_dim, num_heads) for _ in range(num_layers)
+            BlockClass(hidden_dim, num_heads, soft_cut_margin=self.soft_cut_margin) if self.use_sparse_attention else BlockClass(hidden_dim, num_heads) for _ in range(num_layers)
         ])
 
         self.final_layer = nn.LayerNorm(hidden_dim, elementwise_affine=False)
@@ -114,7 +180,10 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
         c = self.cond_proj(cond)
 
         for layer in self.layers:
-            feats = layer(feats, coords=x_t, c=c)
+            if isinstance(layer, SparseSymmetryDiTBlock):
+                feats = layer(feats, coords=x_t, c=c, distances=distances)
+            else:
+                feats = layer(feats, coords=x_t, c=c)
 
         shift, scale = self.final_adaLN(c).chunk(2, dim=1)
         feats = modulate(self.final_layer(feats), shift.unsqueeze(1), scale.unsqueeze(1))

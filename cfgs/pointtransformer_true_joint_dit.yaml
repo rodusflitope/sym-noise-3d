@@ -11,7 +11,7 @@ data:
   sample_symmetric: true
   symmetry_axis: 0
   use_symmetry_plane_labels: true
-  symmetry_plane_cache_path: "data/symmetry_cache.pt"
+  symmetry_plane_cache_path: "data/symmetry_cache/symmetry_cache_airplane_orthogonal_1p_optimized.pt"
   symmetry_plane_cache_required: true
 
 model:

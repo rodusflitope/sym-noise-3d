@@ -179,10 +179,40 @@ class TrueJointSymmetricDDPM_Sampler:
                     if not is_duplicate:
                         unique_planes.append(p_curr)
                 
+                matrices = [torch.eye(4, dtype=x0.dtype, device=x0.device)]
                 for p_curr in unique_planes:
-                    reflected = [reflect_points(pts.unsqueeze(0), p_curr.unsqueeze(0)).squeeze(0) for pts in pts_list]
-                    pts_list = pts_list + reflected
-                # resample_point_cloud expects [N, 3], not [B, N, 3]
+                    n = p_curr[:3]
+                    d = p_curr[3]
+                    R = torch.eye(3, dtype=x0.dtype, device=x0.device) - 2.0 * torch.outer(n, n)
+                    t = 2.0 * d * n
+                    
+                    H = torch.eye(4, dtype=x0.dtype, device=x0.device)
+                    H[:3, :3] = R
+                    H[:3, 3] = t
+                    
+                    new_matrices = []
+                    for M in matrices:
+                        new_matrices.append(H @ M)
+                    matrices.extend(new_matrices)
+                    
+                unique_matrices = []
+                for M in matrices:
+                    is_dup = False
+                    for U in unique_matrices:
+                        if torch.allclose(M, U, atol=1e-4):
+                            is_dup = True
+                            break
+                    if not is_dup:
+                        unique_matrices.append(M)
+                        
+                pts_list = []
+                pts = x0[b]
+                homo_points = torch.cat([pts, torch.ones((pts.shape[0], 1), dtype=pts.dtype, device=pts.device)], dim=-1)
+                
+                for M in unique_matrices:
+                    transformed = (homo_points @ M.T)[:, :3]
+                    pts_list.append(transformed)
+                    
                 x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points)
                 x0_full_list.append(x0_b_full)
             x0_full = torch.stack(x0_full_list, dim=0)
@@ -303,9 +333,40 @@ class TrueJointSymmetricDDPM_Sampler:
                     if not is_duplicate:
                         unique_planes.append(p_curr)
                 
+                matrices = [torch.eye(4, dtype=x0.dtype, device=x0.device)]
                 for p_curr in unique_planes:
-                    reflected = [reflect_points(pts.unsqueeze(0), p_curr.unsqueeze(0)).squeeze(0) for pts in pts_list]
-                    pts_list = pts_list + reflected
+                    n = p_curr[:3]
+                    d = p_curr[3]
+                    R = torch.eye(3, dtype=x0.dtype, device=x0.device) - 2.0 * torch.outer(n, n)
+                    t = 2.0 * d * n
+                    
+                    H = torch.eye(4, dtype=x0.dtype, device=x0.device)
+                    H[:3, :3] = R
+                    H[:3, 3] = t
+                    
+                    new_matrices = []
+                    for M in matrices:
+                        new_matrices.append(H @ M)
+                    matrices.extend(new_matrices)
+                    
+                unique_matrices = []
+                for M in matrices:
+                    is_dup = False
+                    for U in unique_matrices:
+                        if torch.allclose(M, U, atol=1e-4):
+                            is_dup = True
+                            break
+                    if not is_dup:
+                        unique_matrices.append(M)
+                        
+                pts_list = []
+                pts = x0[b]
+                homo_points = torch.cat([pts, torch.ones((pts.shape[0], 1), dtype=pts.dtype, device=pts.device)], dim=-1)
+                
+                for M in unique_matrices:
+                    transformed = (homo_points @ M.T)[:, :3]
+                    pts_list.append(transformed)
+                    
                 x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points)
                 x0_full_list.append(x0_b_full)
             x0_full = torch.stack(x0_full_list, dim=0)
