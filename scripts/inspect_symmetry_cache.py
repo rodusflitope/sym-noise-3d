@@ -30,6 +30,7 @@ def parse_args() -> ap.Namespace:
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--indices", type=str, default=None)
     parser.add_argument("--out_dir", type=str, default="debug/symmetry_cache")
+    parser.add_argument("--threshold", type=float, default=None, help="Only generate visual reflections/plots for planes with score below this threshold")
     return parser.parse_args()
 
 
@@ -88,21 +89,19 @@ def _plot_overlay(points: np.ndarray, reflected: np.ndarray, plane: torch.Tensor
     plt.close(fig)
 
 
-def main() -> None:
-    args = parse_args()
-    cache = load_symmetry_plane_cache(args.cache)
+def process_cache(args: ap.Namespace, cache_path: str, out_dir_path: pathlib.Path) -> None:
+    cache = load_symmetry_plane_cache(cache_path)
     meta = cache.get("meta", {}) or {}
     planes = cache.get("planes", {}) or {}
     keys = list(planes.keys())
     total = len(keys)
-    out_dir = pathlib.Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir_path.mkdir(parents=True, exist_ok=True)
 
     selected_indices = _parse_indices(args.indices, total)
     if args.indices is None:
         selected_indices = list(range(min(total, int(args.limit))))
 
-    print(f"[inspect_symmetry_cache] cache={args.cache}")
+    print(f"[inspect_symmetry_cache] cache={cache_path}")
     print(f"[inspect_symmetry_cache] entries={total} | meta={json.dumps(meta, ensure_ascii=True)}")
 
     root_dir = pathlib.Path(meta.get("root_dir", "data/ShapeNetCore"))
@@ -114,7 +113,17 @@ def main() -> None:
     for idx in selected_indices:
         key = keys[idx]
         entry = planes[key]
-        plane = entry["plane"].float()
+        
+        item_dir = out_dir_path / f"item_{idx:04d}"
+        item_dir.mkdir(parents=True, exist_ok=True)
+
+        if "planes" in entry:
+            plane_list = entry["planes"]
+            score_list = entry.get("scores", [float("nan")] * len(plane_list))
+        else:
+            plane_list = [entry["plane"]]
+            score_list = [entry.get("score", float("nan"))]
+
         obj_path = root_dir / pathlib.Path(key)
         points = sample_normalized_point_cloud(
             obj_path,
@@ -123,49 +132,73 @@ def main() -> None:
             symmetry_axis=symmetry_axis,
             deterministic_seed=stable_mesh_seed(obj_path, num_points),
         )
-        reflected = reflect_points(points.unsqueeze(0), plane.unsqueeze(0))[0]
-        cd = float(chamfer_distance(points.unsqueeze(0), reflected.unsqueeze(0)).mean().item())
-        plane_vals = [float(v) for v in plane.tolist()]
-        print(
-            f"[inspect_symmetry_cache] idx={idx} | key={key} | plane={plane_vals} | "
-            f"score={float(entry.get('score', float('nan'))):.6f} | reflected_cd={cd:.6f}"
-        )
-        item_dir = out_dir / f"item_{idx:04d}"
-        item_dir.mkdir(parents=True, exist_ok=True)
+        
         np.save(item_dir / "points.npy", points.cpu().numpy())
-        np.save(item_dir / "reflected.npy", reflected.cpu().numpy())
-        with open(item_dir / "plane.json", "w", encoding="utf-8") as handle:
-            json.dump(
-                {
-                    "index": idx,
-                    "key": key,
-                    "plane": plane_vals,
-                    "score": float(entry.get("score", float("nan"))),
-                    "reflected_cd": cd,
-                },
-                handle,
-                indent=2,
-            )
-        _plot_overlay(
-            points.cpu().numpy(),
-            reflected.cpu().numpy(),
-            plane,
-            item_dir / "overlay.png",
-            title=f"idx={idx} score={float(entry.get('score', float('nan'))):.6f}",
-        )
-        summary.append(
-            {
-                "index": idx,
-                "key": key,
-                "plane": plane_vals,
-                "score": float(entry.get("score", float("nan"))),
-                "reflected_cd": cd,
-            }
-        )
+        
+        entry_summary = {
+            "index": idx,
+            "key": key,
+            "planes": [],
+        }
 
-    with open(out_dir / "summary.json", "w", encoding="utf-8") as handle:
-        json.dump({"cache": args.cache, "meta": meta, "items": summary}, handle, indent=2)
-    print(f"[inspect_symmetry_cache] wrote outputs to {out_dir}")
+        for p_idx, (plane_t, score) in enumerate(zip(plane_list, score_list)):
+            plane = plane_t.float()
+            
+            if args.threshold is not None and not np.isnan(float(score)) and float(score) >= args.threshold:
+                continue
+                
+            reflected = reflect_points(points.unsqueeze(0), plane.unsqueeze(0))[0]
+            cd = float(chamfer_distance(points.unsqueeze(0), reflected.unsqueeze(0)).mean().item())
+            plane_vals = [float(v) for v in plane.tolist()]
+            
+            print(
+                f"[inspect_symmetry_cache] idx={idx} | p_idx={p_idx} | key={key} | plane={plane_vals} | "
+                f"score={float(score):.6f} | reflected_cd={cd:.6f}"
+            )
+            
+            np.save(item_dir / f"reflected_p{p_idx}.npy", reflected.cpu().numpy())
+            
+            _plot_overlay(
+                points.cpu().numpy(),
+                reflected.cpu().numpy(),
+                plane,
+                item_dir / f"overlay_p{p_idx}.png",
+                title=f"idx={idx} p_idx={p_idx} score={float(score):.6f}",
+            )
+            
+            entry_summary["planes"].append({
+                "p_idx": p_idx,
+                "plane": plane_vals,
+                "score": float(score),
+                "reflected_cd": cd,
+            })
+
+        with open(item_dir / "planes.json", "w", encoding="utf-8") as handle:
+            json.dump(entry_summary, handle, indent=2)
+
+        summary.append(entry_summary)
+
+    with open(out_dir_path / "summary.json", "w", encoding="utf-8") as handle:
+        json.dump({"cache": cache_path, "meta": meta, "items": summary}, handle, indent=2)
+    print(f"[inspect_symmetry_cache] wrote outputs to {out_dir_path}")
+
+
+def main() -> None:
+    args = parse_args()
+    cache_p = pathlib.Path(args.cache)
+    
+    if cache_p.is_dir():
+        pt_files = list(cache_p.glob("*.pt"))
+        if not pt_files:
+            print(f"No .pt files found in {cache_p}")
+            return
+        for cf in pt_files:
+            out_d = pathlib.Path(args.out_dir) / cf.stem
+            print(f"\n--- Processing cache file: {cf} ---")
+            process_cache(args, str(cf), out_d)
+    else:
+        out_d = pathlib.Path(args.out_dir) / cache_p.stem
+        process_cache(args, args.cache, out_d)
 
 
 if __name__ == "__main__":

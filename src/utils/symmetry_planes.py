@@ -557,7 +557,7 @@ def solve_translation_from_planes(planes: torch.Tensor) -> torch.Tensor:
     planes = normalize_plane(planes)
     normals = planes[..., :3]
     offsets = planes[..., 3]
-    solution = torch.linalg.lstsq(normals, offsets.unsqueeze(-1)).solution.squeeze(-1)
+    solution = (torch.linalg.pinv(normals) @ offsets.unsqueeze(-1)).squeeze(-1)
     return solution
 
 def translate_points(points: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:

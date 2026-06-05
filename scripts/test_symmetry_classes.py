@@ -65,7 +65,7 @@ def _draw_plane(ax, plane, color, alpha=0.18):
     ax.plot_surface(px, pz, py, color=color, alpha=alpha, linewidth=0, shade=False)
 
 
-def render_class_example(class_idx, mask, example_key, entry, root_dir, num_points, out_path, apply_canonical_translation=False):
+def render_class_example(class_idx, mask, example_key, entry, root_dir, num_points, out_path, apply_canonical_translation=False) -> list[Path]:
     obj_path = Path(root_dir) / example_key
     points = sample_normalized_point_cloud(
         obj_path,
@@ -94,47 +94,62 @@ def render_class_example(class_idx, mask, example_key, entry, root_dir, num_poin
         "Top": {"elev": 90, "azim": -90},
     }
 
-    fig = plt.figure(figsize=(15, 15))
-    for idx, (title, angles) in enumerate(views.items()):
-        ax = fig.add_subplot(2, 2, idx + 1, projection='3d')
-        ax.scatter(points[:, 0], points[:, 2], points[:, 1], s=8, c="#1a1a1a", marker='.', alpha=0.6)
+    active_indices = [i for i, active in enumerate(mask) if active]
+    if not active_indices:
+        active_indices = [None]
 
-        for i, active in enumerate(mask):
-            if active:
-                if isinstance(planes_data, torch.Tensor) and planes_data.ndim >= 2 and i < planes_data.shape[0]:
-                    plane = planes_data[i].float()
-                elif isinstance(planes_data, (list, tuple)) and i < len(planes_data):
-                    plane = torch.as_tensor(planes_data[i], dtype=torch.float32)
+    saved_files = []
+    out_path = Path(out_path)
+    for p_idx in active_indices:
+        fig = plt.figure(figsize=(15, 15))
+        for idx, (title, angles) in enumerate(views.items()):
+            ax = fig.add_subplot(2, 2, idx + 1, projection='3d')
+            ax.scatter(points[:, 0], points[:, 2], points[:, 1], s=8, c="#1a1a1a", marker='.', alpha=0.6)
+
+            if p_idx is not None:
+                if isinstance(planes_data, torch.Tensor) and planes_data.ndim >= 2 and p_idx < planes_data.shape[0]:
+                    plane = planes_data[p_idx].float()
+                elif isinstance(planes_data, (list, tuple)) and p_idx < len(planes_data):
+                    plane = torch.as_tensor(planes_data[p_idx], dtype=torch.float32)
                 else:
-                    plane = CANONICAL_SYMMETRY_PLANES[i].float()
+                    plane = CANONICAL_SYMMETRY_PLANES[p_idx].float()
                 if apply_canonical_translation and translation is not None:
                     plane = translate_plane(plane, translation)
                 plane = plane.numpy()
-                _draw_plane(ax, plane, plane_colors[i], alpha=0.22)
+                _draw_plane(ax, plane, plane_colors[p_idx % len(plane_colors)], alpha=0.22)
 
-        bound = 1.2
-        ax.set_xlim([-bound, bound])
-        ax.set_ylim([-bound, bound])
-        ax.set_zlim([-bound, bound])
-        ax.set_xlabel('X', fontsize=10)
-        ax.set_ylabel('Z', fontsize=10)
-        ax.set_zlabel('Y', fontsize=10)
-        ax.set_title(title, fontsize=14, pad=15)
-        ax.view_init(elev=angles["elev"], azim=angles["azim"])
-        ax.dist = 12
-        ax.grid(True)
-        if title == "Top":
-            ax.set_zticklabels([])
-        elif title == "Front":
-            ax.set_xticklabels([])
-        elif title == "Side":
-            ax.set_yticklabels([])
+            bound = 1.2
+            ax.set_xlim([-bound, bound])
+            ax.set_ylim([-bound, bound])
+            ax.set_zlim([-bound, bound])
+            ax.set_xlabel('X', fontsize=10)
+            ax.set_ylabel('Z', fontsize=10)
+            ax.set_zlabel('Y', fontsize=10)
+            ax.set_title(title, fontsize=14, pad=15)
+            ax.view_init(elev=angles["elev"], azim=angles["azim"])
+            ax.dist = 12
+            ax.grid(True)
+            if title == "Top":
+                ax.set_zticklabels([])
+            elif title == "Front":
+                ax.set_xticklabels([])
+            elif title == "Side":
+                ax.set_yticklabels([])
 
-    mask_str = "".join(str(m) for m in mask)
-    fig.suptitle(f"Class {class_idx} | Mask {mask_str} | {Path(example_key).name}", fontsize=16, y=0.98)
-    fig.subplots_adjust(top=0.93)
-    fig.savefig(out_path, bbox_inches='tight', pad_inches=0.4, dpi=150)
-    plt.close(fig)
+        mask_str = "".join(str(m) for m in mask)
+        plane_suffix = f" | Plane {p_idx}" if p_idx is not None else ""
+        fig.suptitle(f"Class {class_idx} | Mask {mask_str}{plane_suffix} | {Path(example_key).name}", fontsize=16, y=0.98)
+        fig.subplots_adjust(top=0.93)
+        
+        if p_idx is not None and len(active_indices) > 1:
+            curr_out_path = out_path.parent / f"{out_path.stem}_plane_{p_idx}{out_path.suffix}"
+        else:
+            curr_out_path = out_path
+        fig.savefig(curr_out_path, bbox_inches='tight', pad_inches=0.4, dpi=150)
+        plt.close(fig)
+        saved_files.append(curr_out_path)
+    
+    return saved_files
 
 
 def main() -> None:
@@ -215,7 +230,7 @@ def main() -> None:
         example = class_examples[class_idx]
         print(f"{class_idx:>6} | {mask_str:>10} | {class_counts[class_idx]:>8} | {example}")
         out_path = out_dir / f"class_{class_idx:02d}_mask_{mask_str}.png"
-        render_class_example(
+        rendered_files = render_class_example(
             class_idx,
             mask,
             example,
@@ -225,7 +240,7 @@ def main() -> None:
             out_path,
             apply_canonical_translation=args.apply_canonical_translation,
         )
-        saved_paths.append(out_path)
+        saved_paths.extend(rendered_files)
     print("-" * 60)
     print(f"\nAll visualizations saved to {out_dir}:")
     for p in saved_paths:

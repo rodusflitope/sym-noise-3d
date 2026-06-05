@@ -310,6 +310,7 @@ def build_model(cfg):
         num_heads = int(cfg["model"].get("num_heads", 4))
         num_layers = int(cfg["model"].get("num_layers", 2))
         use_symmetric_attention = bool(cfg["model"].get("use_symmetric_attention", False))
+        use_gram_matrix = bool(cfg["model"].get("use_gram_matrix", False))
 
         joint_cfg = cfg.get("joint_symmetry", {}) or {}
         geometry_mode = str(joint_cfg.get("geometry_mode", cfg["model"].get("joint_geometry_mode", "half"))).lower()
@@ -323,6 +324,7 @@ def build_model(cfg):
             num_heads=num_heads,
             num_layers=num_layers,
             use_symmetric_attention=use_symmetric_attention,
+            use_gram_matrix=use_gram_matrix,
             geometry_mode=geometry_mode,
             inactive_plane_norm_threshold=inactive_plane_norm_threshold,
             use_presence_logits=use_presence_logits,

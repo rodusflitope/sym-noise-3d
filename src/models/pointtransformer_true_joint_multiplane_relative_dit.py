@@ -68,7 +68,7 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
         self.plane_out = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 3 * num_planes)
+            nn.Linear(hidden_dim, 4 * num_planes)
         )
         if self.use_presence_logits:
             self.presence_head = nn.Linear(hidden_dim, num_planes)
@@ -122,10 +122,7 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
         eps_points = self.to_out(feats)
         
         pooled_feat = feats.mean(dim=1)
-        eps_normals = self.plane_out(pooled_feat).view(B, self.num_planes, 3)
-        
-        eps_offsets = torch.zeros(B, self.num_planes, 1, device=eps_normals.device)
-        eps_plane = torch.cat([eps_normals, eps_offsets], dim=-1) # (B, num_planes, 4)
+        eps_plane = self.plane_out(pooled_feat).view(B, self.num_planes, 4)
         presence_logits = self.presence_head(pooled_feat) if self.presence_head is not None else None
 
         if plane_t.dim() == 2 and plane_t.shape[-1] == self.num_planes * 4:

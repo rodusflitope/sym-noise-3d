@@ -307,7 +307,9 @@ class TrueJointSymmetryPlaneLoss:
                 # Replace inactive slots with dummy non-zero normals to avoid NaN gradients in F.cosine_similarity
                 dummy_normal = torch.tensor([1.0, 0.0, 0.0], dtype=plane_target.dtype, device=plane_target.device).view(1, 1, 3)
                 plane_target_safe = torch.where(active_mask.unsqueeze(-1) > 0.5, plane_target[..., :3], dummy_normal)
-                plane_pred_safe = torch.where(active_mask.unsqueeze(-1) > 0.5, plane_x0_pred[..., :3], dummy_normal)
+                pred_norm = plane_x0_pred[..., :3].norm(dim=-1, keepdim=True)
+                pred_safe_initial = torch.where(pred_norm > 1e-5, plane_x0_pred[..., :3], dummy_normal)
+                plane_pred_safe = torch.where(active_mask.unsqueeze(-1) > 0.5, pred_safe_initial, dummy_normal)
                 
                 normal_cos = F.cosine_similarity(plane_pred_safe, plane_target_safe, dim=-1)
                 loss_plane_normal_raw = 1.0 - normal_cos

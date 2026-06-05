@@ -931,9 +931,6 @@ def main() -> None:
                         x_t, eps = forward.add_noise(x0_input, t)
                         plane_t, eps_plane = forward.add_noise(plane_target, t)
 
-                        # Force the offset to 0 for true joint diffusion since model doesn't predict it
-                        plane_t[..., 3] = 0.0
-                        eps_plane[..., 3] = 0.0
                         # Keep inactive-slot noise by default (correct DDPM objective for x0=0 slots).
                         mask_inactive_plane_noise = bool(
                             joint_mode_cfg.get("mask_inactive_plane_noise", False)

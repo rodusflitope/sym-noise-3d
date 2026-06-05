@@ -247,42 +247,8 @@ def _run_joint_test_debug(model, cfg, device, forward, sampler, alpha_bars, num_
     return payload
 
 
-def main():
-    args = parse_args()
-    
-    temp_cfg = load_cfg(args.cfg)
-    
-    ckpt = args.ckpt
-    if ckpt is None:
-        run_root = resolve_dated_root(temp_cfg["train"]["out_dir"])
-        exp_prefix = str(temp_cfg["exp_name"])
-        candidates = []
-        if run_root.exists():
-            for child in run_root.iterdir():
-                if not child.is_dir():
-                    continue
-                if not child.name.startswith(exp_prefix):
-                    continue
-                last_pt = child / "last.pt"
-                if last_pt.exists():
-                    candidates.append(last_pt)
-        if candidates:
-            ckpt = str(max(candidates, key=lambda p: p.stat().st_mtime))
-        else:
-            ckpt = str(run_root / exp_prefix / "last.pt")
-
-    p = pathlib.Path(ckpt)
-    if p.is_dir():
-        if (p / "best.pt").exists():
-            ckpt = str(p / "best.pt")
-            print(f"[sample] directory provided, using best.pt: {ckpt}")
-        elif (p / "last.pt").exists():
-            ckpt = str(p / "last.pt")
-            print(f"[sample] directory provided, using last.pt: {ckpt}")
-        else:
-            raise ValueError(f"[sample] ckpt directory '{ckpt}' does not contain 'best.pt' or 'last.pt'. Please specify a file.")
-
-    print(f"[sample] Target checkpoint: {ckpt}")
+def sample_checkpoint(args, temp_cfg, ckpt):
+    print(f"\n[sample] Target checkpoint: {ckpt}")
     saved_cfg = load_ckpt_config(ckpt)
     if saved_cfg is not None:
         print("[sample] Using configuration loaded from checkpoint metadata.")
@@ -551,6 +517,58 @@ def main():
             )
         
     print(f"[sample] saved {num_samples} samples and visualizations in: {save_dir}")
+
+def main():
+    args = parse_args()
+    temp_cfg = load_cfg(args.cfg)
+    
+    ckpt_arg = args.ckpt
+    ckpts_to_process = []
+    
+    if ckpt_arg is None:
+        run_root = resolve_dated_root(temp_cfg["train"]["out_dir"])
+        exp_prefix = str(temp_cfg["exp_name"])
+        candidates = []
+        if run_root.exists():
+            for child in run_root.iterdir():
+                if not child.is_dir():
+                    continue
+                if not child.name.startswith(exp_prefix):
+                    continue
+                last_pt = child / "last.pt"
+                if last_pt.exists():
+                    candidates.append(last_pt)
+        if candidates:
+            ckpts_to_process.append(str(max(candidates, key=lambda p: p.stat().st_mtime)))
+        else:
+            ckpts_to_process.append(str(run_root / exp_prefix / "last.pt"))
+    else:
+        p = pathlib.Path(ckpt_arg)
+        if p.is_dir():
+            if (p / "best.pt").exists():
+                ckpts_to_process.append(str(p / "best.pt"))
+                print(f"[sample] directory provided, using best.pt: {p / 'best.pt'}")
+            elif (p / "last.pt").exists():
+                ckpts_to_process.append(str(p / "last.pt"))
+                print(f"[sample] directory provided, using last.pt: {p / 'last.pt'}")
+            else:
+                print(f"[sample] directory provided doesn't have best.pt or last.pt. Searching subdirectories...")
+                for child in p.iterdir():
+                    if child.is_dir():
+                        if (child / "best.pt").exists():
+                            ckpts_to_process.append(str(child / "best.pt"))
+                        elif (child / "last.pt").exists():
+                            ckpts_to_process.append(str(child / "last.pt"))
+                if not ckpts_to_process:
+                    raise ValueError(f"[sample] directory '{ckpt_arg}' and its subdirectories do not contain 'best.pt' or 'last.pt'.")
+        else:
+            ckpts_to_process.append(ckpt_arg)
+
+    for ckpt in ckpts_to_process:
+        try:
+            sample_checkpoint(args, temp_cfg, ckpt)
+        except Exception as e:
+            print(f"[sample] ERROR processing {ckpt}: {e}")
 
 if __name__ == "__main__":
     main()

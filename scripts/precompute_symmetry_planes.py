@@ -87,10 +87,21 @@ def main() -> None:
         if args.type == "orthogonal":
             canonical_planes = CANONICAL_SYMMETRY_PLANES
         elif args.type == "dihedral":
+            sym_axis = int(data_cfg.get("symmetry_axis", 0))
             planes = []
             for i in range(args.k):
                 angle = i * math.pi / args.k
-                planes.append([math.cos(angle), math.sin(angle), 0.0, 0.0])
+                normal = [0.0, 0.0, 0.0]
+                if sym_axis == 0:
+                    normal[1] = math.cos(angle)
+                    normal[2] = math.sin(angle)
+                elif sym_axis == 1:
+                    normal[0] = math.cos(angle)
+                    normal[2] = math.sin(angle)
+                else:
+                    normal[0] = math.cos(angle)
+                    normal[1] = math.sin(angle)
+                planes.append(normal + [0.0])
             canonical_planes = torch.tensor(planes, dtype=torch.float32)
         elif args.type == "arbitrary":
             normals = torch.randn(args.n, 3)
@@ -103,7 +114,6 @@ def main() -> None:
         canonical_planes = CANONICAL_SYMMETRY_PLANES if use_canonical else None
     device_arg = cfg.get("device", "auto")
     if device_arg == "auto":
-        import torch
         device_arg = "cuda" if torch.cuda.is_available() else "cpu"
         
     canonical_offset_reduction = args.canonical_offset_reduction or str(data_cfg.get("canonical_symmetry_offset_reduction", "median"))

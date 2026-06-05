@@ -1,4 +1,4 @@
-exp_name: "pointtransformer-true-joint-multiplane-relative-dit-dihedral"
+exp_name: "pointtransformer-true-joint-multiplane-dit-sparse-3p"
 seed: 10
 device: "auto"
 
@@ -10,33 +10,33 @@ data:
   val_frac: 0.1
   test_frac: 0.1
   sample_symmetric: false
-  symmetry_axis: 1
+  symmetry_axis: 0
   use_symmetry_plane_labels: true
-  symmetry_plane_cache_path: "data/symmetry_cache/symmetry_cache_table_dihedral_6p_canonical.pt"
+  symmetry_plane_cache_path: "data/symmetry_cache/symmetry_cache_table_per_object_3p_optimized.pt"
   symmetry_plane_cache_required: true
   use_symmetry_classes: true
-  canonical_symmetry_planes: true
+  canonical_symmetry_planes: false
   canonical_symmetry_offset_reduction: "median"
-  apply_canonical_symmetry_translation: true
+  apply_canonical_symmetry_translation: false
   symmetry_precompute_num_points: 8192
-  symmetry_plane_score_threshold: 0.005
+  symmetry_plane_score_threshold: 0.001
   symmetry_plane_balance_threshold: 0.01
-  num_symmetry_planes: 6
-  train_sample_symmetric_from_gt: true
-  return_fundamental_domain: true
+  num_symmetry_planes: 3
+  train_sample_symmetric_from_gt: false
+  return_fundamental_domain: false
   soft_cut: true
   soft_cut_margin: 0.05
 
 model:
-  name: "pointtransformer_true_joint_multiplane_dihedral_dit"
+  name: "pointtransformer_true_joint_multiplane_sparse_dit"
   hidden_dim: 128
   time_dim: 128
-  num_planes: 6
+  num_planes: 3
   num_heads: 4
   num_layers: 3
   use_fourier_features: false
-  use_symmetric_attention: false
-  use_gram_matrix: false
+  use_sparse_attention: true
+  use_gram_matrix: true
 
 joint_symmetry:
   geometry_mode: "full"
