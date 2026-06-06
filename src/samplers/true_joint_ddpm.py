@@ -143,8 +143,9 @@ class TrueJointSymmetricDDPM_Sampler:
                 plane_final = torch.where(active_mask.unsqueeze(-1), plane_final, torch.zeros_like(plane_final))
 
         return_fundamental_only = getattr(self, 'return_fundamental_only', False)
+        return_fundamental_domain = bool(cfg.get("data", {}).get("return_fundamental_domain", False))
 
-        if (is_half or num_planes > 1) and not return_fundamental_only:
+        if (is_half or return_fundamental_domain) and not return_fundamental_only:
             x0_full_list = []
             if plane_final.dim() == 2:
                 plane_iter = plane_final.unsqueeze(1)
@@ -176,31 +177,8 @@ class TrueJointSymmetricDDPM_Sampler:
                     if not is_duplicate:
                         unique_planes.append(p_curr)
                 
-                matrices = [torch.eye(4, dtype=x0.dtype, device=x0.device)]
-                for p_curr in unique_planes:
-                    n = p_curr[:3]
-                    d = p_curr[3]
-                    R = torch.eye(3, dtype=x0.dtype, device=x0.device) - 2.0 * torch.outer(n, n)
-                    t = 2.0 * d * n
-                    
-                    H = torch.eye(4, dtype=x0.dtype, device=x0.device)
-                    H[:3, :3] = R
-                    H[:3, 3] = t
-                    
-                    new_matrices = []
-                    for M in matrices:
-                        new_matrices.append(H @ M)
-                    matrices.extend(new_matrices)
-                    
-                unique_matrices = []
-                for M in matrices:
-                    is_dup = False
-                    for U in unique_matrices:
-                        if torch.allclose(M, U, atol=1e-4):
-                            is_dup = True
-                            break
-                    if not is_dup:
-                        unique_matrices.append(M)
+                from src.utils.symmetry_planes import calculate_group_closure_matrices
+                unique_matrices = calculate_group_closure_matrices(unique_planes, dtype=x0.dtype, device=x0.device)
                         
                 pts_list = []
                 pts = x0[b]
@@ -238,9 +216,15 @@ class TrueJointSymmetricDDPM_Sampler:
         prune_inactive_planes_on_output = bool(joint_cfg.get("prune_inactive_planes_on_output", True))
 
         is_half = (geometry_mode == "half")
-        N_gen = (num_points // 2) if is_half else num_points
-
         num_planes = target_planes.shape[1] if target_planes.dim() > 2 else 1
+        
+        active_planes_count = (target_planes[0, ..., :3].norm(dim=-1) > 1e-5).sum().item() if target_planes.dim() > 2 else (target_planes[0, :3].norm(dim=-1) > 1e-5).sum().item()
+        return_fundamental_domain = bool(cfg.get("data", {}).get("return_fundamental_domain", False))
+        
+        if is_half or return_fundamental_domain:
+            N_gen = max(1, num_points // (2 ** int(active_planes_count)))
+        else:
+            N_gen = num_points
 
         if self.noise_type is not None:
             x_t = self.noise_type.sample((num_samples, N_gen, 3), device)
@@ -298,8 +282,9 @@ class TrueJointSymmetricDDPM_Sampler:
             plane_final = torch.where(active_mask.unsqueeze(-1), plane_final, torch.zeros_like(plane_final))
         
         return_fundamental_only = getattr(self, 'return_fundamental_only', False)
+        return_fundamental_domain = bool(cfg.get("data", {}).get("return_fundamental_domain", False))
         
-        if (is_half or num_planes > 1) and not return_fundamental_only:
+        if (is_half or return_fundamental_domain) and not return_fundamental_only:
             x0_full_list = []
             if plane_final.dim() == 2:
                 plane_iter = plane_final.unsqueeze(1)
@@ -327,31 +312,8 @@ class TrueJointSymmetricDDPM_Sampler:
                     if not is_duplicate:
                         unique_planes.append(p_curr)
                 
-                matrices = [torch.eye(4, dtype=x0.dtype, device=x0.device)]
-                for p_curr in unique_planes:
-                    n = p_curr[:3]
-                    d = p_curr[3]
-                    R = torch.eye(3, dtype=x0.dtype, device=x0.device) - 2.0 * torch.outer(n, n)
-                    t = 2.0 * d * n
-                    
-                    H = torch.eye(4, dtype=x0.dtype, device=x0.device)
-                    H[:3, :3] = R
-                    H[:3, 3] = t
-                    
-                    new_matrices = []
-                    for M in matrices:
-                        new_matrices.append(H @ M)
-                    matrices.extend(new_matrices)
-                    
-                unique_matrices = []
-                for M in matrices:
-                    is_dup = False
-                    for U in unique_matrices:
-                        if torch.allclose(M, U, atol=1e-4):
-                            is_dup = True
-                            break
-                    if not is_dup:
-                        unique_matrices.append(M)
+                from src.utils.symmetry_planes import calculate_group_closure_matrices
+                unique_matrices = calculate_group_closure_matrices(unique_planes, dtype=x0.dtype, device=x0.device)
                         
                 pts_list = []
                 pts = x0[b]

@@ -124,6 +124,57 @@ def select_fundamental_domain(points: torch.Tensor, planes: torch.Tensor, mask: 
     return pts[keep]
 
 
+def calculate_group_closure_matrices(active_planes: list[torch.Tensor], dtype, device) -> list[torch.Tensor]:
+    if not active_planes:
+        return [torch.eye(4, dtype=dtype, device=device)]
+        
+    generator_matrices = []
+    for plane in active_planes:
+        n = plane[:3]
+        d = plane[3]
+        R = torch.eye(3, dtype=dtype, device=device) - 2.0 * torch.outer(n, n)
+        t = 2.0 * d * n
+        H = torch.eye(4, dtype=dtype, device=device)
+        H[:3, :3] = R
+        H[:3, 3] = t
+        generator_matrices.append(H)
+        
+    matrices = [torch.eye(4, dtype=dtype, device=device)]
+    
+    # Mathematical Group Closure: multiply generators iteratively until no new elements emerge.
+    added_new = True
+    max_elements = 64  # safe limit to prevent infinite loops from float precision issues
+    while added_new and len(matrices) < max_elements:
+        added_new = False
+        new_matrices = []
+        for M in matrices:
+            for H in generator_matrices:
+                new_M = H @ M
+                
+                is_dup = False
+                for U in matrices + new_matrices:
+                    if torch.allclose(new_M, U, atol=1e-4):
+                        is_dup = True
+                        break
+                        
+                if not is_dup:
+                    new_matrices.append(new_M)
+                    added_new = True
+        matrices.extend(new_matrices)
+        
+    unique_matrices = []
+    for M in matrices:
+        is_dup = False
+        for U in unique_matrices:
+            if torch.allclose(M, U, atol=1e-4):
+                is_dup = True
+                break
+        if not is_dup:
+            unique_matrices.append(M)
+            
+    return unique_matrices
+
+
 def reconstruct_from_fundamental_domain(points: torch.Tensor, planes: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     planes = normalize_plane(planes.to(device=points.device, dtype=points.dtype))
     mask = mask.to(device=points.device).bool()
@@ -136,32 +187,7 @@ def reconstruct_from_fundamental_domain(points: torch.Tensor, planes: torch.Tens
     if not active_planes:
         return points
         
-    matrices = [torch.eye(4, dtype=points.dtype, device=points.device)]
-    
-    for plane in active_planes:
-        n = plane[:3]
-        d = plane[3]
-        R = torch.eye(3, dtype=points.dtype, device=points.device) - 2.0 * torch.outer(n, n)
-        t = 2.0 * d * n
-        
-        H = torch.eye(4, dtype=points.dtype, device=points.device)
-        H[:3, :3] = R
-        H[:3, 3] = t
-        
-        new_matrices = []
-        for M in matrices:
-            new_matrices.append(H @ M)
-        matrices.extend(new_matrices)
-        
-    unique_matrices = []
-    for M in matrices:
-        is_dup = False
-        for U in unique_matrices:
-            if torch.allclose(M, U, atol=1e-4):
-                is_dup = True
-                break
-        if not is_dup:
-            unique_matrices.append(M)
+    unique_matrices = calculate_group_closure_matrices(active_planes, dtype=points.dtype, device=points.device)
             
     pts_list = []
     homo_points = torch.cat([points, torch.ones((points.shape[0], 1), dtype=points.dtype, device=points.device)], dim=-1)

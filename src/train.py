@@ -489,6 +489,36 @@ def parse_args() -> ap.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    cfg_path_obj = pathlib.Path(args.cfg)
+    if cfg_path_obj.is_dir():
+        import subprocess
+        print(f"[train] Directory provided for --cfg: {cfg_path_obj}")
+        yaml_files = sorted(list(cfg_path_obj.glob("*.yaml")) + list(cfg_path_obj.glob("*.yml")))
+        if not yaml_files:
+            print(f"[train] No YAML files found in {cfg_path_obj}")
+            return
+        
+        print(f"[train] Found {len(yaml_files)} config files to train sequentially.")
+        for i, yml_file in enumerate(yaml_files, 1):
+            print(f"\n{'='*60}")
+            print(f"[{i}/{len(yaml_files)}] Training config: {yml_file.name}")
+            print(f"{'='*60}")
+            
+            # Reconstruct the command for the subprocess
+            cmd = ["python", "-m", "src.train", "--cfg", str(yml_file)]
+            if args.ae_ckpt:
+                cmd.extend(["--ae_ckpt", args.ae_ckpt])
+            if args.resume:
+                cmd.extend(["--resume", args.resume])
+            
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"[train] ERROR: Training failed for {yml_file.name} with exit code {e.returncode}")
+                # We continue to the next experiment so a single crash doesn't stop the whole batch
+        return
+
     cfg = load_cfg(args.cfg)
 
     set_seed(cfg.get("seed"))

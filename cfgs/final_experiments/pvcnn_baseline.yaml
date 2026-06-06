@@ -1,0 +1,46 @@
+exp_name: pvcnn_baseline
+seed: 10
+device: auto
+data:
+  root_dir: data/ShapeNetCore
+  augment: false
+  val_frac: 0.1
+  test_frac: 0.1
+  symmetry_precompute_num_points: 8192
+model:
+  name: pvcnn
+  hidden_dim: 256
+  time_dim: 128
+  resolution: 32
+  num_blocks: 3
+loss:
+  name: mse
+  weighting: none
+train:
+  batch_size: 16
+  epochs: 100
+  log_every: 50
+  num_points: 2048
+  num_workers: 4
+  out_dir: runs
+  save_every: 10
+  amp: true
+diffusion:
+  T: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: linear
+  noise_type: gaussian
+sampler:
+  name: ddpm
+  eta: 1.0
+  num_samples: 4
+  save_dir: samples
+  save_format: npy
+  normalize_output: true
+  normalizer: center_and_scale
+lr_scheduler:
+  name: cosine_warmup
+  base_lr: 0.0002
+  min_lr: 1.0e-06
+  warmup_steps: 500

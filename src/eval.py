@@ -421,7 +421,16 @@ def evaluate(
     if len(gt_items) == 0:
         raise ValueError("[eval] No ground-truth items found")
     if isinstance(gt_items[0], dict):
-        gt = torch.stack([item["points"] for item in gt_items], dim=0)
+        gt_list = []
+        from src.utils.symmetry_planes import reconstruct_from_fundamental_domain, resample_point_cloud
+        return_fundamental = bool(cfg.get("data", {}).get("return_fundamental_domain", False))
+        for item in gt_items:
+            pts = item["points"]
+            if return_fundamental and "symmetry_plane" in item and "symmetry_plane_mask" in item:
+                pts = reconstruct_from_fundamental_domain(pts, item["symmetry_plane"], item["symmetry_plane_mask"])
+            pts = resample_point_cloud(pts, num_points)
+            gt_list.append(pts)
+        gt = torch.stack(gt_list, dim=0)
     else:
         gt = torch.stack(gt_items, dim=0)
     gen = samples[:n_eval]

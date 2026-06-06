@@ -1,52 +1,47 @@
-exp_name: "pointtransformer-true-joint-multiplane-relative-dit-dihedral-gram"
+exp_name: pt_true_joint_relative_orthogonal
 seed: 10
-device: "auto"
-
+device: auto
 data:
-  root_dir: "data/ShapeNetCore"
-  categories: ["table"]
-  max_models: 1000
+  root_dir: data/ShapeNetCore
+  categories:
+  - table
   augment: false
   val_frac: 0.1
   test_frac: 0.1
   sample_symmetric: false
   symmetry_axis: 0
   use_symmetry_plane_labels: true
-  symmetry_plane_cache_path: "data/symmetry_cache/symmetry_cache_table_dihedral_6p_canonical.pt"
+  symmetry_plane_cache_path: data/symmetry_cache/symmetry_cache_table_orthogonal_3p_canonical.pt
   symmetry_plane_cache_required: true
   use_symmetry_classes: true
   canonical_symmetry_planes: true
-  canonical_symmetry_offset_reduction: "median"
+  canonical_symmetry_offset_reduction: median
   apply_canonical_symmetry_translation: true
   symmetry_precompute_num_points: 8192
-  symmetry_plane_score_threshold: 0.005
+  symmetry_plane_score_threshold: 0.001
   symmetry_plane_balance_threshold: 0.01
-  num_symmetry_planes: 6
+  num_symmetry_planes: 3
   train_sample_symmetric_from_gt: true
   return_fundamental_domain: true
   soft_cut: true
   soft_cut_margin: 0.05
-
 model:
-  name: "pointtransformer_true_joint_multiplane_dihedral_dit"
-  hidden_dim: 128
-  time_dim: 128
-  num_planes: 6
-  num_heads: 4
-  num_layers: 3
+  name: pointtransformer_true_joint_multiplane_relative_dit
+  hidden_dim: 256
+  time_dim: 256
+  num_planes: 3
+  num_heads: 8
+  num_layers: 6
   use_fourier_features: false
   use_symmetric_attention: false
-  use_gram_matrix: true
-
 joint_symmetry:
-  geometry_mode: "full"
-  plane_mode: "diffusion"
+  geometry_mode: full
+  plane_mode: diffusion
   inactive_plane_norm_threshold: 1e-5
   renormalize_planes_during_sampling: false
   mask_inactive_plane_noise: false
-
 loss:
-  name: "true_joint_symmetry_plane_loss"
+  name: true_joint_symmetry_plane_loss
   lambda_diff: 1.0
   lambda_plane: 1.0
   lambda_recon: 0.0
@@ -54,37 +49,33 @@ loss:
   lambda_plane_consistency: 0.0
   boundary_margin: 0.02
   recon_cd_sigma: 0.15
-  weighting: "none"
-  metric: "cd"
-
+  weighting: none
+  metric: cd
 train:
   batch_size: 16
   epochs: 200
   log_every: 50
   num_points: 2048
   num_workers: 2
-  out_dir: "runs"
+  out_dir: runs
   save_every: 10
-  trainer: "joint"
+  trainer: joint
   joint_weight_plane: 0.5
-
 diffusion:
   T: 1000
   beta_start: 0.0001
   beta_end: 0.02
-  schedule: "linear"
-  noise_type: "gaussian"
-
+  schedule: linear
+  noise_type: gaussian
 sampler:
-  name: "ddpm"
+  name: ddpm
   eta: 1.0
   num_samples: 4
-  save_dir: "samples"
-  save_format: "npy"
+  save_dir: samples
+  save_format: npy
   symmetry_class: 1
-
 lr_scheduler:
-  name: "cosine_warmup"
-  base_lr: 1.0e-4
-  min_lr: 1.0e-6
+  name: cosine_warmup
+  base_lr: 0.0001
+  min_lr: 1.0e-06
   warmup_steps: 500

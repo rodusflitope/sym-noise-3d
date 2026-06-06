@@ -32,6 +32,7 @@ def parse_args() -> ap.Namespace:
     parser.add_argument("--type", type=str, default=None, choices=["orthogonal", "dihedral", "arbitrary", "per_object"])
     parser.add_argument("--k", type=int, default=3, help="Order of dihedral symmetry")
     parser.add_argument("--n", type=int, default=3, help="Number of arbitrary planes")
+    parser.add_argument("--high_precision", action="store_true", help="Increase restarts and steps for robust plane extraction on external servers")
     return parser.parse_args()
 
 
@@ -117,6 +118,13 @@ def main() -> None:
         device_arg = "cuda" if torch.cuda.is_available() else "cpu"
         
     canonical_offset_reduction = args.canonical_offset_reduction or str(data_cfg.get("canonical_symmetry_offset_reduction", "median"))
+    num_restarts = int(args.num_restarts)
+    steps = int(args.steps)
+    if args.high_precision:
+        num_restarts = 32
+        steps = 1000
+        print("[precompute_symmetry_planes] HIGH PRECISION ENABLED: num_restarts=32, steps=1000")
+
     payload = build_symmetry_plane_cache(
         data_cfg.get("root_dir", "data/ShapeNetCore"),
         categories=data_cfg.get("categories", None),
@@ -124,8 +132,8 @@ def main() -> None:
         max_models=args.max_models if args.max_models is not None else data_cfg.get("max_models", None),
         sample_symmetric=bool(data_cfg.get("sample_symmetric", False)),
         symmetry_axis=int(data_cfg.get("symmetry_axis", 0)),
-        num_restarts=int(args.num_restarts),
-        steps=int(args.steps),
+        num_restarts=num_restarts,
+        steps=steps,
         lr=float(args.lr),
         device=device_arg,
         progress_every=max(1, int(args.progress_every)),

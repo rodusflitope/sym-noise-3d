@@ -134,7 +134,8 @@ def parse_args():
     p.add_argument("--ae_ckpt", type=str, default=None,
                    help="Checkpoint del autoencoder para modo latente (opcional: usa AE_CHECKPOINT si no se pasa)")
     p.add_argument("--symmetry_class", type=int, default=None)
-    p.add_argument("--test_disentanglement", action="store_true", help="Probar disentanglement con planos rotados fijos.")
+    p.add_argument("--test_disentanglement", action="store_true", help="Probar disentanglement con un plano fijo.")
+    p.add_argument("--condition_canonical", action="store_true", help="Condicionar la generación con los planos canónicos para ahorrar memoria (evalúa Sparse/Dihedral).")
     p.add_argument("--return_fundamental_only", action="store_true", help="Retornar solo el dominio fundamental (sin reflejar).")
     p.add_argument("--num_samples", type=int, default=None, help="Sobrescribe la cantidad de samples a generar.")
     return p.parse_args()
@@ -317,7 +318,27 @@ def sample_checkpoint(args, temp_cfg, ckpt):
                 print("[sample] FORZANDO SOLO DOMINIO FUNDAMENTAL (sin reflejar).")
                 true_joint_sampler.return_fundamental_only = True
                 
-            if args.test_disentanglement:
+            if args.condition_canonical:
+                print("[sample] CONDITIONAL INFERENCE: Condicionando usando todos los planos canónicos.")
+                num_planes = getattr(model, "num_planes", 1)
+                from src.utils.symmetry_planes import CANONICAL_SYMMETRY_PLANES
+                canon_planes = CANONICAL_SYMMETRY_PLANES.to(device=device, dtype=torch.float32)
+                if num_planes > len(canon_planes):
+                    canon_planes = torch.cat([canon_planes, torch.zeros(num_planes - len(canon_planes), 4, device=device)], dim=0)
+                else:
+                    canon_planes = canon_planes[:num_planes]
+                
+                target_planes = canon_planes.unsqueeze(0).expand(num_samples, -1, -1)
+                out = true_joint_sampler.sample_with_fixed_planes(
+                    model,
+                    cfg=cfg,
+                    target_planes=target_planes,
+                    num_samples=num_samples,
+                    num_points=num_points,
+                    device=device,
+                    alpha_bars=alpha_bars,
+                )
+            elif args.test_disentanglement:
                 print("[sample] TEST DISENTANGLEMENT: Forzando planos canónicos fijos.")
                 num_planes = getattr(model, "num_planes", 1)
                 sampler_cfg = cfg.get("sampler", {}) or {}
