@@ -39,11 +39,17 @@ class TrueJointSymmetricDDPM_Sampler:
         use_presence_for_reflection = bool(joint_cfg.get("use_presence_logits_for_reflection", joint_cfg.get("use_presence_logits", False)))
         presence_threshold = float(joint_cfg.get("presence_threshold", 0.5))
         prune_inactive_planes_on_output = bool(joint_cfg.get("prune_inactive_planes_on_output", True))
+        use_iterative_reflection = bool(joint_cfg.get("use_iterative_reflection", False))
 
         is_half = (geometry_mode == "half")
-        N_gen = (num_points // 2) if is_half else num_points
-
         num_planes = getattr(model, "num_planes", 1)
+        return_fundamental_domain = bool(cfg.get("data", {}).get("return_fundamental_domain", False))
+
+        if is_half:
+            N_gen = num_points // 2
+        else:
+            N_gen = num_points
+
         if num_planes > 1:
             if self.noise_type is not None:
                 x_t = self.noise_type.sample((num_samples, N_gen, 3), device)
@@ -97,7 +103,7 @@ class TrueJointSymmetricDDPM_Sampler:
                             continue
                         normals = p_curr[:, :3].unsqueeze(1)
                         offsets = p_curr[:, 3].unsqueeze(1).unsqueeze(2)
-                        dists_to_plane = torch.abs(torch.bmm(x0_pred, normals.transpose(1, 2)) + offsets).squeeze(-1)
+                        dists_to_plane = torch.abs(torch.bmm(x0_pred, normals.transpose(1, 2)) - offsets).squeeze(-1)
                         min_dists, _ = torch.topk(dists_to_plane, k=max(1, int(x0_pred.shape[1] * boundary_frac)), dim=1, largest=False)
                         per_sample = torch.relu(min_dists - boundary_margin).mean(dim=1)
                         weight = active_plane.to(dtype=per_sample.dtype)
@@ -177,19 +183,27 @@ class TrueJointSymmetricDDPM_Sampler:
                     if not is_duplicate:
                         unique_planes.append(p_curr)
                 
-                from src.utils.symmetry_planes import calculate_group_closure_matrices
-                unique_matrices = calculate_group_closure_matrices(unique_planes, dtype=x0.dtype, device=x0.device)
-                        
-                pts_list = []
-                pts = x0[b]
-                homo_points = torch.cat([pts, torch.ones((pts.shape[0], 1), dtype=pts.dtype, device=pts.device)], dim=-1)
-                
-                for M in unique_matrices:
-                    transformed = (homo_points @ M.T)[:, :3]
-                    pts_list.append(transformed)
+                if use_iterative_reflection:
+                    pts_list = [x0[b]]
+                    for p_curr in unique_planes:
+                        # reflect_points expects [B, N, 3] and plane [B, 4]
+                        reflected = [reflect_points(pts.unsqueeze(0), p_curr.unsqueeze(0)).squeeze(0) for pts in pts_list]
+                        pts_list = pts_list + reflected
                     
-                x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points)
-                x0_full_list.append(x0_b_full)
+                    x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points)
+                    x0_full_list.append(x0_b_full)
+                else:
+                    from src.utils.symmetry_planes import calculate_group_closure_matrices
+                    unique_matrices = calculate_group_closure_matrices(unique_planes, dtype=x0.dtype, device=x0.device)
+                            
+                    pts = x0[b]
+                    homo_points = torch.cat([pts, torch.ones((pts.shape[0], 1), dtype=pts.dtype, device=pts.device)], dim=-1)
+                    
+                    M_stacked = torch.stack(unique_matrices)
+                    transformed = torch.einsum('ni, gji -> gnj', homo_points, M_stacked)[..., :3]
+                        
+                    x0_b_full = resample_point_cloud(transformed.reshape(-1, 3), num_points)
+                    x0_full_list.append(x0_b_full)
             x0_full = torch.stack(x0_full_list, dim=0)
         else:
             x0_full = x0
@@ -214,6 +228,7 @@ class TrueJointSymmetricDDPM_Sampler:
         inactive_plane_norm_threshold = float(joint_cfg.get("inactive_plane_norm_threshold", 0.15))
         reflection_plane_norm_threshold = float(joint_cfg.get("reflection_plane_norm_threshold", 0.5))
         prune_inactive_planes_on_output = bool(joint_cfg.get("prune_inactive_planes_on_output", True))
+        use_iterative_reflection = bool(joint_cfg.get("use_iterative_reflection", False))
 
         is_half = (geometry_mode == "half")
         num_planes = target_planes.shape[1] if target_planes.dim() > 2 else 1
@@ -312,19 +327,26 @@ class TrueJointSymmetricDDPM_Sampler:
                     if not is_duplicate:
                         unique_planes.append(p_curr)
                 
-                from src.utils.symmetry_planes import calculate_group_closure_matrices
-                unique_matrices = calculate_group_closure_matrices(unique_planes, dtype=x0.dtype, device=x0.device)
+                if use_iterative_reflection:
+                    pts_list = [x0[b]]
+                    for p_curr in unique_planes:
+                        reflected = [reflect_points(pts.unsqueeze(0), p_curr.unsqueeze(0)).squeeze(0) for pts in pts_list]
+                        pts_list = pts_list + reflected
                         
-                pts_list = []
-                pts = x0[b]
-                homo_points = torch.cat([pts, torch.ones((pts.shape[0], 1), dtype=pts.dtype, device=pts.device)], dim=-1)
-                
-                for M in unique_matrices:
-                    transformed = (homo_points @ M.T)[:, :3]
-                    pts_list.append(transformed)
+                    x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points)
+                    x0_full_list.append(x0_b_full)
+                else:
+                    from src.utils.symmetry_planes import calculate_group_closure_matrices
+                    unique_matrices = calculate_group_closure_matrices(unique_planes, dtype=x0.dtype, device=x0.device)
+                            
+                    pts = x0[b]
+                    homo_points = torch.cat([pts, torch.ones((pts.shape[0], 1), dtype=pts.dtype, device=pts.device)], dim=-1)
                     
-                x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points)
-                x0_full_list.append(x0_b_full)
+                    M_stacked = torch.stack(unique_matrices)
+                    transformed = torch.einsum('ni, gji -> gnj', homo_points, M_stacked)[..., :3]
+                        
+                    x0_b_full = resample_point_cloud(transformed.reshape(-1, 3), num_points)
+                    x0_full_list.append(x0_b_full)
             x0_full = torch.stack(x0_full_list, dim=0)
         else:
             x0_full = x0

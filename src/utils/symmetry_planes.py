@@ -142,6 +142,7 @@ def calculate_group_closure_matrices(active_planes: list[torch.Tensor], dtype, d
     matrices = [torch.eye(4, dtype=dtype, device=device)]
     
     # Mathematical Group Closure: multiply generators iteratively until no new elements emerge.
+    import itertools
     added_new = True
     max_elements = 64  # safe limit to prevent infinite loops from float precision issues
     while added_new and len(matrices) < max_elements:
@@ -152,14 +153,18 @@ def calculate_group_closure_matrices(active_planes: list[torch.Tensor], dtype, d
                 new_M = H @ M
                 
                 is_dup = False
-                for U in matrices + new_matrices:
-                    if torch.allclose(new_M, U, atol=1e-4):
+                for U in itertools.chain(matrices, new_matrices):
+                    if torch.allclose(new_M, U, atol=1e-3):
                         is_dup = True
                         break
                         
                 if not is_dup:
                     new_matrices.append(new_M)
                     added_new = True
+                    if len(matrices) + len(new_matrices) >= max_elements:
+                        break
+            if len(matrices) + len(new_matrices) >= max_elements:
+                break
         matrices.extend(new_matrices)
         
     unique_matrices = []

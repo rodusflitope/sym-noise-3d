@@ -6,6 +6,14 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 
+def _point_size(n_points, base_size=1.0, ref_points=2048):
+    """Scale point size so that fewer points get larger dots.
+    At ref_points (2048) returns base_size. At 256 returns ~8x base_size."""
+    if n_points >= ref_points:
+        return base_size
+    return base_size * (ref_points / max(n_points, 1))
+
+
 def _set_axes_style(ax, title, hide_ticks=False, elev=None, azim=None):
     if elev is not None and azim is not None:
         ax.view_init(elev=elev, azim=azim)
@@ -82,7 +90,7 @@ def _resolve_planes(plane):
 def plot_joint_plane_debug(original_pc, selected_pc, reconstructed_pc, plane, path):
     planes_list = _resolve_planes(plane)
     
-    def _plot_single_plane(p_single, out_path, plane_idx=None):
+    def _plot_planes(planes_to_plot, out_path):
         fig = plt.figure(figsize=(16, 12))
         original_color = "#111111"
         selected_color = "#ff006e"
@@ -93,35 +101,39 @@ def plot_joint_plane_debug(original_pc, selected_pc, reconstructed_pc, plane, pa
             Line2D([0], [0], marker='o', color='w', label='Selected half', markerfacecolor=selected_color, markersize=8),
             Line2D([0], [0], marker='o', color='w', label='Reconstructed sample', markerfacecolor=reconstructed_color, markersize=8),
         ]
-        if p_single is not None:
-            legend_handles.append(Patch(facecolor=plane_color, edgecolor=plane_color, alpha=0.18, label=f'Predicted plane {plane_idx}' if plane_idx is not None else 'Predicted plane'))
+        if planes_to_plot:
+            legend_handles.append(Patch(facecolor=plane_color, edgecolor=plane_color, alpha=0.18, label='Predicted planes'))
 
         ax1 = fig.add_subplot(2, 2, 1, projection='3d')
-        _scatter_pc(ax1, original_pc, color=original_color, size=1.2, alpha=0.72)
-        if p_single is not None:
-            _draw_plane(ax1, p_single, color=plane_color)
-        title_suffix = f" (Plane {plane_idx})" if plane_idx is not None else ""
-        _set_axes_style(ax1, f"Original Test Sample + Predicted Plane{title_suffix}", elev=24, azim=-60)
+        s_base = _point_size(len(original_pc))
+        _scatter_pc(ax1, original_pc, color=original_color, size=1.2 * s_base, alpha=0.72)
+        if planes_to_plot:
+            for p in planes_to_plot:
+                _draw_plane(ax1, p, color=plane_color)
+        _set_axes_style(ax1, "Original Test Sample + Predicted Planes", elev=24, azim=-60)
 
         ax2 = fig.add_subplot(2, 2, 2, projection='3d')
-        _scatter_pc(ax2, original_pc, color=original_color, size=0.9, alpha=0.30)
-        _scatter_pc(ax2, selected_pc, color=selected_color, size=2.2, alpha=0.97)
-        if p_single is not None:
-            _draw_plane(ax2, p_single, color=plane_color)
-        _set_axes_style(ax2, "Original Sample Cut By Predicted Plane", elev=24, azim=-60)
+        _scatter_pc(ax2, original_pc, color=original_color, size=0.9 * s_base, alpha=0.30)
+        _scatter_pc(ax2, selected_pc, color=selected_color, size=2.2 * s_base, alpha=0.97)
+        if planes_to_plot:
+            for p in planes_to_plot:
+                _draw_plane(ax2, p, color=plane_color)
+        _set_axes_style(ax2, "Original Sample Cut By Predicted Planes", elev=24, azim=-60)
 
         ax3 = fig.add_subplot(2, 2, 3, projection='3d')
-        _scatter_pc(ax3, reconstructed_pc, color=reconstructed_color, size=1.2, alpha=0.90)
-        if p_single is not None:
-            _draw_plane(ax3, p_single, color=plane_color)
-        _set_axes_style(ax3, "Reconstructed From x_t + Plane", elev=24, azim=-60)
+        _scatter_pc(ax3, reconstructed_pc, color=reconstructed_color, size=1.2 * s_base, alpha=0.90)
+        if planes_to_plot:
+            for p in planes_to_plot:
+                _draw_plane(ax3, p, color=plane_color)
+        _set_axes_style(ax3, "Reconstructed From x_t + Planes", elev=24, azim=-60)
 
         ax4 = fig.add_subplot(2, 2, 4, projection='3d')
-        _scatter_pc(ax4, original_pc, color=original_color, size=0.7, alpha=0.24)
-        _scatter_pc(ax4, selected_pc, color=selected_color, size=1.8, alpha=0.97)
-        _scatter_pc(ax4, reconstructed_pc, color=reconstructed_color, size=1.0, alpha=0.75)
-        if p_single is not None:
-            _draw_plane(ax4, p_single, color=plane_color)
+        _scatter_pc(ax4, original_pc, color=original_color, size=0.7 * s_base, alpha=0.24)
+        _scatter_pc(ax4, selected_pc, color=selected_color, size=1.8 * s_base, alpha=0.97)
+        _scatter_pc(ax4, reconstructed_pc, color=reconstructed_color, size=1.0 * s_base, alpha=0.75)
+        if planes_to_plot:
+            for p in planes_to_plot:
+                _draw_plane(ax4, p, color=plane_color)
         _set_axes_style(ax4, "Overlay: Original / Selected / Reconstructed", hide_ticks=True, elev=90, azim=-90)
 
         fig.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, 0.98), ncol=4, frameon=False)
@@ -129,41 +141,34 @@ def plot_joint_plane_debug(original_pc, selected_pc, reconstructed_pc, plane, pa
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
 
-    if not planes_list:
-        _plot_single_plane(None, path)
-    elif len(planes_list) == 1:
-        _plot_single_plane(planes_list[0], path)
-    else:
-        import pathlib
-        path_obj = pathlib.Path(path)
-        for i, p_single in enumerate(planes_list):
-            out_p = path_obj.parent / f"{path_obj.stem}_plane_{i}{path_obj.suffix}"
-            _plot_single_plane(p_single, str(out_p), plane_idx=i)
+    _plot_planes(planes_list, path)
 
 
 def plot_pc(pc, path, plane=None):
     planes_list = _resolve_planes(plane)
     
-    def _plot_single_plane(p_single, out_path, plane_idx=None):
+    def _plot_planes(planes_to_plot, out_path):
         fig = plt.figure(figsize=(12, 12))
         
         ax1 = fig.add_subplot(2, 2, 1, projection='3d')
-        ax1.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=1)
-        if p_single is not None:
-            _draw_plane(ax1, p_single, color="#2ec4b6")
+        s = _point_size(len(pc))
+        ax1.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=s)
+        if planes_to_plot:
+            for p in planes_to_plot:
+                _draw_plane(ax1, p, color="#2ec4b6")
         ax1.set_xlabel("x (right)")
         ax1.set_ylabel("z (front -)")
         ax1.set_zlabel("y (up)")
         ax1.set_xlim(-1.5, 1.5)
         ax1.set_ylim(-1.5, 1.5)
         ax1.set_zlim(-1.5, 1.5)
-        title_suffix = f" (Plane {plane_idx})" if plane_idx is not None else ""
-        ax1.set_title(f"Perspective{title_suffix}")
+        ax1.set_title("Perspective")
 
         ax2 = fig.add_subplot(2, 2, 2, projection='3d')
-        ax2.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=1)
-        if p_single is not None:
-            _draw_plane(ax2, p_single, color="#2ec4b6")
+        ax2.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=s)
+        if planes_to_plot:
+            for p in planes_to_plot:
+                _draw_plane(ax2, p, color="#2ec4b6")
         ax2.view_init(elev=90, azim=-90)
         ax2.set_xlabel("x")
         ax2.set_ylabel("z")
@@ -177,9 +182,10 @@ def plot_pc(pc, path, plane=None):
         ax2.set_title("Top View")
 
         ax3 = fig.add_subplot(2, 2, 3, projection='3d')
-        ax3.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=1)
-        if p_single is not None:
-            _draw_plane(ax3, p_single, color="#2ec4b6")
+        ax3.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=s)
+        if planes_to_plot:
+            for p in planes_to_plot:
+                _draw_plane(ax3, p, color="#2ec4b6")
         ax3.view_init(elev=0, azim=0)
         ax3.set_xlabel("x")
         ax3.set_ylabel("z")
@@ -193,9 +199,10 @@ def plot_pc(pc, path, plane=None):
         ax3.set_title("Side View")
 
         ax4 = fig.add_subplot(2, 2, 4, projection='3d')
-        ax4.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=1)
-        if p_single is not None:
-            _draw_plane(ax4, p_single, color="#2ec4b6")
+        ax4.scatter(pc[:, 0], pc[:, 2], pc[:, 1], s=s)
+        if planes_to_plot:
+            for p in planes_to_plot:
+                _draw_plane(ax4, p, color="#2ec4b6")
         ax4.view_init(elev=0, azim=-90)
         ax4.set_xlabel("x")
         ax4.set_ylabel("z")
@@ -212,16 +219,7 @@ def plot_pc(pc, path, plane=None):
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
 
-    if not planes_list:
-        _plot_single_plane(None, path)
-    elif len(planes_list) == 1:
-        _plot_single_plane(planes_list[0], path)
-    else:
-        import pathlib
-        path_obj = pathlib.Path(path)
-        for i, p_single in enumerate(planes_list):
-            out_p = path_obj.parent / f"{path_obj.stem}_plane_{i}{path_obj.suffix}"
-            _plot_single_plane(p_single, str(out_p), plane_idx=i)
+    _plot_planes(planes_list, path)
 
 def load_ply(path):
     with open(path, "r") as f:

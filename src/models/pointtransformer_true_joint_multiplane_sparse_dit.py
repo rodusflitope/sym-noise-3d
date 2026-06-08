@@ -29,7 +29,7 @@ class SparseSymmetryAwareAttention(nn.Module):
         shared_minus = sign_minus.unsqueeze(2) & sign_minus.unsqueeze(1) # (B, N, N, P)
         shared_plane = shared_plus | shared_minus # (B, N, N, P)
         
-        attn_mask = ~shared_plane.all(dim=-1).unsqueeze(1) # (B, 1, N, N)
+        attn_mask = shared_plane.all(dim=-1).unsqueeze(1) # (B, 1, N, N)
         
         # Use PyTorch's optimized scaled dot product attention (FlashAttention/memory efficient)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
@@ -163,7 +163,7 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         # x_t: (B, N, 3) -> (B, N, 1, 3)
         # normals: (B, num_planes, 3) -> (B, 1, num_planes, 3)
         dot_products = (x_t.unsqueeze(2) * normals.unsqueeze(1)).sum(dim=-1) # (B, N, num_planes)
-        distances = dot_products + offsets.unsqueeze(1) # (B, N, num_planes)
+        distances = dot_products - offsets.unsqueeze(1) # (B, N, num_planes)
         
         # Concatenar absolutas y relativas
         feats_input = torch.cat([x_t, distances], dim=-1) # (B, N, 3 + num_planes)

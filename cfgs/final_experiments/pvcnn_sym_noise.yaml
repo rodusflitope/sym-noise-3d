@@ -78,12 +78,12 @@ loss:
   weighting: none
 train:
   batch_size: 16
-  epochs: 100
+  epochs: 2000
   log_every: 50
   num_points: 2048
   num_workers: 4
   out_dir: runs
-  save_every: 10
+  save_every: 200
 diffusion:
   T: 1000
   beta_start: 0.0001

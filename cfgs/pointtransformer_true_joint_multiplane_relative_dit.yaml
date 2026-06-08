@@ -19,7 +19,7 @@ data:
   canonical_symmetry_offset_reduction: "median"
   apply_canonical_symmetry_translation: true
   symmetry_precompute_num_points: 8192
-  symmetry_plane_score_threshold: 0.001
+  symmetry_plane_score_threshold: 0.003
   symmetry_plane_balance_threshold: 0.01
   num_symmetry_planes: 3
   train_sample_symmetric_from_gt: true
@@ -57,10 +57,10 @@ loss:
   metric: "cd"
 
 train:
-  batch_size: 16
-  epochs: 200
+  batch_size: 32
+  epochs: 300
   log_every: 50
-  num_points: 2048
+  num_points: 512
   num_workers: 2
   out_dir: "runs"
   save_every: 10

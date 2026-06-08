@@ -24,11 +24,11 @@ loss:
   weighting: none
 
 train:
-  batch_size: 16
-  epochs: 400
+  batch_size: 32
+  epochs: 300
   log_every: 50
-  num_points: 2048
-  num_workers: 8
+  num_points: 512
+  num_workers: 2
   out_dir: "runs"
   save_every: 10
 

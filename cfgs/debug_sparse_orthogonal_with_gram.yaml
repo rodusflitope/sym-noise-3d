@@ -1,4 +1,4 @@
-exp_name: "pointtransformer-true-joint-multiplane-relative-dit-gram"
+exp_name: "debug-sparse-orthogonal-with-gram"
 seed: 10
 device: "auto"
 
@@ -19,23 +19,23 @@ data:
   canonical_symmetry_offset_reduction: "median"
   apply_canonical_symmetry_translation: true
   symmetry_precompute_num_points: 8192
-  symmetry_plane_score_threshold: 0.001
+  symmetry_plane_score_threshold: 0.01
   symmetry_plane_balance_threshold: 0.01
   num_symmetry_planes: 3
-  train_sample_symmetric_from_gt: true
-  return_fundamental_domain: true
+  train_sample_symmetric_from_gt: false
+  return_fundamental_domain: false
   soft_cut: true
   soft_cut_margin: 0.05
 
 model:
-  name: "pointtransformer_true_joint_multiplane_relative_dit"
+  name: "pointtransformer_true_joint_multiplane_sparse_dit"
   hidden_dim: 128
   time_dim: 128
   num_planes: 3
   num_heads: 4
   num_layers: 3
   use_fourier_features: false
-  use_symmetric_attention: false
+  use_sparse_attention: true
   use_gram_matrix: true
 
 joint_symmetry:
@@ -61,7 +61,7 @@ train:
   batch_size: 16
   epochs: 200
   log_every: 50
-  num_points: 2048
+  num_points: 1024
   num_workers: 2
   out_dir: "runs"
   save_every: 10

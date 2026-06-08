@@ -1,4 +1,4 @@
-exp_name: "pointtransformer-true-joint-multiplane-dit-sparse"
+exp_name: "debug-sparse-orthogonal-no-gram"
 seed: 10
 device: "auto"
 
@@ -12,16 +12,16 @@ data:
   sample_symmetric: false
   symmetry_axis: 0
   use_symmetry_plane_labels: true
-  symmetry_plane_cache_path: "data/symmetry_cache/symmetry_cache_table_per_object_6p_optimized.pt"
+  symmetry_plane_cache_path: "data/symmetry_cache/symmetry_cache_table_orthogonal_3p_canonical.pt"
   symmetry_plane_cache_required: true
   use_symmetry_classes: true
-  canonical_symmetry_planes: false
+  canonical_symmetry_planes: true
   canonical_symmetry_offset_reduction: "median"
-  apply_canonical_symmetry_translation: false
+  apply_canonical_symmetry_translation: true
   symmetry_precompute_num_points: 8192
   symmetry_plane_score_threshold: 0.01
   symmetry_plane_balance_threshold: 0.01
-  num_symmetry_planes: 6
+  num_symmetry_planes: 3
   train_sample_symmetric_from_gt: false
   return_fundamental_domain: false
   soft_cut: true
@@ -31,12 +31,12 @@ model:
   name: "pointtransformer_true_joint_multiplane_sparse_dit"
   hidden_dim: 128
   time_dim: 128
-  num_planes: 6
+  num_planes: 3
   num_heads: 4
   num_layers: 3
   use_fourier_features: false
   use_sparse_attention: true
-  use_gram_matrix: true
+  use_gram_matrix: false
 
 joint_symmetry:
   geometry_mode: "full"
@@ -58,10 +58,10 @@ loss:
   metric: "cd"
 
 train:
-  batch_size: 32
-  epochs: 300
+  batch_size: 16
+  epochs: 200
   log_every: 50
-  num_points:  512
+  num_points: 1024
   num_workers: 2
   out_dir: "runs"
   save_every: 10

@@ -35,6 +35,8 @@ def scale_config(cfg):
     if 'train' in cfg:
         cfg['train']['num_points'] = 2048
         cfg['train']['batch_size'] = 16 # Safe batch size
+        cfg['train']['epochs'] = 2000
+        cfg['train']['save_every'] = 200
     
     return cfg
 
