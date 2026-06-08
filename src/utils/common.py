@@ -5,7 +5,32 @@ import numpy as np
 def load_cfg(path: str):
     p = pathlib.Path(path)
     with open(p, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+        
+    try:
+        import sys
+        # Añadir la raíz del proyecto para importar config.py si existe
+        project_root = str(pathlib.Path(__file__).resolve().parents[2])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+            
+        import config
+        
+        if "data" in cfg:
+            if getattr(config, "DATA_ROOT_DIR", None):
+                cfg["data"]["root_dir"] = config.DATA_ROOT_DIR
+                
+            if getattr(config, "CACHE_ROOT_DIR", None) and "symmetry_plane_cache_path" in cfg["data"]:
+                cache_name = os.path.basename(cfg["data"]["symmetry_plane_cache_path"])
+                cfg["data"]["symmetry_plane_cache_path"] = os.path.join(config.CACHE_ROOT_DIR, cache_name)
+                
+        if "train" in cfg and getattr(config, "OUT_ROOT_DIR", None):
+            cfg["train"]["out_dir"] = config.OUT_ROOT_DIR
+            
+    except ImportError:
+        pass
+        
+    return cfg
 
 def set_seed(seed: int | None):
     if seed is None: return
