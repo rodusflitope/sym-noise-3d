@@ -34,8 +34,15 @@ def scale_config(cfg):
     # Standardize training params
     if 'train' in cfg:
         cfg['train']['num_points'] = 2048
-        cfg['train']['batch_size'] = 16 # Safe batch size
-        cfg['train']['epochs'] = 2000
+        
+        # Adjust batch size based on model type to target ~6h training time
+        model_name = cfg.get('model', {}).get('name', '').lower()
+        if 'pvcnn' in model_name:
+            cfg['train']['batch_size'] = 64
+        else:
+            cfg['train']['batch_size'] = 32
+            
+        cfg['train']['epochs'] = 1000
         cfg['train']['save_every'] = 200
     
     return cfg
