@@ -15,31 +15,29 @@ def scale_config(cfg):
     # Scale Data
     if 'data' in cfg:
         cfg['data'].pop('max_models', None)
-        cfg['data']['symmetry_precompute_num_points'] = 4096 # Reduced precompute cache size since we use fewer points
+        cfg['data']['symmetry_precompute_num_points'] = 4096
     
     # Scale Model
     if 'model' in cfg:
         model_name = cfg['model'].get('name', '').lower()
         if 'pvcnn' in model_name:
-            cfg['model']['hidden_dim'] = 128 # 128 is plenty for PVCNN and much faster
+            cfg['model']['hidden_dim'] = 128
             cfg['model']['time_dim'] = 128
             cfg['model']['resolution'] = 32
             cfg['model']['num_blocks'] = 3
         else:
             cfg['model']['hidden_dim'] = 256
             cfg['model']['time_dim'] = 256
-            cfg['model']['num_layers'] = 4 # 4 layers is SOTA standard for small datasets and very fast
+            cfg['model']['num_layers'] = 4
             cfg['model']['num_heads'] = 8
             
     # Standardize training params
     if 'train' in cfg:
-        cfg['train']['num_points'] = 1024 # Standard point cloud size (e.g. Point-E) -> 4x speedup in attention!
-        
-        # Enable AMP (Automatic Mixed Precision) for free 2x speedup
+        cfg['train']['num_points'] = 2048
+
         cfg['train']['amp'] = True
         cfg['train']['amp_dtype'] = 'fp16'
         
-        # Adjust batch size based on model type to target ~6h training time
         model_name = cfg.get('model', {}).get('name', '').lower()
         if 'pvcnn' in model_name:
             cfg['train']['batch_size'] = 64
@@ -47,7 +45,7 @@ def scale_config(cfg):
             cfg['train']['batch_size'] = 32
             
         cfg['train']['epochs'] = 1000
-        cfg['train']['save_every'] = 100 # Guardar más seguido ya que las épocas serán cortísimas
+        cfg['train']['save_every'] = 100
     
     return cfg
 
