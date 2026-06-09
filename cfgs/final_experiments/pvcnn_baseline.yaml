@@ -6,10 +6,10 @@ data:
   augment: false
   val_frac: 0.1
   test_frac: 0.1
-  symmetry_precompute_num_points: 8192
+  symmetry_precompute_num_points: 4096
 model:
   name: pvcnn
-  hidden_dim: 256
+  hidden_dim: 128
   time_dim: 128
   resolution: 32
   num_blocks: 3
@@ -23,8 +23,9 @@ train:
   num_points: 2048
   num_workers: 4
   out_dir: runs
-  save_every: 200
+  save_every: 100
   amp: true
+  amp_dtype: fp16
 diffusion:
   T: 1000
   beta_start: 0.0001
