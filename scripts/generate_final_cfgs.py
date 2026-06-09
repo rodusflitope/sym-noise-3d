@@ -19,17 +19,10 @@ def scale_config(cfg):
     
     # Scale Model
     if 'model' in cfg:
-        model_name = cfg['model'].get('name', '').lower()
-        if 'pvcnn' in model_name:
-            cfg['model']['hidden_dim'] = 128
-            cfg['model']['time_dim'] = 128
-            cfg['model']['resolution'] = 32
-            cfg['model']['num_blocks'] = 3
-        else:
-            cfg['model']['hidden_dim'] = 256
-            cfg['model']['time_dim'] = 256
-            cfg['model']['num_layers'] = 4
-            cfg['model']['num_heads'] = 8
+        cfg['model']['hidden_dim'] = 256
+        cfg['model']['time_dim'] = 256
+        cfg['model']['num_layers'] = 4
+        cfg['model']['num_heads'] = 8
             
     # Standardize training params
     if 'train' in cfg:
@@ -38,11 +31,7 @@ def scale_config(cfg):
         cfg['train']['amp'] = True
         cfg['train']['amp_dtype'] = 'fp16'
         
-        model_name = cfg.get('model', {}).get('name', '').lower()
-        if 'pvcnn' in model_name:
-            cfg['train']['batch_size'] = 64
-        else:
-            cfg['train']['batch_size'] = 32
+        cfg['train']['batch_size'] = 32
             
         cfg['train']['epochs'] = 1000
         cfg['train']['save_every'] = 100
@@ -51,11 +40,8 @@ def scale_config(cfg):
 
 mappings = {
     "cfgs/pointtransformer_dit.yaml": "cfgs/final_experiments/pointtransformer_dit_baseline.yaml",
-    "cfgs/PVCNN.yaml": "cfgs/final_experiments/pvcnn_baseline.yaml",
     "cfgs/pointtransformer_symmetric_reflected.yaml": "cfgs/final_experiments/pointtransformer_dit_sym_noise.yaml",
-    "cfgs/PVCNN_symmetric_reflected_legacy.yaml": "cfgs/final_experiments/pvcnn_sym_noise.yaml",
     "cfgs/pointtransformer_symmetric_loss.yaml": "cfgs/final_experiments/pointtransformer_dit_sym_loss.yaml",
-    "cfgs/PVCNN_symmetric_loss_legacy.yaml": "cfgs/final_experiments/pvcnn_sym_loss.yaml",
     "cfgs/pointtransformer_true_joint_multiplane_relative_dit.yaml": "cfgs/final_experiments/pt_true_joint_relative_orthogonal.yaml",
     "cfgs/pointtransformer_true_joint_multiplane_dit_dihedral.yaml": "cfgs/final_experiments/pt_true_joint_relative_dihedral.yaml",
     "cfgs/pointtransformer_true_joint_multiplane_dit_sparse_3p.yaml": "cfgs/final_experiments/pt_true_joint_relative_sparse_3p.yaml",
