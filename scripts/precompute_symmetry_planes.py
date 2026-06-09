@@ -145,6 +145,65 @@ def main() -> None:
     )
     save_symmetry_plane_cache(out_path, payload)
     print(f"[precompute_symmetry_planes] saved {len(payload['planes'])} planes to {Path(out_path)}")
+    
+    print_threshold_matrix(payload["planes"], num_planes, data_cfg.get("symmetry_plane_balance_threshold", None))
+
+
+def print_threshold_matrix(planes_dict: dict, num_planes: int, balance_threshold: float = None):
+    try:
+        from tabulate import tabulate
+    except ImportError:
+        print("\n[precompute_symmetry_planes] 'tabulate' not installed. Skipping threshold matrix visualization.")
+        return
+
+    thresholds = [0.001, 0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.15]
+    matrix = []
+    headers = ["Threshold"]
+    all_classes = set()
+    rows_data = []
+
+    for t in thresholds:
+        class_counts = {}
+        for key, entry in planes_dict.items():
+            scores = []
+            balances = None
+            if isinstance(entry, dict):
+                if "scores" in entry:
+                    raw = entry["scores"]
+                    scores = raw.tolist() if hasattr(raw, "tolist") else list(raw)
+                elif "score" in entry:
+                    scores = [float(entry["score"])]
+                if "balances" in entry:
+                    raw_b = entry["balances"]
+                    balances = raw_b.tolist() if hasattr(raw_b, "tolist") else list(raw_b)
+
+            active = []
+            for i, score in enumerate(scores[:num_planes]):
+                score_ok = float(score) < t
+                balance_ok = True
+                if balance_threshold is not None and balances is not None and i < len(balances):
+                    balance_ok = float(balances[i]) < float(balance_threshold)
+                active.append(1 if score_ok and balance_ok else 0)
+
+            class_idx = sum((1 << i) for i, a in enumerate(active) if a)
+            class_counts[class_idx] = class_counts.get(class_idx, 0) + 1
+            all_classes.add(class_idx)
+
+        rows_data.append((t, class_counts))
+
+    sorted_classes = sorted(list(all_classes))
+    for c in sorted_classes:
+        mask_str = "".join(str((c >> i) & 1) for i in reversed(range(num_planes)))
+        headers.append(f"C{c} ({mask_str})")
+
+    for t, counts in rows_data:
+        matrix.append([t] + [counts.get(c, 0) for c in sorted_classes])
+
+    print("\n" + "="*80)
+    print("Symmetry Class Distribution by Threshold")
+    print("="*80)
+    print(tabulate(matrix, headers=headers, tablefmt="github"))
+    print("="*80 + "\n")
 
 
 if __name__ == "__main__":
