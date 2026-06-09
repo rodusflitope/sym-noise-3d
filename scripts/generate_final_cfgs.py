@@ -19,10 +19,10 @@ def scale_config(cfg):
     
     # Scale Model
     if 'model' in cfg:
-        cfg['model']['hidden_dim'] = 256
-        cfg['model']['time_dim'] = 256
-        cfg['model']['num_layers'] = 4
-        cfg['model']['num_heads'] = 8
+        cfg['model']['hidden_dim'] = 128
+        cfg['model']['time_dim'] = 128
+        cfg['model']['num_layers'] = 3
+        cfg['model']['num_heads'] = 4
             
     # Standardize training params
     if 'train' in cfg:
@@ -31,7 +31,7 @@ def scale_config(cfg):
         cfg['train']['amp'] = True
         cfg['train']['amp_dtype'] = 'fp16'
         
-        cfg['train']['batch_size'] = 32
+        cfg['train']['batch_size'] = 64
             
         cfg['train']['epochs'] = 1000
         cfg['train']['save_every'] = 100
