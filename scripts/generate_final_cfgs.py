@@ -41,8 +41,8 @@ def scale_config(cfg):
 
 mappings = {
     "cfgs/pointtransformer_dit.yaml": "cfgs/final_experiments/pointtransformer_dit_baseline.yaml",
-    "cfgs/pointtransformer_symmetric_reflected.yaml": "cfgs/final_experiments/pointtransformer_dit_sym_noise.yaml",
-    "cfgs/pointtransformer_symmetric_loss.yaml": "cfgs/final_experiments/pointtransformer_dit_sym_loss.yaml",
+    "cfgs/pointtransformer_dit_sym_noise.yaml": "cfgs/final_experiments/pointtransformer_dit_sym_noise.yaml",
+    "cfgs/pointtransformer_dit_sym_loss.yaml": "cfgs/final_experiments/pointtransformer_dit_sym_loss.yaml",
     "cfgs/pointtransformer_true_joint_multiplane_relative_dit.yaml": "cfgs/final_experiments/pt_true_joint_relative_orthogonal.yaml",
     "cfgs/pointtransformer_true_joint_multiplane_dit_dihedral.yaml": "cfgs/final_experiments/pt_true_joint_relative_dihedral.yaml",
     "cfgs/pointtransformer_true_joint_multiplane_dit_sparse_3p.yaml": "cfgs/final_experiments/pt_true_joint_relative_sparse_3p.yaml",
@@ -52,15 +52,6 @@ for src, dst in mappings.items():
     if os.path.exists(src):
         cfg = load_yaml(src)
         cfg = scale_config(cfg)
-        
-        if "sym_noise" in dst or "sym_loss" in dst:
-            if 'model' in cfg:
-                cfg['model']['name'] = "pointtransformer_dit"
-                cfg['model']['use_fourier_features'] = False
-                cfg['model']['use_symmetric_attention'] = False
-            if 'loss' in cfg:
-                cfg['loss']['weighting'] = "none"
-                
         cfg['exp_name'] = Path(dst).stem
         save_yaml(cfg, dst)
         print(f"Generated {dst}")
