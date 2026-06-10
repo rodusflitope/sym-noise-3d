@@ -52,6 +52,15 @@ for src, dst in mappings.items():
     if os.path.exists(src):
         cfg = load_yaml(src)
         cfg = scale_config(cfg)
+        
+        if "sym_noise" in dst or "sym_loss" in dst:
+            if 'model' in cfg:
+                cfg['model']['name'] = "pointtransformer_dit"
+                cfg['model']['use_fourier_features'] = False
+                cfg['model']['use_symmetric_attention'] = False
+            if 'loss' in cfg:
+                cfg['loss']['weighting'] = "none"
+                
         cfg['exp_name'] = Path(dst).stem
         save_yaml(cfg, dst)
         print(f"Generated {dst}")
