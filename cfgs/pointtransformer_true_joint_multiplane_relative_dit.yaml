@@ -5,7 +5,7 @@ device: "auto"
 data:
   root_dir: "data/ShapeNetCore"
   categories: ["table"]
-  max_models: 1000
+  max_models: 2000
   augment: false
   val_frac: 0.1
   test_frac: 0.1
@@ -58,9 +58,9 @@ loss:
 
 train:
   batch_size: 32
-  epochs: 300
+  epochs: 400
   log_every: 50
-  num_points: 512
+  num_points: 1024
   num_workers: 2
   out_dir: "runs"
   save_every: 10
