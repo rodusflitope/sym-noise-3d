@@ -5,12 +5,12 @@ device: "auto"
 data:
   root_dir: "data/ShapeNetCore"
   categories: ["table"]
-  max_models: 1000
+  max_models: 2000
   augment: false
   val_frac: 0.1
   test_frac: 0.1
   sample_symmetric: false
-  symmetry_axis: 0
+  symmetry_axis: 1
   use_symmetry_plane_labels: true
   symmetry_plane_cache_path: "data/symmetry_cache/symmetry_cache_table_dihedral_6p_canonical.pt"
   symmetry_plane_cache_required: true
@@ -20,7 +20,7 @@ data:
   apply_canonical_symmetry_translation: true
   symmetry_precompute_num_points: 8192
   symmetry_plane_score_threshold: 0.01
-  symmetry_plane_balance_threshold: 0.01
+  symmetry_plane_balance_threshold: 0.003
   num_symmetry_planes: 6
   train_sample_symmetric_from_gt: true
   return_fundamental_domain: true
@@ -59,9 +59,9 @@ loss:
 
 train:
   batch_size: 16
-  epochs: 200
+  epochs: 400
   log_every: 50
-  num_points: 256
+  num_points: 1024
   num_workers: 2
   out_dir: "runs"
   save_every: 10

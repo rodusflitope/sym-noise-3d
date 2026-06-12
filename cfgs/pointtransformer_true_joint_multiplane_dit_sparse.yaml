@@ -36,7 +36,6 @@ model:
   num_layers: 3
   use_fourier_features: false
   use_sparse_attention: true
-  use_gram_matrix: true
 
 joint_symmetry:
   geometry_mode: "full"
