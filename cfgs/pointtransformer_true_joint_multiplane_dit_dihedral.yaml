@@ -19,8 +19,8 @@ data:
   canonical_symmetry_offset_reduction: "median"
   apply_canonical_symmetry_translation: true
   symmetry_precompute_num_points: 8192
-  symmetry_plane_score_threshold: 0.01
-  symmetry_plane_balance_threshold: 0.003
+  symmetry_plane_score_threshold: 0.003
+  symmetry_plane_balance_threshold: 0.01
   num_symmetry_planes: 6
   train_sample_symmetric_from_gt: true
   return_fundamental_domain: true
