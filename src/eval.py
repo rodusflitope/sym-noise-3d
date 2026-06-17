@@ -169,6 +169,8 @@ def evaluate(
     seed: Optional[int] = None,
     max_points: Optional[int] = None,
     ae_ckpt: Optional[str] = None,
+    eval_all: bool = False,
+    compute_emd: bool = False,
 ) -> None:
     ckpt_path = _resolve_ckpt_path(ckpt_path)
 
@@ -201,17 +203,71 @@ def evaluate(
     use_latent = bool(cfg.get("use_latent_diffusion", False))
 
     data_cfg = cfg.get("data", {})
-    ds = ShapeNetDataset(
-        root_dir=data_cfg["root_dir"],
-        num_points=num_points,
-        max_models=num_samples,
-        categories=data_cfg.get("categories", None),
-        augment=False,
-    )
+    root_dir = data_cfg.get("root_dir", "data/ShapeNetCore")
+    if not os.path.exists(root_dir):
+        candidates = [
+            "data/ShapeNetCore",
+            "../data/ShapeNetCore",
+            "sym-noise-3d/data/ShapeNetCore"
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                print(f"[eval] Path '{root_dir}' not found. Using local candidate: '{candidate}'")
+                root_dir = candidate
+                break
+
+    if eval_all:
+        from torch.utils.data import Subset
+        ckpt_dir = pathlib.Path(ckpt_path).parent
+        splits_path = ckpt_dir / "splits.json"
+        
+        full_ds = ShapeNetDataset(
+            root_dir=root_dir,
+            num_points=num_points,
+            max_models=None,
+            categories=data_cfg.get("categories", None),
+            augment=False,
+        )
+        
+        test_indices = []
+        if splits_path.exists():
+            try:
+                with open(splits_path, "r", encoding="utf-8") as f:
+                    splits = json.load(f)
+                test_indices = splits.get("test", [])
+                print(f"[eval] Loaded {len(test_indices)} test indices from {splits_path}")
+            except Exception as e:
+                print(f"[eval] Error loading splits.json: {e}. Falling back to manual splitting.")
+                splits_path = None
+                
+        if not splits_path or not splits_path.exists():
+            n = len(full_ds)
+            val_frac = float(data_cfg.get("val_frac", 0.1))
+            test_frac = float(data_cfg.get("test_frac", 0.1))
+            n_test = int(n * test_frac)
+            n_val = int(n * val_frac)
+            n_train = max(1, n - n_val - n_test)
+            g = torch.Generator()
+            g.manual_seed(int(cfg.get("seed", 0) or 0))
+            perm = torch.randperm(n, generator=g).tolist()
+            test_indices = perm[n_train + n_val :]
+            print(f"[eval] Calculated {len(test_indices)} test indices manually.")
+            
+        ds = Subset(full_ds, test_indices)
+        n_eval = len(ds)
+    else:
+        ds = ShapeNetDataset(
+            root_dir=root_dir,
+            num_points=num_points,
+            max_models=num_samples,
+            categories=data_cfg.get("categories", None),
+            augment=False,
+        )
+        n_eval = min(int(num_samples), len(ds))
+
     if len(ds) == 0:
         raise ValueError("[eval] Dataset vacío. Revisa data.root_dir y data.categories.")
 
-    n_eval = min(int(num_samples), len(ds))
     if n_eval <= 0:
         raise ValueError("[eval] num_samples inválido o no hay datos para evaluar.")
 
@@ -455,7 +511,7 @@ def evaluate(
 
     cd_vals = chamfer_distance(gen, gt)
     
-    if getattr(args, "compute_emd", False):
+    if compute_emd:
         emd_vals = earth_movers_distance(gen, gt, max_points=max_points)
     else:
         emd_vals = torch.zeros(n_eval, device=device)
@@ -478,7 +534,7 @@ def evaluate(
     print("[eval] Computing advanced metrics (CD)...")
     
     metrics_to_compute = ["cd"]
-    if getattr(args, "compute_emd", False):
+    if compute_emd:
         print("[eval] Also computing EMD and advanced EMD metrics (esto puede tardar mucho)...")
         metrics_to_compute.append("emd")
     
@@ -568,6 +624,7 @@ def parse_args() -> ap.Namespace:
     parser.add_argument("--ae_ckpt", type=str, default=None,
                         help="Checkpoint del autoencoder (requerido si use_latent_diffusion=true)")
     parser.add_argument("--compute_emd", action="store_true", help="Compute EMD and pairwise EMD for advanced metrics (1-NN/COV/MMD). Very slow.")
+    parser.add_argument("--eval_all", action="store_true", help="Evaluate on the full test split from splits.json")
     return parser.parse_args()
 
 
@@ -580,4 +637,6 @@ if __name__ == "__main__":
         seed=args.seed,
         max_points=args.max_points,
         ae_ckpt=args.ae_ckpt,
+        eval_all=args.eval_all,
+        compute_emd=args.compute_emd,
     )
