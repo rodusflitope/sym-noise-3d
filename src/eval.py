@@ -272,6 +272,8 @@ def evaluate(
         raise ValueError("[eval] num_samples inválido o no hay datos para evaluar.")
 
     batch_size_eval = int(cfg.get("eval", {}).get("batch_size", cfg.get("train", {}).get("batch_size", 16)))
+    use_amp_eval = bool(cfg.get("train", {}).get("amp", False))
+    amp_dtype = torch.float16 if str(cfg.get("train", {}).get("amp_dtype", "fp16")).lower() == "fp16" else torch.bfloat16
     
     all_samples = []
     with torch.no_grad():
@@ -281,7 +283,7 @@ def evaluate(
             
             if isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane)) and not use_latent:
                 sym_sampler = SymmetricDDPM_Sampler(sampler)
-                curr_samples = sym_sampler.sample(model, num_samples=curr_n, num_points=num_points, device=device).detach().cpu()
+                curr_samples = sym_sampler.sample(model, num_samples=curr_n, num_points=num_points, device=device).detach()
             elif isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane)) and not use_latent:
                 validate_joint_configuration(cfg, context="eval")
                 joint_sampler = JointSymmetricDDPM_Sampler(sampler)
@@ -292,7 +294,7 @@ def evaluate(
                     num_points=num_points,
                     device=device,
                     alpha_bars=alpha_bars,
-                ).detach().cpu()
+                ).detach()
             elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT, PointTransformerTrueJointMultiplaneDihedralDiT, PointTransformerTrueJointMultiplaneSparseDiT)) and not use_latent:
                 true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
                 curr_samples = true_joint_sampler.sample(
@@ -302,7 +304,7 @@ def evaluate(
                     num_points=num_points,
                     device=device,
                     alpha_bars=alpha_bars,
-                ).detach().cpu()
+                ).detach()
             elif isinstance(model, PointTransformerSymClassDiT) and not use_latent:
                 data_cfg = cfg.get("data", {}) or {}
                 sampler_cfg = cfg.get("sampler", {}) or {}
@@ -317,9 +319,9 @@ def evaluate(
                 curr_samples = sampler.sample(model, curr_n, sample_points, c=mask)
                 if bool(data_cfg.get("return_fundamental_domain", False)) and k > 0:
                     curr_samples = _reconstruct_canonical_batch_from_domain(curr_samples, mask, num_points)
-                curr_samples = curr_samples.detach().cpu()
+                curr_samples = curr_samples.detach()
             elif not use_latent:
-                curr_samples = sampler.sample(model, curr_n, num_points).detach().cpu()
+                curr_samples = sampler.sample(model, curr_n, num_points).detach()
             else:
                 ae_ckpt_resolved = ae_ckpt or os.getenv("AE_CHECKPOINT", None)
                 if not ae_ckpt_resolved:
@@ -443,7 +445,7 @@ def evaluate(
                     else:
                         raise ValueError(f"Sampler no soportado: {sampler_name}")
     
-                    curr_samples = ae.decode_split(z0, h_t).detach().cpu()
+                    curr_samples = ae.decode_split(z0, h_t).detach()
                 else:
                     if noise_type is not None:
                         z_t = noise_type.sample((curr_n, latent_dim), device)
@@ -464,7 +466,7 @@ def evaluate(
                     else:
                         raise ValueError(f"Sampler no soportado: {sampler_name}")
     
-                    curr_samples = ae.decode(z_t).detach().cpu()
+                    curr_samples = ae.decode(z_t).detach()
             
             all_samples.append(curr_samples)
     samples = torch.cat(all_samples, dim=0)
@@ -473,23 +475,39 @@ def evaluate(
     if n_eval <= 0:
         raise ValueError("[eval] num_samples inválido o no hay datos para evaluar.")
 
-    gt_items = [ds[i] for i in range(n_eval)]
-    if len(gt_items) == 0:
+    # Use DataLoader for parallel GT loading (much faster than sequential ds[i])
+    from torch.utils.data import DataLoader
+    gt_loader = DataLoader(
+        ds, batch_size=batch_size_eval, shuffle=False,
+        num_workers=min(int(cfg.get("train", {}).get("num_workers", 4)), 8),
+        pin_memory=True, drop_last=False,
+    )
+    gt_list = []
+    return_fundamental = bool(cfg.get("data", {}).get("return_fundamental_domain", False))
+    from src.utils.symmetry_planes import reconstruct_from_fundamental_domain, resample_point_cloud
+    for batch in gt_loader:
+        if isinstance(batch, dict):
+            pts = batch["points"]
+            if return_fundamental and "symmetry_plane" in batch and "symmetry_plane_mask" in batch:
+                for b_idx in range(pts.shape[0]):
+                    p = reconstruct_from_fundamental_domain(pts[b_idx], batch["symmetry_plane"][b_idx], batch["symmetry_plane_mask"][b_idx])
+                    p = resample_point_cloud(p, num_points)
+                    gt_list.append(p)
+            else:
+                for b_idx in range(pts.shape[0]):
+                    gt_list.append(resample_point_cloud(pts[b_idx], num_points) if pts.shape[1] != num_points else pts[b_idx])
+        else:
+            # batch is a tensor [B, N, 3]
+            for b_idx in range(batch.shape[0]):
+                gt_list.append(batch[b_idx])
+    if len(gt_list) == 0:
         raise ValueError("[eval] No ground-truth items found")
-    if isinstance(gt_items[0], dict):
-        gt_list = []
-        from src.utils.symmetry_planes import reconstruct_from_fundamental_domain, resample_point_cloud
-        return_fundamental = bool(cfg.get("data", {}).get("return_fundamental_domain", False))
-        for item in gt_items:
-            pts = item["points"]
-            if return_fundamental and "symmetry_plane" in item and "symmetry_plane_mask" in item:
-                pts = reconstruct_from_fundamental_domain(pts, item["symmetry_plane"], item["symmetry_plane_mask"])
-            pts = resample_point_cloud(pts, num_points)
-            gt_list.append(pts)
-        gt = torch.stack(gt_list, dim=0)
-    else:
-        gt = torch.stack(gt_items, dim=0)
+    gt = torch.stack(gt_list[:n_eval], dim=0)
     gen = samples[:n_eval]
+
+    # Move everything to GPU for metrics computation
+    gen = gen.to(device)
+    gt = gt.to(device)
 
     gen = _ensure_bnc3(gen, name="gen")
     gt = _ensure_bnc3(gt, name="gt")
@@ -508,6 +526,7 @@ def evaluate(
 
     gen = _normalize_pc(gen)
     gt = _normalize_pc(gt)
+    print(f"[eval] Tensors on device: gen={gen.device}, gt={gt.device}")
 
     cd_vals = chamfer_distance(gen, gt)
     
@@ -538,9 +557,16 @@ def evaluate(
         print("[eval] Also computing EMD and advanced EMD metrics (esto puede tardar mucho)...")
         metrics_to_compute.append("emd")
     
+    # Free model weights from GPU to make room for pairwise matrices
+    del model
+    if 'ae' in dir():
+        del ae
+    torch.cuda.empty_cache()
+    print(f"[eval] Freed model from VRAM. Computing advanced metrics on GPU...")
+    
     adv_metrics = compute_all_metrics(
         gen, gt, 
-        batch_size=32, 
+        batch_size=64, 
         metrics_list=metrics_to_compute
     )
     
@@ -569,21 +595,21 @@ def evaluate(
         "metrics": {
             "cd": {
                 "mean": float(mean_cd),
-                "values": [float(v) for v in cd_vals.detach().cpu().tolist()],
+                "values": cd_vals.detach().cpu().tolist(),
             },
             "emd": {
                 "mean": float(mean_emd),
-                "values": [float(v) for v in emd_vals.detach().cpu().tolist()],
+                "values": emd_vals.detach().cpu().tolist(),
             },
             "rsd_gen": {
                 "mean": float(mean_rsd_gen),
                 "axis": sym_axis,
-                "values": [float(v) for v in rsd_gen_vals.detach().cpu().tolist()],
+                "values": rsd_gen_vals.detach().cpu().tolist(),
             },
             "rsd_gt": {
                 "mean": float(mean_rsd_gt),
                 "axis": sym_axis,
-                "values": [float(v) for v in rsd_gt_vals.detach().cpu().tolist()],
+                "values": rsd_gt_vals.detach().cpu().tolist(),
             },
             "rsd_ratio": float(mean_rsd_gen / max(mean_rsd_gt, 1e-10)),
             **adv_metrics 

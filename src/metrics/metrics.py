@@ -110,6 +110,40 @@ def reflection_symmetry_distance(
     return cd.mean()
 
 
+def _batched_chamfer_pairwise(
+    x_batch: torch.Tensor,
+    y_batch: torch.Tensor,
+) -> torch.Tensor:
+    """Vectorized pairwise CD between two batches. Returns [Bx, By] matrix.
+
+    x_batch: [Bx, N, 3], y_batch: [By, M, 3]
+    Uses broadcasting via torch.cdist to avoid Python loops.
+    """
+    Bx, N, _ = x_batch.shape
+    By, M, _ = y_batch.shape
+
+    # Expand for pairwise: [Bx, 1, N, 3] vs [1, By, M, 3] -> we process per x_i
+    # For memory efficiency, tile x one-at-a-time but vectorize over all y
+    # Actually, we can do better: compute all at once if memory allows
+    # x_exp: [Bx*By, N, 3], y_exp: [Bx*By, M, 3]
+    if Bx * By * max(N, M) < 50_000_000:  # ~200MB threshold for fp32
+        x_exp = x_batch.unsqueeze(1).expand(Bx, By, N, 3).reshape(Bx * By, N, 3)
+        y_exp = y_batch.unsqueeze(0).expand(Bx, By, M, 3).reshape(Bx * By, M, 3)
+        # Use torch.cdist for efficient batched pairwise distances
+        dists_sq = torch.cdist(x_exp, y_exp, p=2.0).pow(2)  # [Bx*By, N, M]
+        cd = dists_sq.min(dim=2)[0].mean(dim=1) + dists_sq.min(dim=1)[0].mean(dim=1)  # [Bx*By]
+        return cd.reshape(Bx, By)
+    else:
+        # Fallback: iterate over x_batch but still vectorize over y_batch
+        results = []
+        for k in range(Bx):
+            x_k = x_batch[k].unsqueeze(0).expand(By, -1, -1)  # [By, N, 3]
+            dists_sq = torch.cdist(x_k, y_batch, p=2.0).pow(2)  # [By, N, M]
+            cd = dists_sq.min(dim=2)[0].mean(dim=1) + dists_sq.min(dim=1)[0].mean(dim=1)
+            results.append(cd)
+        return torch.stack(results, dim=0)  # [Bx, By]
+
+
 def compute_pairwise_dist_batch(
     x: torch.Tensor, 
     y: torch.Tensor, 
@@ -141,22 +175,21 @@ def compute_pairwise_dist_batch(
         
         for j in range(0, M_samples, batch_size):
             y_batch = y[j : j + batch_size]
+            bx = x_batch.shape[0]
             
             if use_emd:
-                for k in range(x_batch.shape[0]):
+                # EMD: vectorize over y_batch for each x_i
+                for k in range(bx):
                     x_k_expanded = x_batch[k].unsqueeze(0).expand(y_batch.shape[0], -1, -1).contiguous()
-                    
                     if loss_fn:
                         dists = loss_fn(x_k_expanded, y_batch)
                     else:
                         dists = earth_movers_distance(x_k_expanded, y_batch)
-                        
-                    dist_mat[i+k, j : j + batch_size] = dists
+                    dist_mat[i+k, j : j + y_batch.shape[0]] = dists
             else:
-                for k in range(x_batch.shape[0]):
-                    x_k_expanded = x_batch[k].unsqueeze(0).expand(y_batch.shape[0], -1, -1).contiguous()
-                    dists = chamfer_distance(x_k_expanded, y_batch)
-                    dist_mat[i+k, j : j + batch_size] = dists
+                # CD: fully vectorized via broadcasting
+                cd_block = _batched_chamfer_pairwise(x_batch, y_batch)
+                dist_mat[i : i + bx, j : j + y_batch.shape[0]] = cd_block
             pbar.update(1)
             
     pbar.close()
