@@ -150,10 +150,22 @@ def compute_pairwise_dist_batch(
     batch_size: int = 32, 
     use_emd: bool = False,
     desc: str = "Pairwise Dist",
+    emd_max_points: Optional[int] = None,
 ) -> torch.Tensor:
 
     x = _ensure_bnc3(x, name="x_pairwise")
     y = _ensure_bnc3(y, name="y_pairwise")
+
+    # Subsample points for EMD (standard practice, Sinkhorn is O(N²))
+    if use_emd and emd_max_points is not None and emd_max_points > 0:
+        N_pts = x.shape[1]
+        M_pts = y.shape[1]
+        if N_pts > emd_max_points:
+            idx = torch.randperm(N_pts, device=x.device)[:emd_max_points]
+            x = x[:, idx, :]
+        if M_pts > emd_max_points:
+            idx = torch.randperm(M_pts, device=y.device)[:emd_max_points]
+            y = y[:, idx, :]
     
     N_samples = x.shape[0]
     M_samples = y.shape[0]
@@ -161,7 +173,8 @@ def compute_pairwise_dist_batch(
 
     loss_fn = None
     if use_emd and GEOMLOSS_AVAILABLE:
-        loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.05, scaling=0.9, backend="tensorized")
+        # scaling=0.7 for pairwise: fewer Sinkhorn iters, ~2-3x faster
+        loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.05, scaling=0.7, backend="tensorized")
 
     import math
     num_batches_x = math.ceil(N_samples / batch_size)
@@ -236,7 +249,8 @@ def compute_all_metrics(
     gen: torch.Tensor, 
     gt: torch.Tensor, 
     batch_size: int = 32,
-    metrics_list: List[str] = ["cd"]
+    metrics_list: List[str] = ["cd"],
+    emd_max_points: int = 512,
 ) -> Dict[str, float]:
 
     gen = _ensure_bnc3(gen, name="gen")
@@ -249,11 +263,12 @@ def compute_all_metrics(
         use_emd = (m_type == "emd")
         suffix = m_type.upper()
         
-        print(f"[metrics] Computing pairwise matrix for {suffix}...")
+        pts_info = f" (subsampled to {emd_max_points} pts)" if use_emd and emd_max_points else ""
+        print(f"[metrics] Computing pairwise matrix for {suffix}{pts_info}...")
 
-        d_gg = compute_pairwise_dist_batch(gen, gen, batch_size, use_emd, desc=f"{suffix} Gen-Gen")
-        d_rr = compute_pairwise_dist_batch(gt, gt, batch_size, use_emd, desc=f"{suffix} Ref-Ref")
-        d_gr = compute_pairwise_dist_batch(gen, gt, batch_size, use_emd, desc=f"{suffix} Gen-Ref")
+        d_gg = compute_pairwise_dist_batch(gen, gen, batch_size, use_emd, desc=f"{suffix} Gen-Gen", emd_max_points=emd_max_points if use_emd else None)
+        d_rr = compute_pairwise_dist_batch(gt, gt, batch_size, use_emd, desc=f"{suffix} Ref-Ref", emd_max_points=emd_max_points if use_emd else None)
+        d_gr = compute_pairwise_dist_batch(gen, gt, batch_size, use_emd, desc=f"{suffix} Gen-Ref", emd_max_points=emd_max_points if use_emd else None)
         
         stats = _compute_stats_from_matrices(d_gg, d_rr, d_gr)
         
