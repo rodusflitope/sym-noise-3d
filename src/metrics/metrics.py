@@ -126,7 +126,7 @@ def _batched_chamfer_pairwise(
     # For memory efficiency, tile x one-at-a-time but vectorize over all y
     # Actually, we can do better: compute all at once if memory allows
     # x_exp: [Bx*By, N, 3], y_exp: [Bx*By, M, 3]
-    if Bx * By * max(N, M) < 50_000_000:  # ~200MB threshold for fp32
+    if Bx * By * N * M < 500_000_000:  # ~2GB for fp32, safe for most GPUs
         x_exp = x_batch.unsqueeze(1).expand(Bx, By, N, 3).reshape(Bx * By, N, 3)
         y_exp = y_batch.unsqueeze(0).expand(Bx, By, M, 3).reshape(Bx * By, M, 3)
         # Use torch.cdist for efficient batched pairwise distances

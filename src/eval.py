@@ -605,7 +605,7 @@ def evaluate(
     
     adv_metrics = compute_all_metrics(
         gen, gt, 
-        batch_size=64, 
+        batch_size=32, 
         metrics_list=metrics_to_compute
     )
     
