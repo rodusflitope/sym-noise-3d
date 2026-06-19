@@ -49,7 +49,7 @@ def save_training_history(out_dir: str, exp_name: str, history: dict):
 
 def load_ckpt(model, ckpt_path: str, map_location=None, prefer_ema: bool = False):
     ckpt_path = resolve_ckpt_path(ckpt_path)
-    sd = torch.load(ckpt_path, map_location=map_location)
+    sd = torch.load(ckpt_path, map_location=map_location, weights_only=False)
 
     if prefer_ema and isinstance(sd, dict) and "model_ema" in sd and isinstance(sd["model_ema"], dict):
         ema_payload = sd["model_ema"]
@@ -69,7 +69,7 @@ def load_ckpt(model, ckpt_path: str, map_location=None, prefer_ema: bool = False
 
 def load_ckpt_config(ckpt_path: str):
     ckpt_path = resolve_ckpt_path(ckpt_path)
-    sd = torch.load(ckpt_path, map_location="cpu")
+    sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     metadata = sd.get("metadata", {})
     if metadata and "config" in metadata:
         return metadata["config"]

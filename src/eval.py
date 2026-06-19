@@ -48,7 +48,7 @@ def load_checkpoint(model: torch.nn.Module, path: str, device: torch.device, *, 
         else:
             raise FileNotFoundError(f"Could not find best.pt or last.pt in {path}")
 
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location=device, weights_only=False)
     if isinstance(ckpt, dict):
         if prefer_ema and isinstance(ckpt.get("model_ema", None), dict):
             ema_payload = ckpt["model_ema"]
@@ -136,6 +136,25 @@ def _get_repo_root() -> pathlib.Path:
 
 def _safe_tag(s: str) -> str:
     return "".join(ch if (ch.isalnum() or ch in {"-", "_"}) else "_" for ch in s)
+
+
+def _samples_cache_path(
+    ckpt_path: str,
+    n_eval: int,
+    seed: Optional[int],
+    eval_all: bool,
+) -> pathlib.Path:
+    """Build path for cached generated samples: <run_dir>/cached_samples/<tag>.pt"""
+    run_dir = pathlib.Path(ckpt_path).parent
+    cache_dir = run_dir / "cached_samples"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_stem = pathlib.Path(ckpt_path).stem
+    tag = f"{_safe_tag(ckpt_stem)}_n{int(n_eval)}"
+    if seed is not None:
+        tag += f"_seed{int(seed)}"
+    if eval_all:
+        tag += "_evalall"
+    return cache_dir / f"{tag}.pt"
 
 
 def _eval_out_path(
@@ -272,204 +291,223 @@ def evaluate(
         raise ValueError("[eval] num_samples inválido o no hay datos para evaluar.")
 
     batch_size_eval = int(cfg.get("eval", {}).get("batch_size", cfg.get("train", {}).get("batch_size", 16)))
-    use_amp_eval = bool(cfg.get("train", {}).get("amp", False))
-    amp_dtype = torch.float16 if str(cfg.get("train", {}).get("amp_dtype", "fp16")).lower() == "fp16" else torch.bfloat16
-    
-    all_samples = []
-    with torch.no_grad():
-        for i in range(0, n_eval, batch_size_eval):
-            curr_n = min(batch_size_eval, n_eval - i)
-            print(f"[eval] Generating samples {i+1} to {i+curr_n} of {n_eval}...")
-            
-            if isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane)) and not use_latent:
-                sym_sampler = SymmetricDDPM_Sampler(sampler)
-                curr_samples = sym_sampler.sample(model, num_samples=curr_n, num_points=num_points, device=device).detach()
-            elif isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane)) and not use_latent:
-                validate_joint_configuration(cfg, context="eval")
-                joint_sampler = JointSymmetricDDPM_Sampler(sampler)
-                curr_samples = joint_sampler.sample(
-                    model,
-                    cfg,
-                    num_samples=curr_n,
-                    num_points=num_points,
-                    device=device,
-                    alpha_bars=alpha_bars,
-                ).detach()
-            elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT, PointTransformerTrueJointMultiplaneDihedralDiT, PointTransformerTrueJointMultiplaneSparseDiT)) and not use_latent:
-                true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
-                curr_samples = true_joint_sampler.sample(
-                    model,
-                    cfg,
-                    num_samples=curr_n,
-                    num_points=num_points,
-                    device=device,
-                    alpha_bars=alpha_bars,
-                ).detach()
-            elif isinstance(model, PointTransformerSymClassDiT) and not use_latent:
-                data_cfg = cfg.get("data", {}) or {}
-                sampler_cfg = cfg.get("sampler", {}) or {}
-                num_planes = int(data_cfg.get("num_symmetry_planes", 1))
-                class_idx = int(sampler_cfg.get("symmetry_class", 0))
-                mask_single = _symmetry_class_mask(class_idx, num_planes, device)
-                mask = mask_single.unsqueeze(0).expand(curr_n, -1).contiguous()
-                k = int(mask_single.sum().item())
-                sample_points = num_points
-                if bool(data_cfg.get("return_fundamental_domain", False)):
-                    sample_points = max(1, num_points // (2 ** k))
-                curr_samples = sampler.sample(model, curr_n, sample_points, c=mask)
-                if bool(data_cfg.get("return_fundamental_domain", False)) and k > 0:
-                    curr_samples = _reconstruct_canonical_batch_from_domain(curr_samples, mask, num_points)
-                curr_samples = curr_samples.detach()
-            elif not use_latent:
-                curr_samples = sampler.sample(model, curr_n, num_points).detach()
-            else:
-                ae_ckpt_resolved = ae_ckpt or os.getenv("AE_CHECKPOINT", None)
-                if not ae_ckpt_resolved:
-                    raise ValueError("Eval en modo latente requiere --ae_ckpt o AE_CHECKPOINT en entorno.")
-    
-                ae_cfg = cfg.get("autoencoder", {})
-                ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
-                if ae_type in {"lion", "lion_pvcnn"}:
-                    global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
-                    local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
-                    log_sigma_clip = None
-                    if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
-                        clip_cfg = ae_cfg["log_sigma_clip"]
-                        if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
-                            log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
-                        elif isinstance(clip_cfg, dict):
-                            log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
-                        else:
-                            raise ValueError("autoencoder.log_sigma_clip must be [min,max] or {min:..., max:...}")
-                    ae = LionAutoencoder(
+
+    # ── Sample caching ──────────────────────────────────────────────────
+    cache_path = _samples_cache_path(ckpt_path, n_eval, used_seed, eval_all)
+    if cache_path.exists():
+        print(f"[eval] ✓ Loading cached samples from {cache_path}")
+        samples = torch.load(cache_path, map_location="cpu", weights_only=True)
+        print(f"[eval]   shape={tuple(samples.shape)}, dtype={samples.dtype}")
+    else:
+        # ── Generate samples (needs model on GPU) ──────────────────────
+        all_samples = []
+        with torch.no_grad():
+            for i in range(0, n_eval, batch_size_eval):
+                curr_n = min(batch_size_eval, n_eval - i)
+                print(f"[eval] Generating samples {i+1} to {i+curr_n} of {n_eval}...")
+                
+                if isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane)) and not use_latent:
+                    sym_sampler = SymmetricDDPM_Sampler(sampler)
+                    curr_samples = sym_sampler.sample(model, num_samples=curr_n, num_points=num_points, device=device).detach()
+                elif isinstance(model, (PVCNNJointSymPlane, PTJointSymPlane)) and not use_latent:
+                    validate_joint_configuration(cfg, context="eval")
+                    joint_sampler = JointSymmetricDDPM_Sampler(sampler)
+                    curr_samples = joint_sampler.sample(
+                        model,
+                        cfg,
+                        num_samples=curr_n,
                         num_points=num_points,
-                        input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
-                        global_latent_dim=global_latent_dim,
-                        local_latent_dim=local_latent_dim,
-                        hidden_dim=int(ae_cfg.get("hidden_dim", 128)),
-                        resolution=int(ae_cfg.get("resolution", 32)),
-                        enc_blocks=int(ae_cfg.get("enc_blocks", 3)),
-                        local_enc_blocks=int(ae_cfg.get("local_enc_blocks", 2)),
-                        dec_blocks=int(ae_cfg.get("dec_blocks", 3)),
-                        log_sigma_clip=log_sigma_clip,
-                        skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
-                        pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
-                        hard_symmetry_enabled=bool(((ae_cfg.get("symmetry", {}) or {}).get("hard", {}) or {}).get("enabled", False)),
-                        symmetry_axis=int((ae_cfg.get("symmetry", {}) or {}).get("axis", 0)),
-                    ).to(device)
-                elif ae_type == "point_mlp":
-                    latent_dim_cfg = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
-                    ae_hidden_dim = int(ae_cfg.get("hidden_dim", 128))
-                    ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim_cfg).to(device)
+                        device=device,
+                        alpha_bars=alpha_bars,
+                    ).detach()
+                elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT, PointTransformerTrueJointMultiplaneDihedralDiT, PointTransformerTrueJointMultiplaneSparseDiT)) and not use_latent:
+                    true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
+                    curr_samples = true_joint_sampler.sample(
+                        model,
+                        cfg,
+                        num_samples=curr_n,
+                        num_points=num_points,
+                        device=device,
+                        alpha_bars=alpha_bars,
+                    ).detach()
+                elif isinstance(model, PointTransformerSymClassDiT) and not use_latent:
+                    data_cfg = cfg.get("data", {}) or {}
+                    sampler_cfg = cfg.get("sampler", {}) or {}
+                    num_planes = int(data_cfg.get("num_symmetry_planes", 1))
+                    class_idx = int(sampler_cfg.get("symmetry_class", 0))
+                    mask_single = _symmetry_class_mask(class_idx, num_planes, device)
+                    mask = mask_single.unsqueeze(0).expand(curr_n, -1).contiguous()
+                    k = int(mask_single.sum().item())
+                    sample_points = num_points
+                    if bool(data_cfg.get("return_fundamental_domain", False)):
+                        sample_points = max(1, num_points // (2 ** k))
+                    curr_samples = sampler.sample(model, curr_n, sample_points, c=mask)
+                    if bool(data_cfg.get("return_fundamental_domain", False)) and k > 0:
+                        curr_samples = _reconstruct_canonical_batch_from_domain(curr_samples, mask, num_points)
+                    curr_samples = curr_samples.detach()
+                elif not use_latent:
+                    curr_samples = sampler.sample(model, curr_n, num_points).detach()
                 else:
-                    raise ValueError(f"Unknown autoencoder.type: {ae_type}")
+                    ae_ckpt_resolved = ae_ckpt or os.getenv("AE_CHECKPOINT", None)
+                    if not ae_ckpt_resolved:
+                        raise ValueError("Eval en modo latente requiere --ae_ckpt o AE_CHECKPOINT en entorno.")
     
-                load_checkpoint(ae, ae_ckpt_resolved, device)
-                ae.eval()
-    
-                is_lion_two_priors = bool(isinstance(model, LionTwoPriorsDDM))
-                if is_lion_two_priors:
-                    ae_ok_types = (LionAutoencoder,)
-                    if not isinstance(ae, ae_ok_types):
-                        raise ValueError("lion_priors requiere un autoencoder compatible con LionTwoPriorsDDM")
-    
-                if not is_lion_two_priors:
-                    if hasattr(ae, "latent_dim_total"):
-                        latent_dim = int(getattr(ae, "latent_dim_total"))
-                    elif hasattr(ae, "latent_dim"):
-                        latent_dim = int(getattr(ae, "latent_dim"))
+                    ae_cfg = cfg.get("autoencoder", {})
+                    ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
+                    if ae_type in {"lion", "lion_pvcnn"}:
+                        global_latent_dim = int(ae_cfg.get("global_latent_dim", 128))
+                        local_latent_dim = int(ae_cfg.get("local_latent_dim", 16))
+                        log_sigma_clip = None
+                        if "log_sigma_clip" in ae_cfg and ae_cfg["log_sigma_clip"] is not None:
+                            clip_cfg = ae_cfg["log_sigma_clip"]
+                            if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) == 2:
+                                log_sigma_clip = (float(clip_cfg[0]), float(clip_cfg[1]))
+                            elif isinstance(clip_cfg, dict):
+                                log_sigma_clip = (float(clip_cfg.get("min", -10.0)), float(clip_cfg.get("max", 2.0)))
+                            else:
+                                raise ValueError("autoencoder.log_sigma_clip must be [min,max] or {min:..., max:...}")
+                        ae = LionAutoencoder(
+                            num_points=num_points,
+                            input_dim=int(cfg.get("model", {}).get("input_dim", 3)),
+                            global_latent_dim=global_latent_dim,
+                            local_latent_dim=local_latent_dim,
+                            hidden_dim=int(ae_cfg.get("hidden_dim", 128)),
+                            resolution=int(ae_cfg.get("resolution", 32)),
+                            enc_blocks=int(ae_cfg.get("enc_blocks", 3)),
+                            local_enc_blocks=int(ae_cfg.get("local_enc_blocks", 2)),
+                            dec_blocks=int(ae_cfg.get("dec_blocks", 3)),
+                            log_sigma_clip=log_sigma_clip,
+                            skip_weight=float(ae_cfg.get("skip_weight", 0.01)),
+                            pts_sigma_offset=float(ae_cfg.get("pts_sigma_offset", 2.0)),
+                            hard_symmetry_enabled=bool(((ae_cfg.get("symmetry", {}) or {}).get("hard", {}) or {}).get("enabled", False)),
+                            symmetry_axis=int((ae_cfg.get("symmetry", {}) or {}).get("axis", 0)),
+                        ).to(device)
+                    elif ae_type == "point_mlp":
+                        latent_dim_cfg = int(ae_cfg.get("latent_dim", cfg.get("model", {}).get("latent_dim", 256)))
+                        ae_hidden_dim = int(ae_cfg.get("hidden_dim", 128))
+                        ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim_cfg).to(device)
                     else:
-                        raise ValueError("Autoencoder does not expose latent dimensionality")
+                        raise ValueError(f"Unknown autoencoder.type: {ae_type}")
     
-                T = betas.shape[0]
-                sampler_name = cfg["sampler"].get("name", "ddpm").lower()
+                    load_checkpoint(ae, ae_ckpt_resolved, device)
+                    ae.eval()
     
-                if is_lion_two_priors:
-                    style_dim = int(ae.global_latent_dim)
-                    local_dim = int(ae.local_flat_dim)
+                    is_lion_two_priors = bool(isinstance(model, LionTwoPriorsDDM))
+                    if is_lion_two_priors:
+                        ae_ok_types = (LionAutoencoder,)
+                        if not isinstance(ae, ae_ok_types):
+                            raise ValueError("lion_priors requiere un autoencoder compatible con LionTwoPriorsDDM")
     
-                    if noise_type is not None:
-                        z_t = noise_type.sample((curr_n, style_dim), device)
-                        h_t = noise_type.sample((curr_n, local_dim), device)
+                    if not is_lion_two_priors:
+                        if hasattr(ae, "latent_dim_total"):
+                            latent_dim = int(getattr(ae, "latent_dim_total"))
+                        elif hasattr(ae, "latent_dim"):
+                            latent_dim = int(getattr(ae, "latent_dim"))
+                        else:
+                            raise ValueError("Autoencoder does not expose latent dimensionality")
+    
+                    T = betas.shape[0]
+                    sampler_name = cfg["sampler"].get("name", "ddpm").lower()
+    
+                    if is_lion_two_priors:
+                        style_dim = int(ae.global_latent_dim)
+                        local_dim = int(ae.local_flat_dim)
+    
+                        if noise_type is not None:
+                            z_t = noise_type.sample((curr_n, style_dim), device)
+                            h_t = noise_type.sample((curr_n, local_dim), device)
+                        else:
+                            z_t = torch.randn(curr_n, style_dim, device=device)
+                            h_t = torch.randn(curr_n, local_dim, device=device)
+    
+                        class _ZWrapper(torch.nn.Module):
+                            def __init__(self, inner: LionTwoPriorsDDM):
+                                super().__init__()
+                                self.inner = inner
+    
+                            def forward(self, x: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
+                                return self.inner.ddm_z(x, t_batch)
+    
+                        class _HCondWrapper(torch.nn.Module):
+                            def __init__(self, inner: LionTwoPriorsDDM, z0_cond: torch.Tensor):
+                                super().__init__()
+                                self.inner = inner
+                                self.z0_cond = z0_cond
+    
+                            def forward(self, x: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
+                                return self.inner.ddm_h(x, self.z0_cond, t_batch)
+    
+                        z_model = _ZWrapper(model)
+    
+                        if sampler_name == "ddpm":
+                            for t in reversed(range(T)):
+                                z_t = _sampler_step(sampler, z_model, z_t, t)
+                        elif sampler_name == "ddim":
+                            num_steps = int(cfg["sampler"].get("num_steps", T))
+                            num_steps = min(max(1, num_steps), T)
+                            step_size = max(1, T // num_steps)
+                            timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
+                            for j, t in enumerate(timesteps):
+                                t_prev = timesteps[j + 1] if j + 1 < len(timesteps) else -1
+                                z_t = _sampler_step(sampler, z_model, z_t, t, t_prev)
+                        else:
+                            raise ValueError(f"Sampler no soportado: {sampler_name}")
+    
+                        z0 = z_t
+                        h_model = _HCondWrapper(model, z0)
+    
+                        if sampler_name == "ddpm":
+                            for t in reversed(range(T)):
+                                h_t = _sampler_step(sampler, h_model, h_t, t)
+                        elif sampler_name == "ddim":
+                            num_steps = int(cfg["sampler"].get("num_steps", T))
+                            num_steps = min(max(1, num_steps), T)
+                            step_size = max(1, T // num_steps)
+                            timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
+                            for j, t in enumerate(timesteps):
+                                t_prev = timesteps[j + 1] if j + 1 < len(timesteps) else -1
+                                h_t = _sampler_step(sampler, h_model, h_t, t, t_prev)
+                        else:
+                            raise ValueError(f"Sampler no soportado: {sampler_name}")
+    
+                        curr_samples = ae.decode_split(z0, h_t).detach()
                     else:
-                        z_t = torch.randn(curr_n, style_dim, device=device)
-                        h_t = torch.randn(curr_n, local_dim, device=device)
+                        if noise_type is not None:
+                            z_t = noise_type.sample((curr_n, latent_dim), device)
+                        else:
+                            z_t = torch.randn(curr_n, latent_dim, device=device)
     
-                    class _ZWrapper(torch.nn.Module):
-                        def __init__(self, inner: LionTwoPriorsDDM):
-                            super().__init__()
-                            self.inner = inner
+                        if sampler_name == "ddpm":
+                            for t in reversed(range(T)):
+                                z_t = _sampler_step(sampler, model, z_t, t)
+                        elif sampler_name == "ddim":
+                            num_steps = int(cfg["sampler"].get("num_steps", T))
+                            num_steps = min(max(1, num_steps), T)
+                            step_size = max(1, T // num_steps)
+                            timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
+                            for j, t in enumerate(timesteps):
+                                t_prev = timesteps[j + 1] if j + 1 < len(timesteps) else -1
+                                z_t = _sampler_step(sampler, model, z_t, t, t_prev)
+                        else:
+                            raise ValueError(f"Sampler no soportado: {sampler_name}")
     
-                        def forward(self, x: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
-                            return self.inner.ddm_z(x, t_batch)
-    
-                    class _HCondWrapper(torch.nn.Module):
-                        def __init__(self, inner: LionTwoPriorsDDM, z0_cond: torch.Tensor):
-                            super().__init__()
-                            self.inner = inner
-                            self.z0_cond = z0_cond
-    
-                        def forward(self, x: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
-                            return self.inner.ddm_h(x, self.z0_cond, t_batch)
-    
-                    z_model = _ZWrapper(model)
-    
-                    if sampler_name == "ddpm":
-                        for t in reversed(range(T)):
-                            z_t = _sampler_step(sampler, z_model, z_t, t)
-                    elif sampler_name == "ddim":
-                        num_steps = int(cfg["sampler"].get("num_steps", T))
-                        num_steps = min(max(1, num_steps), T)
-                        step_size = max(1, T // num_steps)
-                        timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
-                        for j, t in enumerate(timesteps):
-                            t_prev = timesteps[j + 1] if j + 1 < len(timesteps) else -1
-                            z_t = _sampler_step(sampler, z_model, z_t, t, t_prev)
-                    else:
-                        raise ValueError(f"Sampler no soportado: {sampler_name}")
-    
-                    z0 = z_t
-                    h_model = _HCondWrapper(model, z0)
-    
-                    if sampler_name == "ddpm":
-                        for t in reversed(range(T)):
-                            h_t = _sampler_step(sampler, h_model, h_t, t)
-                    elif sampler_name == "ddim":
-                        num_steps = int(cfg["sampler"].get("num_steps", T))
-                        num_steps = min(max(1, num_steps), T)
-                        step_size = max(1, T // num_steps)
-                        timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
-                        for j, t in enumerate(timesteps):
-                            t_prev = timesteps[j + 1] if j + 1 < len(timesteps) else -1
-                            h_t = _sampler_step(sampler, h_model, h_t, t, t_prev)
-                    else:
-                        raise ValueError(f"Sampler no soportado: {sampler_name}")
-    
-                    curr_samples = ae.decode_split(z0, h_t).detach()
-                else:
-                    if noise_type is not None:
-                        z_t = noise_type.sample((curr_n, latent_dim), device)
-                    else:
-                        z_t = torch.randn(curr_n, latent_dim, device=device)
-    
-                    if sampler_name == "ddpm":
-                        for t in reversed(range(T)):
-                            z_t = _sampler_step(sampler, model, z_t, t)
-                    elif sampler_name == "ddim":
-                        num_steps = int(cfg["sampler"].get("num_steps", T))
-                        num_steps = min(max(1, num_steps), T)
-                        step_size = max(1, T // num_steps)
-                        timesteps = list(reversed(list(range(0, T, step_size))[:num_steps]))
-                        for j, t in enumerate(timesteps):
-                            t_prev = timesteps[j + 1] if j + 1 < len(timesteps) else -1
-                            z_t = _sampler_step(sampler, model, z_t, t, t_prev)
-                    else:
-                        raise ValueError(f"Sampler no soportado: {sampler_name}")
-    
-                    curr_samples = ae.decode(z_t).detach()
-            
-            all_samples.append(curr_samples)
-    samples = torch.cat(all_samples, dim=0)
+                        curr_samples = ae.decode(z_t).detach()
+                
+                all_samples.append(curr_samples)
+        samples = torch.cat(all_samples, dim=0).cpu()
+
+        # Save samples to cache
+        torch.save(samples, cache_path)
+        print(f"[eval] ✓ Cached {samples.shape[0]} samples to {cache_path}")
+
+    # ── Free model from GPU (no longer needed) ────────────────────────
+    if 'model' in dir():
+        del model
+    if 'ae' in locals():
+        del ae
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print(f"[eval] Freed model from VRAM.")
 
     n_eval = min(int(n_eval), int(samples.shape[0]))
     if n_eval <= 0:
@@ -531,7 +569,15 @@ def evaluate(
     cd_vals = chamfer_distance(gen, gt)
     
     if compute_emd:
-        emd_vals = earth_movers_distance(gen, gt, max_points=max_points)
+        # Compute EMD in sub-batches to avoid OOM (Sinkhorn creates [B,N,M] cost matrices)
+        emd_batch_size = 16
+        emd_parts = []
+        for ei in range(0, n_eval, emd_batch_size):
+            ej = min(ei + emd_batch_size, n_eval)
+            emd_parts.append(earth_movers_distance(gen[ei:ej], gt[ei:ej], max_points=max_points))
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        emd_vals = torch.cat(emd_parts, dim=0)
     else:
         emd_vals = torch.zeros(n_eval, device=device)
 
@@ -556,13 +602,6 @@ def evaluate(
     if compute_emd:
         print("[eval] Also computing EMD and advanced EMD metrics (esto puede tardar mucho)...")
         metrics_to_compute.append("emd")
-    
-    # Free model weights from GPU to make room for pairwise matrices
-    del model
-    if 'ae' in dir():
-        del ae
-    torch.cuda.empty_cache()
-    print(f"[eval] Freed model from VRAM. Computing advanced metrics on GPU...")
     
     adv_metrics = compute_all_metrics(
         gen, gt, 
