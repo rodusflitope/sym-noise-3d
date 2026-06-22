@@ -46,6 +46,7 @@ mappings = {
     "cfgs/pointtransformer_true_joint_multiplane_relative_dit.yaml": "cfgs/final_experiments/pt_true_joint_relative_orthogonal.yaml",
     "cfgs/pointtransformer_true_joint_multiplane_dit_dihedral.yaml": "cfgs/final_experiments/pt_true_joint_relative_dihedral.yaml",
     "cfgs/pointtransformer_true_joint_multiplane_dit_sparse_3p.yaml": "cfgs/final_experiments/pt_true_joint_relative_sparse_3p.yaml",
+    "cfgs/pt_true_joint_no_multiplane_x.yaml": "cfgs/final_experiments/pt_true_joint_no_multiplane_x.yaml",
 }
 
 for src, dst in mappings.items():
