@@ -373,6 +373,7 @@ def build_model(cfg):
         inactive_plane_norm_threshold = float(joint_cfg.get("inactive_plane_norm_threshold", 1e-5))
         use_presence_logits = bool(joint_cfg.get("use_presence_logits", cfg["model"].get("use_presence_logits", False)))
         soft_cut_margin = float(joint_cfg.get("soft_cut_margin", cfg["model"].get("soft_cut_margin", 0.05)))
+        use_orthant_embedding = bool(cfg["model"].get("use_orthant_embedding", True))
 
         return PointTransformerTrueJointMultiplaneSparseDiT(
             hidden_dim=hidden_dim,
@@ -386,5 +387,6 @@ def build_model(cfg):
             inactive_plane_norm_threshold=inactive_plane_norm_threshold,
             use_presence_logits=use_presence_logits,
             soft_cut_margin=soft_cut_margin,
+            use_orthant_embedding=use_orthant_embedding,
         )
     raise ValueError(f"Unknown model: {name}")
