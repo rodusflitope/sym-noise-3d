@@ -987,6 +987,7 @@ def main() -> None:
                             x_t=x_t,
                             plane_t=plane_t,
                             t=t,
+                            x0_input=x0_input,
                         )
 
                         (
@@ -1315,6 +1316,7 @@ def main() -> None:
                                     x_t=x_t,
                                     plane_t=plane_t,
                                     t=t,
+                                    x0_input=x0_input,
                                 )
 
                                 l, ld, lp, lr, lc, lb = true_joint_sym_plane_loss_fn(

@@ -12,60 +12,30 @@ class SparseSymmetryAwareAttention(nn.Module):
         self.proj = nn.Linear(hidden_dim, hidden_dim)
         self.soft_cut_margin = soft_cut_margin
         
-    def forward(self, x, distances, coords=None, normals=None):
-        # x: (B, N, C)
-        # distances: (B, N, P)
-        # coords: (B, N, 3) (Optional physical coordinates)
-        # normals: (B, P, 3) (Optional plane normals)
+    def forward(self, x, distances):
+        # x: (B, N, C) where N can be N_points + 1 (hub token)
+        # distances: (B, N_points, P)
         B, N, C = x.shape
+        N_points = distances.shape[1]
         P = distances.shape[-1]
         qkv = self.qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: t.view(B, N, self.num_heads, C // self.num_heads).transpose(1, 2), qkv)
         
         # Check positive/negative sides with soft margin
-        sign_plus = distances > -self.soft_cut_margin   # (B, N, P)
-        sign_minus = distances < self.soft_cut_margin   # (B, N, P)
+        sign_plus = distances > -self.soft_cut_margin   # (B, N_points, P)
+        sign_minus = distances < self.soft_cut_margin   # (B, N_points, P)
         
-        # Points i and j can attend to each other if they share a valid region.
-        # They share a region if for EVERY plane, they share at least one valid sign (+ or -).
-        shared_plus = sign_plus.unsqueeze(2) & sign_plus.unsqueeze(1) # (B, N, N, P)
-        shared_minus = sign_minus.unsqueeze(2) & sign_minus.unsqueeze(1) # (B, N, N, P)
-        shared_plane = shared_plus | shared_minus # (B, N, N, P)
+        shared_plus = sign_plus.unsqueeze(2) & sign_plus.unsqueeze(1) # (B, N_points, N_points, P)
+        shared_minus = sign_minus.unsqueeze(2) & sign_minus.unsqueeze(1) # (B, N_points, N_points, P)
+        shared_plane = shared_plus | shared_minus # (B, N_points, N_points, P)
         
-        attn_mask = shared_plane.all(dim=-1) # (B, N, N)
+        attn_mask_points = shared_plane.all(dim=-1) # (B, N_points, N_points)
         
-        # Add symmetric cross-attention for each plane
-        if coords is not None and normals is not None:
-            for p in range(P):
-                p_normal = normals[:, p, :].unsqueeze(1) # (B, 1, 3)
-                p_dist = distances[:, :, p].unsqueeze(-1) # (B, N, 1)
-                
-                # Only apply for active planes in the batch
-                plane_active = (p_normal.norm(dim=-1) > 1e-5).squeeze(-1) # (B,)
-                
-                if not plane_active.any():
-                    continue
-                    
-                # R_p(x) = x - 2 * dist * n
-                coords_reflected = coords - 2 * p_dist * p_normal # (B, N, 3)
-                
-                # Pairwise distance matrix between original coords and reflected coords
-                dist_matrix = torch.cdist(coords_reflected, coords) # (B, N, N)
-                
-                # Get the index of the closest actual point for each reflected point
-                closest_indices = dist_matrix.argmin(dim=-1) # (B, N)
-                
-                # Set mask to True for these symmetric pairs
-                b_indices = torch.arange(B, device=x.device).unsqueeze(1).expand(B, N)
-                n_indices = torch.arange(N, device=x.device).unsqueeze(0).expand(B, N)
-                
-                # Only apply to batches where this plane is active
-                active_mask = plane_active.unsqueeze(-1).expand(B, N)
-                
-                # Unidirectional assignment
-                attn_mask[b_indices[active_mask], n_indices[active_mask], closest_indices[active_mask]] = True
-                # Make the connection bidirectional
-                attn_mask[b_indices[active_mask], closest_indices[active_mask], n_indices[active_mask]] = True
+        # Expand mask for Hub Token
+        if N > N_points:
+            attn_mask = F.pad(attn_mask_points, (0, N - N_points, 0, N - N_points), value=True)
+        else:
+            attn_mask = attn_mask_points
                 
         attn_mask = attn_mask.unsqueeze(1) # (B, 1, N, N)
         
@@ -93,12 +63,11 @@ class SparseSymmetryDiTBlock(nn.Module):
         nn.init.zeros_(self.adaLN_modulation[1].weight)
         nn.init.zeros_(self.adaLN_modulation[1].bias)
 
-    def forward(self, x, coords, c, distances=None, normals=None):
+    def forward(self, x, c, distances=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         
         x_modulated = modulate(self.norm1(x), shift_msa.unsqueeze(1), scale_msa.unsqueeze(1))
-        # Note: distances, coords and normals are passed
-        x = x + gate_msa.unsqueeze(1) * self.attn(x_modulated, distances, coords=coords, normals=normals)
+        x = x + gate_msa.unsqueeze(1) * self.attn(x_modulated, distances)
         
         x_modulated_mlp = modulate(self.norm2(x), shift_mlp.unsqueeze(1), scale_mlp.unsqueeze(1))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(x_modulated_mlp)
@@ -121,6 +90,7 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         use_presence_logits: bool = False,
         soft_cut_margin: float = 0.05,
         use_gram_matrix: bool = False,
+        use_orthant_embedding: bool = True,
     ):
         super().__init__()
         self.use_fourier_features = use_fourier_features
@@ -131,8 +101,13 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         self.use_presence_logits = bool(use_presence_logits)
         self.soft_cut_margin = float(soft_cut_margin)
         self.use_gram_matrix = bool(use_gram_matrix)
+        self.use_orthant_embedding = bool(use_orthant_embedding)
         
         self.time_embed = SinusoidalTimeEmbed(time_dim)
+
+        # Hub token for global information sharing across sparse components
+        self.hub_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+        nn.init.normal_(self.hub_token, std=0.02)
 
         # 3 absolute coordinates + num_planes relative distances
         self.point_embed = nn.Sequential(
@@ -145,11 +120,12 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         )
         
         # Orthant Categorical Embedding
-        self.orthant_embed = nn.Sequential(
-            nn.Linear(num_planes, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
+        if self.use_orthant_embedding:
+            self.orthant_embed = nn.Sequential(
+                nn.Linear(num_planes, hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, hidden_dim)
+            )
 
         cond_dim = time_dim + 3 * num_planes
         if self.use_gram_matrix:
@@ -215,9 +191,11 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         feats = self.point_embed(feats_input)
         
         # Orthant Categorical Embedding
-        orthant_signs = (distances > 0).float() # (B, N, num_planes)
-        orthant_feats = self.orthant_embed(orthant_signs)
-        feats = feats + orthant_feats
+        if self.use_orthant_embedding:
+            # Orthant Categorical Embedding (Softened to avoid noise jitter)
+            orthant_signs = torch.tanh(distances / 0.1) # (B, N, num_planes)
+            orthant_feats = self.orthant_embed(orthant_signs)
+            feats = feats + orthant_feats
 
         if self.use_gram_matrix:
             # normals: (B, num_planes, 3) -> gram: (B, num_planes, num_planes)
@@ -229,20 +207,30 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
             
         c = self.cond_proj(cond)
 
+        # Append hub token
+        hub = self.hub_token.expand(B, -1, -1)
+        feats = torch.cat([feats, hub], dim=1) # (B, N+1, hidden_dim)
+
         for layer in self.layers:
             if isinstance(layer, SparseSymmetryDiTBlock):
-                feats = layer(feats, coords=x_t, c=c, distances=distances, normals=normals)
+                feats = layer(feats, c=c, distances=distances)
             else:
                 feats = layer(feats, coords=x_t, c=c)
+
+        # Extract hub token before removal for global plane prediction
+        hub_out = feats[:, -1, :]
+        
+        # Remove hub token
+        feats = feats[:, :-1, :]
 
         shift, scale = self.final_adaLN(c).chunk(2, dim=1)
         feats = modulate(self.final_layer(feats), shift.unsqueeze(1), scale.unsqueeze(1))
         
         eps_points = self.to_out(feats)
         
-        pooled_feat = feats.mean(dim=1)
-        eps_plane = self.plane_out(pooled_feat).view(B, self.num_planes, 4)
-        presence_logits = self.presence_head(pooled_feat) if self.presence_head is not None else None
+        # Predict planes using the Hub Token representation instead of an average
+        eps_plane = self.plane_out(hub_out).view(B, self.num_planes, 4)
+        presence_logits = self.presence_head(hub_out) if self.presence_head is not None else None
 
         if plane_t.dim() == 2 and plane_t.shape[-1] == self.num_planes * 4:
             eps_plane = eps_plane.view(B, -1)

@@ -138,6 +138,7 @@ def parse_args():
     p.add_argument("--condition_canonical", action="store_true", help="Condicionar la generación con los planos canónicos para ahorrar memoria (evalúa Sparse/Dihedral).")
     p.add_argument("--return_fundamental_only", action="store_true", help="Retornar solo el dominio fundamental (sin reflejar).")
     p.add_argument("--num_samples", type=int, default=None, help="Sobrescribe la cantidad de samples a generar.")
+    p.add_argument("--target_planes", type=str, default=None, help="Lista JSON de planos fijos, ej: '[[1,0,0,0], [0,1,0,0]]'. Si se provee, la red asume estos planos como correctos y no gasta cómputo prediciéndolos en cada paso.")
     return p.parse_args()
 
 
@@ -318,7 +319,34 @@ def sample_checkpoint(args, temp_cfg, ckpt):
                 print("[sample] FORZANDO SOLO DOMINIO FUNDAMENTAL (sin reflejar).")
                 true_joint_sampler.return_fundamental_only = True
                 
-            if args.condition_canonical:
+            if args.target_planes is not None:
+                import json
+                print(f"[sample] TARGET PLANES: Inferencia optimizada. Usando planos fijos: {args.target_planes}")
+                planes_list = json.loads(args.target_planes)
+                target_planes_tensor = torch.tensor(planes_list, device=device, dtype=torch.float32)
+                num_planes = getattr(model, "num_planes", 1)
+                
+                if target_planes_tensor.dim() == 1:
+                    target_planes_tensor = target_planes_tensor.unsqueeze(0)
+                
+                # Pad with zeros if fewer planes than required
+                if target_planes_tensor.shape[0] < num_planes:
+                    pad = torch.zeros(num_planes - target_planes_tensor.shape[0], 4, device=device)
+                    target_planes_tensor = torch.cat([target_planes_tensor, pad], dim=0)
+                else:
+                    target_planes_tensor = target_planes_tensor[:num_planes]
+                
+                target_planes = target_planes_tensor.unsqueeze(0).expand(num_samples, -1, -1)
+                out = true_joint_sampler.sample_with_fixed_planes(
+                    model,
+                    cfg=cfg,
+                    target_planes=target_planes,
+                    num_samples=num_samples,
+                    num_points=num_points,
+                    device=device,
+                    alpha_bars=alpha_bars,
+                )
+            elif args.condition_canonical:
                 print("[sample] CONDITIONAL INFERENCE: Condicionando usando todos los planos canónicos.")
                 num_planes = getattr(model, "num_planes", 1)
                 from src.utils.symmetry_planes import CANONICAL_SYMMETRY_PLANES

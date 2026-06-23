@@ -36,6 +36,7 @@ model:
   num_layers: 3
   use_fourier_features: false
   use_sparse_attention: true
+  use_orthant_embedding: true
 
 joint_symmetry:
   geometry_mode: "full"
@@ -58,7 +59,7 @@ loss:
 
 train:
   batch_size: 32
-  epochs: 500
+  epochs: 400
   log_every: 50
   num_points: 1024
   num_workers: 2
