@@ -36,7 +36,7 @@ model:
   use_symmetric_attention: false
 
 joint_symmetry:
-  geometry_mode: "full"
+  geometry_mode: "half"
   plane_mode: "diffusion"
   inactive_plane_norm_threshold: 1e-5
   renormalize_planes_during_sampling: false

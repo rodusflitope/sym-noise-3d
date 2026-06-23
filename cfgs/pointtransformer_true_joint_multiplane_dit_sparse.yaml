@@ -58,9 +58,9 @@ loss:
 
 train:
   batch_size: 32
-  epochs: 300
+  epochs: 500
   log_every: 50
-  num_points:  512
+  num_points: 1024
   num_workers: 2
   out_dir: "runs"
   save_every: 10

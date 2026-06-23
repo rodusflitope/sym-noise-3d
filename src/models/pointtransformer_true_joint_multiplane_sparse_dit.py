@@ -12,10 +12,13 @@ class SparseSymmetryAwareAttention(nn.Module):
         self.proj = nn.Linear(hidden_dim, hidden_dim)
         self.soft_cut_margin = soft_cut_margin
         
-    def forward(self, x, distances):
+    def forward(self, x, distances, coords=None, normals=None):
         # x: (B, N, C)
         # distances: (B, N, P)
+        # coords: (B, N, 3) (Optional physical coordinates)
+        # normals: (B, P, 3) (Optional plane normals)
         B, N, C = x.shape
+        P = distances.shape[-1]
         qkv = self.qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: t.view(B, N, self.num_heads, C // self.num_heads).transpose(1, 2), qkv)
         
@@ -29,7 +32,42 @@ class SparseSymmetryAwareAttention(nn.Module):
         shared_minus = sign_minus.unsqueeze(2) & sign_minus.unsqueeze(1) # (B, N, N, P)
         shared_plane = shared_plus | shared_minus # (B, N, N, P)
         
-        attn_mask = shared_plane.all(dim=-1).unsqueeze(1) # (B, 1, N, N)
+        attn_mask = shared_plane.all(dim=-1) # (B, N, N)
+        
+        # Add symmetric cross-attention for each plane
+        if coords is not None and normals is not None:
+            for p in range(P):
+                p_normal = normals[:, p, :].unsqueeze(1) # (B, 1, 3)
+                p_dist = distances[:, :, p].unsqueeze(-1) # (B, N, 1)
+                
+                # Only apply for active planes in the batch
+                plane_active = (p_normal.norm(dim=-1) > 1e-5).squeeze(-1) # (B,)
+                
+                if not plane_active.any():
+                    continue
+                    
+                # R_p(x) = x - 2 * dist * n
+                coords_reflected = coords - 2 * p_dist * p_normal # (B, N, 3)
+                
+                # Pairwise distance matrix between original coords and reflected coords
+                dist_matrix = torch.cdist(coords_reflected, coords) # (B, N, N)
+                
+                # Get the index of the closest actual point for each reflected point
+                closest_indices = dist_matrix.argmin(dim=-1) # (B, N)
+                
+                # Set mask to True for these symmetric pairs
+                b_indices = torch.arange(B, device=x.device).unsqueeze(1).expand(B, N)
+                n_indices = torch.arange(N, device=x.device).unsqueeze(0).expand(B, N)
+                
+                # Only apply to batches where this plane is active
+                active_mask = plane_active.unsqueeze(-1).expand(B, N)
+                
+                # Unidirectional assignment
+                attn_mask[b_indices[active_mask], n_indices[active_mask], closest_indices[active_mask]] = True
+                # Make the connection bidirectional
+                attn_mask[b_indices[active_mask], closest_indices[active_mask], n_indices[active_mask]] = True
+                
+        attn_mask = attn_mask.unsqueeze(1) # (B, 1, N, N)
         
         # Use PyTorch's optimized scaled dot product attention (FlashAttention/memory efficient)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
@@ -55,12 +93,12 @@ class SparseSymmetryDiTBlock(nn.Module):
         nn.init.zeros_(self.adaLN_modulation[1].weight)
         nn.init.zeros_(self.adaLN_modulation[1].bias)
 
-    def forward(self, x, coords, c, distances=None):
+    def forward(self, x, coords, c, distances=None, normals=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         
         x_modulated = modulate(self.norm1(x), shift_msa.unsqueeze(1), scale_msa.unsqueeze(1))
-        # Note: distances is passed instead of coords
-        x = x + gate_msa.unsqueeze(1) * self.attn(x_modulated, distances)
+        # Note: distances, coords and normals are passed
+        x = x + gate_msa.unsqueeze(1) * self.attn(x_modulated, distances, coords=coords, normals=normals)
         
         x_modulated_mlp = modulate(self.norm2(x), shift_mlp.unsqueeze(1), scale_mlp.unsqueeze(1))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(x_modulated_mlp)
@@ -104,6 +142,13 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.LayerNorm(hidden_dim),
+        )
+        
+        # Orthant Categorical Embedding
+        self.orthant_embed = nn.Sequential(
+            nn.Linear(num_planes, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
         )
 
         cond_dim = time_dim + 3 * num_planes
@@ -168,6 +213,11 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         # Concatenar absolutas y relativas
         feats_input = torch.cat([x_t, distances], dim=-1) # (B, N, 3 + num_planes)
         feats = self.point_embed(feats_input)
+        
+        # Orthant Categorical Embedding
+        orthant_signs = (distances > 0).float() # (B, N, num_planes)
+        orthant_feats = self.orthant_embed(orthant_signs)
+        feats = feats + orthant_feats
 
         if self.use_gram_matrix:
             # normals: (B, num_planes, 3) -> gram: (B, num_planes, num_planes)
@@ -181,7 +231,7 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
 
         for layer in self.layers:
             if isinstance(layer, SparseSymmetryDiTBlock):
-                feats = layer(feats, coords=x_t, c=c, distances=distances)
+                feats = layer(feats, coords=x_t, c=c, distances=distances, normals=normals)
             else:
                 feats = layer(feats, coords=x_t, c=c)
 
