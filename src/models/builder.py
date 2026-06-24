@@ -311,6 +311,8 @@ def build_model(cfg):
         num_layers = int(cfg["model"].get("num_layers", 2))
         use_symmetric_attention = bool(cfg["model"].get("use_symmetric_attention", False))
         use_gram_matrix = bool(cfg["model"].get("use_gram_matrix", False))
+        symmetry_dropout_prob = float(cfg["model"].get("symmetry_dropout_prob", 0.0))
+        use_null_token = bool(cfg["model"].get("use_null_token", False))
 
         joint_cfg = cfg.get("joint_symmetry", {}) or {}
         geometry_mode = str(joint_cfg.get("geometry_mode", cfg["model"].get("joint_geometry_mode", "half"))).lower()
@@ -328,6 +330,8 @@ def build_model(cfg):
             geometry_mode=geometry_mode,
             inactive_plane_norm_threshold=inactive_plane_norm_threshold,
             use_presence_logits=use_presence_logits,
+            symmetry_dropout_prob=symmetry_dropout_prob,
+            use_null_token=use_null_token,
         )
     elif name == "pointtransformer_true_joint_multiplane_dihedral_dit":
         from .pointtransformer_true_joint_multiplane_dihedral_dit import PointTransformerTrueJointMultiplaneDihedralDiT
@@ -367,6 +371,8 @@ def build_model(cfg):
         num_layers = int(cfg["model"].get("num_layers", 2))
         use_sparse_attention = bool(cfg["model"].get("use_sparse_attention", False))
         use_gram_matrix = bool(cfg["model"].get("use_gram_matrix", False))
+        symmetry_dropout_prob = float(cfg["model"].get("symmetry_dropout_prob", 0.0))
+        use_null_token = bool(cfg["model"].get("use_null_token", False))
 
         joint_cfg = cfg.get("joint_symmetry", {}) or {}
         geometry_mode = str(joint_cfg.get("geometry_mode", cfg["model"].get("joint_geometry_mode", "half"))).lower()
@@ -388,5 +394,7 @@ def build_model(cfg):
             use_presence_logits=use_presence_logits,
             soft_cut_margin=soft_cut_margin,
             use_orthant_embedding=use_orthant_embedding,
+            symmetry_dropout_prob=symmetry_dropout_prob,
+            use_null_token=use_null_token,
         )
     raise ValueError(f"Unknown model: {name}")

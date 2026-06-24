@@ -17,6 +17,8 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
         inactive_plane_norm_threshold: float = 1e-5,
         use_presence_logits: bool = False,
         use_gram_matrix: bool = False,
+        symmetry_dropout_prob: float = 0.0,
+        use_null_token: bool = False,
     ):
         super().__init__()
         self.use_fourier_features = use_fourier_features
@@ -26,7 +28,13 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
         self.inactive_plane_norm_threshold = float(inactive_plane_norm_threshold)
         self.use_presence_logits = bool(use_presence_logits)
         self.use_gram_matrix = bool(use_gram_matrix)
+        self.symmetry_dropout_prob = float(symmetry_dropout_prob)
+        self.use_null_token = bool(use_null_token)
         
+        if self.use_null_token:
+            self.null_normal = nn.Parameter(torch.zeros(3))
+            self.null_offset = nn.Parameter(torch.zeros(1))
+            
         self.time_embed = SinusoidalTimeEmbed(time_dim)
 
         # 3 absolute coordinates + num_planes relative distances
@@ -89,8 +97,20 @@ class PointTransformerTrueJointMultiplaneRelativeDiT(nn.Module):
             normals = plane_t_view[..., :3]
             offsets = plane_t_view[..., 3]
         active = torch.norm(normals, dim=-1, keepdim=True) > self.inactive_plane_norm_threshold
-        normals = torch.where(active, normals, torch.zeros_like(normals))
-        offsets = torch.where(active.squeeze(-1), offsets, torch.zeros_like(offsets))
+
+        if self.training and self.symmetry_dropout_prob > 0.0:
+            keep_mask = torch.rand(B, 1, 1, device=active.device) > self.symmetry_dropout_prob
+            active = active & keep_mask
+
+        if getattr(self, "use_null_token", False):
+            null_n = self.null_normal.view(1, 1, 3).expand_as(normals)
+            null_o = self.null_offset.view(1, 1).expand_as(offsets)
+            normals = torch.where(active, normals, null_n)
+            offsets = torch.where(active.squeeze(-1), offsets, null_o)
+        else:
+            normals = torch.where(active, normals, torch.zeros_like(normals))
+            offsets = torch.where(active.squeeze(-1), offsets, torch.zeros_like(offsets))
+            
         plane_normals = normals.reshape(B, -1) # (B, num_planes * 3)
             
         # Calcular distancias ortogonales de cada punto a cada plano
