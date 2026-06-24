@@ -3,17 +3,17 @@ import os
 # ==============================================================================
 # Global Configuration for External Servers
 # ==============================================================================
-# Puedes editar este archivo directamente en tu servidor externo para cambiar
-# las rutas globales sin tener que modificar cada archivo YAML uno por uno.
+# You can edit this file directly on your external server to change
+# the global paths without having to modify each YAML file one by one.
 #
-# Si usas variables de entorno (ej. export DATA_ROOT_DIR=/ruta/a/data),
-# tomarán prioridad automáticamente.
+# If you use environment variables (e.g. export DATA_ROOT_DIR=/path/to/data),
+# they will automatically take priority.
 
-# Ruta base donde se encuentra el dataset (ej. ShapeNetCore)
+# Base path where the dataset is located (e.g. ShapeNetCore)
 DATA_ROOT_DIR = os.getenv("DATA_ROOT_DIR", "data/ShapeNetCore")
 
-# Ruta base donde se guardan los cachés de simetría (.pt)
+# Base path where symmetry caches (.pt) are saved
 CACHE_ROOT_DIR = os.getenv("CACHE_ROOT_DIR", "data/symmetry_cache")
 
-# Ruta base donde se guardarán los resultados, logs y checkpoints
+# Base path where results, logs, and checkpoints will be saved
 OUT_ROOT_DIR = os.getenv("OUT_ROOT_DIR", "runs")

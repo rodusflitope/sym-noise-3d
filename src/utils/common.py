@@ -9,7 +9,7 @@ def load_cfg(path: str):
         
     try:
         import sys
-        # Añadir la raíz del proyecto para importar config.py si existe
+        # Add project root to import config.py if it exists
         project_root = str(pathlib.Path(__file__).resolve().parents[2])
         if project_root not in sys.path:
             sys.path.insert(0, project_root)

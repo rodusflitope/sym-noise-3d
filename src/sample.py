@@ -130,15 +130,15 @@ def parse_args():
     p = ap.ArgumentParser(description="Baseline Diffusion - Sample")
     p.add_argument("--cfg", type=str, default="cfgs/default.yaml")
     p.add_argument("--ckpt", type=str, default=None,
-                   help="Ruta al checkpoint .pt (si no, usa runs/<YYYY-MM-DD>/<exp_name>/last.pt)")
+                   help="Path to .pt checkpoint (if none, uses runs/<YYYY-MM-DD>/<exp_name>/last.pt)")
     p.add_argument("--ae_ckpt", type=str, default=None,
-                   help="Checkpoint del autoencoder para modo latente (opcional: usa AE_CHECKPOINT si no se pasa)")
+                   help="Autoencoder checkpoint for latent mode (optional: uses AE_CHECKPOINT if not passed)")
     p.add_argument("--symmetry_class", type=int, default=None)
-    p.add_argument("--test_disentanglement", action="store_true", help="Probar disentanglement con un plano fijo.")
-    p.add_argument("--condition_canonical", action="store_true", help="Condicionar la generación con los planos canónicos para ahorrar memoria (evalúa Sparse/Dihedral).")
-    p.add_argument("--return_fundamental_only", action="store_true", help="Retornar solo el dominio fundamental (sin reflejar).")
-    p.add_argument("--num_samples", type=int, default=None, help="Sobrescribe la cantidad de samples a generar.")
-    p.add_argument("--target_planes", type=str, default=None, help="Lista JSON de planos fijos, ej: '[[1,0,0,0], [0,1,0,0]]'. Si se provee, la red asume estos planos como correctos y no gasta cómputo prediciéndolos en cada paso.")
+    p.add_argument("--test_disentanglement", action="store_true", help="Test disentanglement with a fixed plane.")
+    p.add_argument("--condition_canonical", action="store_true", help="Condition generation with canonical planes to save memory (evaluates Sparse/Dihedral).")
+    p.add_argument("--return_fundamental_only", action="store_true", help="Return only the fundamental domain (unreflected).")
+    p.add_argument("--num_samples", type=int, default=None, help="Overrides the number of samples to generate.")
+    p.add_argument("--target_planes", type=str, default=None, help="JSON list of fixed planes, e.g.: '[[1,0,0,0], [0,1,0,0]]'. If provided, the network assumes these planes as correct and does not spend computation predicting them at each step.")
     return p.parse_args()
 
 
@@ -316,12 +316,12 @@ def sample_checkpoint(args, temp_cfg, ckpt):
         elif isinstance(model, (PVCNNTrueJoint, PointTransformerTrueJointDiT, PointTransformerTrueJointMultiplaneDiT, PointTransformerTrueJointMultiplaneRelativeDiT, PointTransformerTrueJointMultiplaneDihedralDiT, PointTransformerTrueJointMultiplaneSparseDiT)) and not use_latent:
             true_joint_sampler = TrueJointSymmetricDDPM_Sampler(sampler)
             if args.return_fundamental_only:
-                print("[sample] FORZANDO SOLO DOMINIO FUNDAMENTAL (sin reflejar).")
+                print("[sample] FORCING FUNDAMENTAL DOMAIN ONLY (unreflected).")
                 true_joint_sampler.return_fundamental_only = True
                 
             if args.target_planes is not None:
                 import json
-                print(f"[sample] TARGET PLANES: Inferencia optimizada. Usando planos fijos: {args.target_planes}")
+                print(f"[sample] TARGET PLANES: Optimized inference. Using fixed planes: {args.target_planes}")
                 if not args.target_planes.strip():
                     planes_list = []
                 else:
@@ -354,7 +354,7 @@ def sample_checkpoint(args, temp_cfg, ckpt):
                     alpha_bars=alpha_bars,
                 )
             elif args.condition_canonical:
-                print("[sample] CONDITIONAL INFERENCE: Condicionando usando todos los planos canónicos.")
+                print("[sample] CONDITIONAL INFERENCE: Conditioning using all canonical planes.")
                 num_planes = getattr(model, "num_planes", 1)
                 from src.utils.symmetry_planes import CANONICAL_SYMMETRY_PLANES
                 canon_planes = CANONICAL_SYMMETRY_PLANES.to(device=device, dtype=torch.float32)
@@ -374,7 +374,7 @@ def sample_checkpoint(args, temp_cfg, ckpt):
                     alpha_bars=alpha_bars,
                 )
             elif args.test_disentanglement:
-                print("[sample] TEST DISENTANGLEMENT: Forzando planos canónicos fijos.")
+                print("[sample] TEST DISENTANGLEMENT: Forcing fixed canonical planes.")
                 num_planes = getattr(model, "num_planes", 1)
                 sampler_cfg = cfg.get("sampler", {}) or {}
                 disentangle_plane_index = int(sampler_cfg.get("disentangle_plane_index", 0))
@@ -441,7 +441,7 @@ def sample_checkpoint(args, temp_cfg, ckpt):
         else:
             ae_ckpt = args.ae_ckpt or os.getenv("AE_CHECKPOINT", None)
             if not ae_ckpt:
-                raise ValueError("Para muestrear en modo latente, especifica --ae_ckpt o variable AE_CHECKPOINT.")
+                raise ValueError("To sample in latent mode, specify --ae_ckpt or AE_CHECKPOINT environment variable.")
 
             ae = _load_autoencoder(cfg, device, ae_ckpt)
 
@@ -499,7 +499,7 @@ def sample_checkpoint(args, temp_cfg, ckpt):
                         t_prev = timesteps[i+1] if i+1 < len(timesteps) else -1
                         z_t = sampler.step(z_model, z_t, t, t_prev)
                 else:
-                    raise ValueError(f"Sampler no soportado para modo latente: {sampler_name}")
+                    raise ValueError(f"Sampler not supported for latent mode: {sampler_name}")
 
                 z0 = z_t
                 h_model = _HCondWrapper(model, z0)
@@ -516,7 +516,7 @@ def sample_checkpoint(args, temp_cfg, ckpt):
                         t_prev = timesteps[i+1] if i+1 < len(timesteps) else -1
                         h_t = sampler.step(h_model, h_t, t, t_prev)
                 else:
-                    raise ValueError(f"Sampler no soportado para modo latente: {sampler_name}")
+                    raise ValueError(f"Sampler not supported for latent mode: {sampler_name}")
 
                 pcs = ae.decode_split(z0, h_t)
             else:
@@ -537,7 +537,7 @@ def sample_checkpoint(args, temp_cfg, ckpt):
                         t_prev = timesteps[i+1] if i+1 < len(timesteps) else -1
                         z_t = sampler.step(model, z_t, t, t_prev)
                 else:
-                    raise ValueError(f"Sampler no soportado para modo latente: {sampler_name}")
+                    raise ValueError(f"Sampler not supported for latent mode: {sampler_name}")
 
                 pcs = ae.decode(z_t)
 

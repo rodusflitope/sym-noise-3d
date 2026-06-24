@@ -7,27 +7,27 @@ class NoiseType(ABC):
     @abstractmethod
     def sample(self, shape, device):
         """
-        Genera ruido con la forma especificada.
+        Generates noise with the specified shape.
         
         Args:
-            shape: Forma del tensor de ruido
-            device: Dispositivo de torch
+            shape: Shape of the noise tensor
+            device: Torch device
             
         Returns:
-            Tensor de ruido
+            Noise tensor
         """
         pass
     
     @abstractmethod
     def normalize(self, noise):
         """
-        Normaliza el ruido si es necesario (para mantener propiedades estadísticas).
+        Normalize noise if necessary (to maintain statistical properties).
         
         Args:
-            noise: Tensor de ruido
+            noise: Noise tensor
             
         Returns:
-            Tensor de ruido normalizado
+            Normalized noise tensor
         """
         pass
 

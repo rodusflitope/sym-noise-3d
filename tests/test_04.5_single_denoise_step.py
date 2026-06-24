@@ -38,7 +38,7 @@ def main():
     print("alpha_bar[-1] =", alpha_bars[-1].item())
     
     x_t = torch.randn(1, 2048, 3, device=device)
-    print("\nInicial x_t: mean={:.4f} std={:.4f} max={:.4f}".format(
+    print("\nInitial x_t: mean={:.4f} std={:.4f} max={:.4f}".format(
         x_t.mean().item(), x_t.std().item(), x_t.abs().max().item()))
     
     sampler = build_sampler(cfg, betas, alphas, alpha_bars, noise_type=noise_type)
@@ -47,7 +47,7 @@ def main():
     with torch.no_grad():
         x_t_minus_1 = sampler.step(model, x_t, t_test)
     
-    print("\nDespues de 1 paso (t={} -> t={}):".format(t_test, t_test-1))
+    print("\nAfter 1 step (t={} -> t={}):".format(t_test, t_test-1))
     print("x_t_minus_1: mean={:.4f} std={:.4f} max={:.4f}".format(
         x_t_minus_1.mean().item(), x_t_minus_1.std().item(), x_t_minus_1.abs().max().item()))
     
@@ -56,7 +56,7 @@ def main():
         with torch.no_grad():
             x_t_minus_1 = sampler.step(model, x_t_minus_1, t_test)
     
-    print("\nDespues de 10 pasos más (t={}):".format(t_test))
+    print("\nAfter 10 more steps (t={}):".format(t_test))
     print("x: mean={:.4f} std={:.4f} max={:.4f}".format(
         x_t_minus_1.mean().item(), x_t_minus_1.std().item(), x_t_minus_1.abs().max().item()))
 

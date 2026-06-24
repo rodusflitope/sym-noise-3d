@@ -93,13 +93,13 @@ class PointTransformerTrueJointMultiplaneDihedralDiT(nn.Module):
         offsets = torch.where(active.squeeze(-1), offsets, torch.zeros_like(offsets))
         plane_normals = normals.reshape(B, -1) # (B, num_planes * 3)
             
-        # Calcular distancias ortogonales de cada punto a cada plano
+        # Calculate orthogonal distances from each point to each plane
         # x_t: (B, N, 3) -> (B, N, 1, 3)
         # normals: (B, num_planes, 3) -> (B, 1, num_planes, 3)
         dot_products = (x_t.unsqueeze(2) * normals.unsqueeze(1)).sum(dim=-1) # (B, N, num_planes)
         distances = dot_products - offsets.unsqueeze(1) # (B, N, num_planes)
         
-        # Concatenar absolutas y relativas
+        # Concatenate absolute and relative
         feats_input = torch.cat([x_t, distances], dim=-1) # (B, N, 3 + num_planes)
         feats = self.point_embed(feats_input)
 

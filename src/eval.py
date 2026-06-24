@@ -201,8 +201,8 @@ def evaluate(
         cfg = load_cfg(cfg_path)
     if cfg is None:
         raise ValueError(
-            "[eval] No se pudo resolver la configuración. "
-            "Pasa --cfg explícito o usa un checkpoint que tenga metadata/config o training_history.json en su carpeta."
+            "[eval] Could not resolve configuration. "
+            "Pass explicit --cfg or use a checkpoint that has metadata/config or training_history.json in its directory."
         )
 
     used_seed = seed if seed is not None else cfg.get("seed")
@@ -285,10 +285,10 @@ def evaluate(
         n_eval = min(int(num_samples), len(ds))
 
     if len(ds) == 0:
-        raise ValueError("[eval] Dataset vacío. Revisa data.root_dir y data.categories.")
+        raise ValueError("[eval] Empty dataset. Check data.root_dir and data.categories.")
 
     if n_eval <= 0:
-        raise ValueError("[eval] num_samples inválido o no hay datos para evaluar.")
+        raise ValueError("[eval] Invalid num_samples or no data to evaluate.")
 
     batch_size_eval = int(cfg.get("eval", {}).get("batch_size", cfg.get("train", {}).get("batch_size", 16)))
 
@@ -350,7 +350,7 @@ def evaluate(
                 else:
                     ae_ckpt_resolved = ae_ckpt or os.getenv("AE_CHECKPOINT", None)
                     if not ae_ckpt_resolved:
-                        raise ValueError("Eval en modo latente requiere --ae_ckpt o AE_CHECKPOINT en entorno.")
+                        raise ValueError("Eval in latent mode requires --ae_ckpt or AE_CHECKPOINT in environment.")
     
                     ae_cfg = cfg.get("autoencoder", {})
                     ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
@@ -396,7 +396,7 @@ def evaluate(
                     if is_lion_two_priors:
                         ae_ok_types = (LionAutoencoder,)
                         if not isinstance(ae, ae_ok_types):
-                            raise ValueError("lion_priors requiere un autoencoder compatible con LionTwoPriorsDDM")
+                            raise ValueError("lion_priors requires an autoencoder compatible with LionTwoPriorsDDM")
     
                     if not is_lion_two_priors:
                         if hasattr(ae, "latent_dim_total"):
@@ -451,7 +451,7 @@ def evaluate(
                                 t_prev = timesteps[j + 1] if j + 1 < len(timesteps) else -1
                                 z_t = _sampler_step(sampler, z_model, z_t, t, t_prev)
                         else:
-                            raise ValueError(f"Sampler no soportado: {sampler_name}")
+                            raise ValueError(f"Sampler not supported: {sampler_name}")
     
                         z0 = z_t
                         h_model = _HCondWrapper(model, z0)
@@ -468,7 +468,7 @@ def evaluate(
                                 t_prev = timesteps[j + 1] if j + 1 < len(timesteps) else -1
                                 h_t = _sampler_step(sampler, h_model, h_t, t, t_prev)
                         else:
-                            raise ValueError(f"Sampler no soportado: {sampler_name}")
+                            raise ValueError(f"Sampler not supported: {sampler_name}")
     
                         curr_samples = ae.decode_split(z0, h_t).detach()
                     else:
@@ -489,7 +489,7 @@ def evaluate(
                                 t_prev = timesteps[j + 1] if j + 1 < len(timesteps) else -1
                                 z_t = _sampler_step(sampler, model, z_t, t, t_prev)
                         else:
-                            raise ValueError(f"Sampler no soportado: {sampler_name}")
+                            raise ValueError(f"Sampler not supported: {sampler_name}")
     
                         curr_samples = ae.decode(z_t).detach()
                 
@@ -511,7 +511,7 @@ def evaluate(
 
     n_eval = min(int(n_eval), int(samples.shape[0]))
     if n_eval <= 0:
-        raise ValueError("[eval] num_samples inválido o no hay datos para evaluar.")
+        raise ValueError("[eval] Invalid num_samples or no data to evaluate.")
 
     # Use DataLoader for parallel GT loading (much faster than sequential ds[i])
     from torch.utils.data import DataLoader
@@ -687,7 +687,7 @@ def parse_args() -> ap.Namespace:
     parser.add_argument("--max_points", type=int, default=None,
                         help="Maximum number of points to use when computing EMD. If provided, point clouds will be subsampled to this number of points to speed up evaluation.")
     parser.add_argument("--ae_ckpt", type=str, default=None,
-                        help="Checkpoint del autoencoder (requerido si use_latent_diffusion=true)")
+                        help="Autoencoder checkpoint (required if use_latent_diffusion=true)")
     parser.add_argument("--compute_emd", action="store_true", help="Compute EMD and pairwise EMD for advanced metrics (1-NN/COV/MMD). Very slow.")
     parser.add_argument("--eval_all", action="store_true", help="Evaluate on the full test split from splits.json")
     return parser.parse_args()

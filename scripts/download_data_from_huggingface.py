@@ -5,8 +5,8 @@ HF_REPO = "ShapeNet/ShapeNetCore"
 DEST = "data/ShapeNetCore"
 
 def download_synset(syn, dest):
-    """Descarga y extrae un synset específico."""
-    print(f"➡️ Descargando {syn}...")
+    """Downloads and extracts a specific synset."""
+    print(f"➡️ Downloading {syn}...")
     try:
         zip_path = hf_hub_download(
             repo_id=HF_REPO,
@@ -18,35 +18,35 @@ def download_synset(syn, dest):
         os.makedirs(out_dir, exist_ok=True)
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(out_dir)
-        print(f"✅ {syn} listo en {out_dir}")
+        print(f"✅ {syn} ready in {out_dir}")
     except Exception as e:
-        print(f"❌ Error al descargar {syn}: {e}")
+        print(f"❌ Error downloading {syn}: {e}")
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Descargar ShapeNetCore desde Hugging Face"
+        description="Download ShapeNetCore from Hugging Face"
     )
     parser.add_argument(
         "--categories",
         type=str,
         default="all",
-        help="Lista de categorías (separadas por coma) o 'all' para todo el dataset"
+        help="List of categories (comma-separated) or 'all' for the entire dataset"
     )
     parser.add_argument(
         "--dest",
         type=str,
         default=DEST,
-        help="Carpeta destino (default: data/)"
+        help="Destination folder (default: data/)"
     )
     args = parser.parse_args()
 
     os.makedirs(args.dest, exist_ok=True)
 
-    # Obtener lista de todos los zips disponibles en el repo
+    # Get list of all available zips in the repo
     files = list_repo_files(HF_REPO, repo_type="dataset")
     all_synsets = [f for f in files if f.endswith(".zip")]
 
-    # Filtrar según parámetro
+    # Filter according to parameter
     if args.categories == "all":
         synsets = all_synsets
     else:

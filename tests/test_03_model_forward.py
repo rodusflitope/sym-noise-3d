@@ -71,7 +71,7 @@ def main():
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--ckpt", type=str, default=None)
     p.add_argument("--ae_ckpt", type=str, default=None,
-                   help="Checkpoint del autoencoder (requerido si use_latent_diffusion=true)")
+                   help="Autoencoder checkpoint (required if use_latent_diffusion=true)")
     args = p.parse_args()
 
     ckpt = args.ckpt
@@ -113,7 +113,7 @@ def main():
     if use_latent:
         ae_ckpt = args.ae_ckpt or os.getenv("AE_CHECKPOINT", None)
         if not ae_ckpt:
-            raise ValueError("Para test en modo latente, especifica --ae_ckpt o variable AE_CHECKPOINT.")
+            raise ValueError("For testing in latent mode, specify --ae_ckpt or AE_CHECKPOINT environment variable.")
 
         ds = ShapeNetDataset(
             root_dir=cfg["data"]["root_dir"],

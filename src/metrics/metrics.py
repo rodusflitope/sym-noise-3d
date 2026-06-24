@@ -79,7 +79,7 @@ def earth_movers_distance(
 
         return loss_fn(x, y)
 
-    print("[WARN] GeomLoss no detectado. Usando scipy (lento).")
+    print("[WARN] GeomLoss not detected. Using scipy (slow).")
     emd_vals = []
     x_np = x.detach().cpu().numpy()
     y_np = y.detach().cpu().numpy()

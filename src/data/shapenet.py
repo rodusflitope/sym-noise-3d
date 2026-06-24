@@ -22,7 +22,7 @@ from typing import List, Iterator, Dict
 import random
 
 def resample_points(points: torch.Tensor, num_target: int) -> torch.Tensor:
-    """Remuestrea la nube para tener exactamente num_target puntos"""
+    """Resamples the cloud to have exactly num_target points"""
     num_current = points.shape[0]
     if num_current == 0:
         return torch.zeros((num_target, 3), dtype=points.dtype, device=points.device)
@@ -172,10 +172,10 @@ class ShapeNetDataset(Dataset):
 
         if len(self.obj_paths) == 0:
             raise ValueError(
-                f"[ShapeNetDataset] 0 modelos cargados en {self.root_dir}. "
-                "Revisa la estructura de ShapeNetCore y categories."
+                f"[ShapeNetDataset] 0 models loaded in {self.root_dir}. "
+                "Check ShapeNetCore structure and categories."
             )
-        print(f"[ShapeNetDataset] {len(self.obj_paths)} modelos cargados")
+        print(f"[ShapeNetDataset] {len(self.obj_paths)} models loaded")
 
         self.use_symmetry_classes = use_symmetry_classes
         self.symmetry_plane_score_threshold = symmetry_plane_score_threshold
@@ -191,7 +191,7 @@ class ShapeNetDataset(Dataset):
                     entry = self.symmetry_plane_cache.get("planes", {}).get(cache_key)
                     self.classes.append(self._derive_class(entry))
             else:
-                print("[ShapeNetDataset] use_symmetry_classes=True pero no hay cache; usando clase 0 para todo.")
+                print("[ShapeNetDataset] use_symmetry_classes=True but there is no cache; using class 0 for all.")
                 self.classes = [0] * len(self.obj_paths)
         else:
             self.classes = None

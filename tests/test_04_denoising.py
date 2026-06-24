@@ -120,7 +120,7 @@ def main():
     p.add_argument("--cfg", type=str, default=str(root / "cfgs" / "pointnet.yaml"))
     p.add_argument("--ckpt", type=str, required=True)
     p.add_argument("--ae_ckpt", type=str, default=None,
-                   help="Checkpoint del autoencoder (requerido si use_latent_diffusion=true)")
+                   help="Autoencoder checkpoint (required if use_latent_diffusion=true)")
     args = p.parse_args()
 
     ckpt = args.ckpt
@@ -166,7 +166,7 @@ def main():
         else:
             ae_ckpt = args.ae_ckpt or os.getenv("AE_CHECKPOINT", None)
             if not ae_ckpt:
-                raise ValueError("Para test en modo latente, especifica --ae_ckpt o variable AE_CHECKPOINT.")
+                raise ValueError("For testing in latent mode, specify --ae_ckpt or AE_CHECKPOINT environment variable.")
 
             ae = _load_autoencoder(cfg, device, ae_ckpt)
             if hasattr(ae, "latent_dim_total"):
@@ -196,7 +196,7 @@ def main():
                     t_prev = timesteps[i+1] if i+1 < len(timesteps) else -1
                     z_t = sampler.step(model, z_t, t, t_prev)
             else:
-                raise ValueError(f"Sampler no soportado para modo latente: {sampler_name}")
+                raise ValueError(f"Sampler not supported for latent mode: {sampler_name}")
 
             pcs = ae.decode(z_t)
 

@@ -751,7 +751,7 @@ def main() -> None:
             f"[train] EMA enabled: decay={decay} warmup_steps={warmup_steps} warmup_init={warmup_init}"
         )
 
-    print("\nIniciando entrenamiento...")
+    print("\nStarting training...")
     train_start_time = time.time()
 
     amp_cfg = cfg.get("train", {})
@@ -1520,7 +1520,7 @@ def main() -> None:
                 metadata=ckpt_metadata,
                 ema_state=ema_state,
             )
-            print(f"Mejor modelo guardado en: {ckpt_path} (loss={best_loss:.6f})")
+            print(f"Best model saved at: {ckpt_path} (loss={best_loss:.6f})")
 
         save_training_history(run_root, run_name, training_history)
 

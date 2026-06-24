@@ -160,7 +160,7 @@ class TrueJointSymmetricDDPM_Sampler:
                 
             for b in range(num_samples):
                 pts_list = [x0[b]]
-                p_batch = plane_iter[b].clone() # Clocamos para no mutar el tensor original in-place
+                p_batch = plane_iter[b].clone() # Clone to not mutate the original tensor in-place
                 
                 unique_planes = []
                 for p_idx in range(p_batch.shape[0]):
