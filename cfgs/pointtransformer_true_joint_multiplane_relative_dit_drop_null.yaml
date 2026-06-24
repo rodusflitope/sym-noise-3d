@@ -5,7 +5,6 @@ device: "auto"
 data:
   root_dir: "data/ShapeNetCore"
   categories: ["table"]
-  max_models: 2000
   augment: false
   val_frac: 0.1
   test_frac: 0.1
@@ -38,7 +37,7 @@ model:
   use_symmetric_attention: false
   symmetry_dropout_prob: 0.15
   use_null_token: true
-  
+
 joint_symmetry:
   geometry_mode: "full"
   plane_mode: "diffusion"
