@@ -322,12 +322,19 @@ def sample_checkpoint(args, temp_cfg, ckpt):
             if args.target_planes is not None:
                 import json
                 print(f"[sample] TARGET PLANES: Inferencia optimizada. Usando planos fijos: {args.target_planes}")
-                planes_list = json.loads(args.target_planes)
-                target_planes_tensor = torch.tensor(planes_list, device=device, dtype=torch.float32)
-                num_planes = getattr(model, "num_planes", 1)
+                if not args.target_planes.strip():
+                    planes_list = []
+                else:
+                    planes_list = json.loads(args.target_planes)
+                    
+                if len(planes_list) == 0:
+                    target_planes_tensor = torch.zeros((0, 4), device=device, dtype=torch.float32)
+                else:
+                    target_planes_tensor = torch.tensor(planes_list, device=device, dtype=torch.float32)
+                    if target_planes_tensor.dim() == 1:
+                        target_planes_tensor = target_planes_tensor.unsqueeze(0)
                 
-                if target_planes_tensor.dim() == 1:
-                    target_planes_tensor = target_planes_tensor.unsqueeze(0)
+                num_planes = getattr(model, "num_planes", 1)
                 
                 # Pad with zeros if fewer planes than required
                 if target_planes_tensor.shape[0] < num_planes:
