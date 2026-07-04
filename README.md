@@ -1,161 +1,274 @@
-# sym-noise-3d
+# Symmetry-Aware Diffusion Models for 3D Point Clouds
 
-Diffusion models for 3D point clouds with symmetry-aware noise schedules.
+> **Thesis** — *Incorporación de Simetría Geométrica en Modelos de Difusión para Nubes de Puntos 3D*
+>
+> Department of Electrical Engineering, Universidad de Chile, 2026.
 
-This repo supports two main training workflows:
-- **Point-space diffusion**: train a diffusion model directly on 3D point clouds.
-- **Latent-space diffusion**: first train a point-cloud autoencoder, then train diffusion in the latent space.
+This repository implements and evaluates methods for integrating geometric symmetry as an inductive bias in diffusion models for 3D point cloud generation, covering both **physical-space** and **latent-space** approaches.
 
-Below are concise instructions to run each stage end-to-end.
+---
 
-## Naming note (conditional vs joint)
+## Overview
 
-The current conditional symmetry method appears as `joint` in some internal code names by naming mistake.
+Standard diffusion models treat each point coordinate independently, forcing the network to learn global structural properties — such as reflection symmetry — purely from data. This work introduces explicit symmetry priors into the diffusion process through two complementary strategies:
 
-Use the following meaning in experiments and reporting:
-- `joint` in legacy/internal symbols means the current conditional pipeline.
-- `joint_true` means a true joint formulation.
+### Physical Space: Joint Diffusion (DiT)
 
-## 1. Setup (Unified Installation)
+A **co-diffusion** scheme that jointly estimates the point cloud's fundamental domain and its symmetry planes. The model processes only half (or a fraction) of the shape and reconstructs the full object via reflection operators, reducing Transformer self-attention cost by up to **4×** for a single symmetry plane.
 
-It is highly recommended to use a single, unified Conda environment for the entire repository, including the `sym-lion` submodule. This avoids dependency conflicts and lets you run both standard models and LION baselines from the same terminal.
+| Variant | Planes | Description |
+|---------|--------|-------------|
+| **Joint (Static X)** | 1 fixed | Single canonical plane `[1,0,0]` — control experiment |
+| **Orthogonal** | 3 canonical | Planes aligned to principal axes (`X`, `Y`, `Z`) |
+| **Dihedral** | 6 canonical | Three primary + three diagonal planes |
+| **Sparse** | 3 or 6 optimized | Per-object planes discovered via Chamfer minimization |
 
-1. Create and activate the Conda environment (this includes PyTorch 2.5, CUDA 12.1, and all pip requirements):
+Additionally, three **baseline** strategies are compared:
+- **Vanilla DiT** — standard diffusion without symmetry
+- **Symmetry Noise** — symmetric noise injection (masked, reflected, averaged)
+- **Loss Symmetry** — Chamfer-based symmetry penalty on the predicted clean shape
 
-```pwsh
+### Latent Space: LION + Soft Symmetry
+
+Soft symmetry constraints injected into the VAE of the [LION](https://github.com/nv-tlabs/LION) framework:
+- **Reconstruction symmetry loss** — penalizes asymmetry in decoded point clouds
+- **Latent symmetry loss** — enforces equivariance in the latent code
+
+---
+
+## Repository Structure
+
+```
+sym-noise-3d/
+├── cfgs/                        # YAML experiment configurations
+│   ├── final_experiments/       #   ↳ Final thesis experiments (8 models)
+│   └── ...                      #   ↳ Development / ablation configs
+├── src/
+│   ├── train.py                 # Main training entry point
+│   ├── sample.py                # Point cloud generation
+│   ├── eval.py                  # Metric computation (CD, EMD, MMD, COV, 1-NNA)
+│   ├── post_train.py            # Post-training fine-tuning
+│   ├── train_autoencoder.py     # Autoencoder training (latent pipeline)
+│   ├── models/                  # Network architectures
+│   │   ├── pointtransformer_dit.py                         # Vanilla DiT
+│   │   ├── pointtransformer_true_joint_dit.py              # Single-plane Joint DiT
+│   │   ├── pointtransformer_true_joint_multiplane_dit.py   # Multi-plane Joint DiT
+│   │   ├── pointtransformer_true_joint_multiplane_relative_dit.py  # Relative DiT
+│   │   ├── pointtransformer_true_joint_multiplane_sparse_dit.py    # Sparse DiT
+│   │   └── ...
+│   ├── losses/                  # Loss functions (MSE, joint, consistency, etc.)
+│   ├── metrics/                 # CD, EMD, RSD evaluation metrics
+│   ├── samplers/                # DDPM / DDIM samplers
+│   ├── schedulers/              # Noise schedules (linear, cosine)
+│   └── utils/                   # Symmetry plane utilities, visualization
+├── scripts/
+│   ├── precompute_symmetry_planes.py   # Offline plane cache generation
+│   ├── download_data_from_huggingface.py
+│   └── ...
+├── sym-lion/                    # LION framework submodule (latent-space experiments)
+├── tests/                       # Pipeline sanity checks
+├── env.yaml                     # Conda environment specification
+└── requirements.txt             # Pip dependencies
+```
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Python 3.10
+- CUDA 12.1
+- Conda (recommended)
+
+### Setup
+
+```bash
+# 1. Clone with submodules
+git clone --recurse-submodules https://github.com/<user>/sym-noise-3d.git
+cd sym-noise-3d
+
+# 2. Create Conda environment (PyTorch 2.5 + CUDA 12.1)
 conda env create -f env.yaml
-conda activate sym-noise-env
-```
+conda activate sym-noise-3d
 
-2. Build the `sym-lion` submodule components (requires the environment to be active):
-
-```pwsh
+# 3. Build LION submodule components (for latent-space experiments)
 python sym-lion/build_pkg.py
-```
 
-3. Download ShapeNet data (if you haven’t already):
-
-```pwsh
+# 4. Download ShapeNet data
 python scripts/download_data_from_huggingface.py --categories 02691156,03001627
 ```
 
-By default configs assume ShapeNetCore is under `data/ShapeNetCore`.
+Data is expected under `data/ShapeNetCore/` by default.
 
-## 2. Autoencoder training (latent space setup)
+---
 
-The autoencoder compresses point clouds into latent vectors that the diffusion model will later operate on.
+## Usage
 
-- **Config**: `cfgs/latent_diffusion.yaml` (section `autoencoder` controls `latent_dim`, `hidden_dim`, `epochs`, etc.).
-- **Entry point**: `src/train_autoencoder.py`.
+### 1. Precompute Symmetry Plane Caches
 
-Run:
+Joint diffusion models require a precomputed cache of symmetry planes per object. Run once before training:
 
-```pwsh
-& .venv/Scripts/Activate.ps1
-python src/train_autoencoder.py --cfg cfgs/latent_diffusion.yaml
+```bash
+# Orthogonal cache (3 canonical planes)
+python scripts/precompute_symmetry_planes.py \
+    --cfg cfgs/final_experiments/pt_true_joint_relative_orthogonal.yaml \
+    --type orthogonal --canonical --high_precision
+
+# Dihedral cache (6 canonical planes)
+python scripts/precompute_symmetry_planes.py \
+    --cfg cfgs/final_experiments/pt_true_joint_relative_dihedral.yaml \
+    --type dihedral --k 6 --canonical --high_precision
+
+# Sparse cache (3 per-object optimized planes)
+python scripts/precompute_symmetry_planes.py \
+    --cfg cfgs/final_experiments/pt_true_joint_relative_sparse_3p.yaml \
+    --type per_object --n 3 --high_precision
+
+# Sparse cache (6 per-object optimized planes)
+python scripts/precompute_symmetry_planes.py \
+    --cfg cfgs/final_experiments/pt_true_joint_relative_sparse_6p.yaml \
+    --type per_object --n 6 --high_precision
 ```
 
-Outputs:
-- Checkpoints under `runs/YYYY-MM-DD/ae_<exp_name>_<run_id>/` (e.g. `best.pt`, `last.pt`, `epoch_XXX.pt`).
-  Each run gets a unique 8-char `<run_id>` suffix to avoid collisions.
-- `splits.json` with the train/val/test indices used.
+Optionally, inspect the cache to tune the symmetry score threshold:
 
-You will need the path to `best.pt` (or another AE checkpoint) for latent diffusion training.
-
-## 3. Diffusion training in latent space
-
-Once the AE is trained, enable latent diffusion and provide its checkpoint.
-
-- **Config**: `cfgs/latent_diffusion.yaml` with `use_latent_diffusion: true`.
-- **Entry point**: `src/train.py`.
-
-Recommended command (explicit AE checkpoint):
-
-```pwsh
-& .venv/Scripts/Activate.ps1
-python src/train.py --cfg cfgs/latent_diffusion.yaml --ae_ckpt runs/YYYY-MM-DD/ae_latent-diffusion_<run_id>/best.pt
+```bash
+python scripts/test_symmetry_classes.py \
+    data/symmetry_cache/symmetry_cache_table_dihedral_6p_canonical.pt \
+    --threshold 0.01 --num-planes 6
 ```
 
-Alternatively, set the environment variable `AE_CHECKPOINT` and omit `--ae_ckpt`:
+### 2. Training
 
-```pwsh
-$env:AE_CHECKPOINT = "C:/Dev/sym-noise-3d/runs/YYYY-MM-DD/ae_latent-diffusion_<run_id>/best.pt"
-python src/train.py --cfg cfgs/latent_diffusion.yaml
+**Run all final experiments sequentially** (each runs in an isolated subprocess to prevent OOM):
+
+```bash
+python src/train.py --cfg cfgs/final_experiments
 ```
 
-Outputs:
-- Diffusion checkpoints under `runs/YYYY-MM-DD/<exp_name>_<run_id>/`.
-- Training history JSON (losses per epoch, best epoch, etc.).
+**Or train individual models:**
 
-## 4. Diffusion training in point space (baseline)
+```bash
+# Vanilla DiT baseline
+python -m src.train --cfg cfgs/final_experiments/pointtransformer_dit_baseline.yaml
 
-To train directly on point clouds (no autoencoder):
+# DiT + Symmetry Noise
+python -m src.train --cfg cfgs/final_experiments/pointtransformer_dit_sym_noise.yaml
 
-- **Configs**: `cfgs/default.yaml`, `cfgs/pointnet.yaml`, `cfgs/pointtransformer.yaml`.
-- Ensure `use_latent_diffusion: false` in the chosen config.
+# DiT + Loss Symmetry
+python -m src.train --cfg cfgs/final_experiments/pointtransformer_dit_sym_loss.yaml
 
-Run, for example, a PointNet baseline:
+# Joint Diffusion — Single X Plane (control)
+python -m src.train --cfg cfgs/final_experiments/pt_true_joint_no_multiplane_x.yaml
 
-```pwsh
-& .venv/Scripts/Activate.ps1
-python src/train.py --cfg cfgs/pointnet.yaml
+# Joint Diffusion — 3 Orthogonal Planes
+python -m src.train --cfg cfgs/final_experiments/pt_true_joint_relative_orthogonal.yaml
+
+# Joint Diffusion — 6 Dihedral Planes
+python -m src.train --cfg cfgs/final_experiments/pt_true_joint_relative_dihedral.yaml
+
+# Joint Diffusion — 3 Sparse Planes
+python -m src.train --cfg cfgs/final_experiments/pt_true_joint_relative_sparse_3p.yaml
+
+# Joint Diffusion — 6 Sparse Planes
+python -m src.train --cfg cfgs/final_experiments/pt_true_joint_relative_sparse_6p.yaml
 ```
 
-## 5. Sampling from trained models
+Checkpoints are saved under `runs/<date>/<exp_name>_<run_id>/`.
 
-Use `src/sample.py` to generate point clouds from a trained diffusion model.
+### 3. Sampling
 
-Example (point-space or latent-space, depending on config):
-
-```pwsh
-& .venv/Scripts/Activate.ps1
-python src/sample.py --cfg cfgs/pointnet.yaml --ckpt runs/YYYY-MM-DD/pointnet-baseline_<run_id>/best.pt
+```bash
+python src/sample.py \
+    --cfg cfgs/final_experiments/pt_true_joint_relative_orthogonal.yaml \
+    --ckpt runs/<date>/<exp_name>_<run_id>/best.pt
 ```
 
-Samples are saved under `samples/YYYY-MM-DD/<run_name>/` (run name includes the `<run_id>` suffix).
+Samples are saved under `samples/<date>/<run_name>/` in `.npy` or `.ply` format.
 
-Key options (set in the YAML under `sampler`):
-- `name`: `ddpm` or `ddim`.
-- `eta`: 1.0 for stochastic DDPM, 0.0 for deterministic DDIM.
-- `num_samples`: number of generated shapes.
-- `save_dir`: output directory (e.g. `samples`).
-- `save_format`: `npy` or `ply`.
+### 4. Evaluation
 
-## 6. Evaluation
+Compute generative metrics against the held-out test set:
 
-Use `src/eval.py` to compute metrics like Chamfer Distance (and optionally EMD) on the test split.
-
-Point-space example:
-
-```pwsh
-& .venv/Scripts/Activate.ps1
-python src/eval.py --cfg cfgs/pointnet.yaml --ckpt runs/YYYY-MM-DD/pointnet-baseline_<run_id>/best.pt --metric cd
+```bash
+python -m src.eval --ckpt runs/<date>/<exp_name>_<run_id> --eval_all --compute_emd
 ```
 
-Latent diffusion example (requires both AE and diffusion checkpoints):
+| Flag | Description |
+|------|-------------|
+| `--eval_all` | Use the full test split (ignores `--num_samples`) |
+| `--compute_emd` | Enable EMD-based metrics: MMD, COV, 1-NNA |
 
-```pwsh
-& .venv/Scripts/Activate.ps1
-python src/eval.py --cfg cfgs/latent_diffusion.yaml --ckpt runs/YYYY-MM-DD/latent-diffusion_<run_id>/best.pt --metric cd --ae_ckpt runs/YYYY-MM-DD/ae_latent-diffusion_<run_id>/best.pt
+Metrics computed:
+- **Chamfer Distance (CD)** and **Earth Mover's Distance (EMD)** — fidelity
+- **Minimum Matching Distance (MMD)** — sample quality
+- **Coverage (COV)** — diversity
+- **1-Nearest Neighbor Accuracy (1-NNA)** — distributional faithfulness
+- **Reflective Symmetry Distance (RSD)** — geometric symmetry quality
+
+---
+
+## LION Latent-Space Experiments
+
+For the VAE + latent diffusion pipeline, see the `sym-lion/` submodule. The workflow involves:
+
+1. Train the LION VAE autoencoder with soft symmetry losses:
+   ```bash
+   python src/train_autoencoder.py --cfg cfgs/lion_autoencoder_soft_symmetry.yaml
+   ```
+
+2. Train latent diffusion conditioned on the frozen encoder:
+   ```bash
+   python src/train.py --cfg cfgs/lion_latent_diffusion_soft_symmetry.yaml \
+       --ae_ckpt runs/<date>/ae_<exp>_<id>/best.pt
+   ```
+
+---
+
+## Pipeline Tests
+
+Sanity-check each stage before launching long training runs:
+
+```bash
+python tests/test_01_data_loading.py --cfg cfgs/final_experiments/pointtransformer_dit_baseline.yaml
+python tests/test_02_noise_generation.py --cfg cfgs/final_experiments/pointtransformer_dit_baseline.yaml
+python tests/test_03_model_forward.py --cfg cfgs/final_experiments/pointtransformer_dit_baseline.yaml
+python tests/test_04_denoising.py --cfg cfgs/final_experiments/pointtransformer_dit_baseline.yaml
 ```
 
-Eval outputs are saved under `evals/YYYY-MM-DD/<run_name>/` (run name includes the `<run_id>` suffix).
+---
 
-## 7. Quick pipeline tests
+## Configuration
 
-There are small tests to sanity-check each stage before long runs:
+All experiments are controlled via YAML files in `cfgs/`. Key configuration groups:
 
-```pwsh
-& .venv/Scripts/Activate.ps1
-python tests/test_01_data_loading.py --cfg cfgs/pointnet.yaml
-python tests/test_02_noise_generation.py --cfg cfgs/pointnet.yaml
-python tests/test_03_model_forward.py --cfg cfgs/pointnet.yaml
-python tests/test_04_denoising.py --cfg cfgs/pointnet.yaml
+| Section | Key Parameters |
+|---------|---------------|
+| `model` | `name`, `hidden_dim`, `num_heads`, `num_layers`, `num_planes` |
+| `diffusion` | `T` (1000), `beta_start` (1e-4), `beta_end` (0.02), `schedule` (linear) |
+| `loss` | `lambda_diff` (1.0), `lambda_plane` (1.0), `weighting` |
+| `train` | `batch_size`, `epochs`, `num_points` (2048), `amp` (true) |
+| `data` | `categories`, `soft_cut`, `soft_cut_margin`, `symmetry_plane_cache_path` |
+| `joint_symmetry` | `geometry_mode`, `plane_mode`, `inactive_plane_norm_threshold` |
 
-# Autoencoder reconstruction test (needs trained AE)
-python tests/test_05_autoencoder_reconstruction.py --cfg cfgs/latent_diffusion.yaml --ckpt runs/YYYY-MM-DD/ae_latent-diffusion_<run_id>/best.pt
+See [`cfgs/example_config.yaml`](cfgs/example_config.yaml) for a fully documented reference.
+
+---
+
+## Citation
+
+```bibtex
+@thesis{sym-noise-3d-2026,
+    title   = {Incorporación de Simetría Geométrica en Modelos de Difusión
+               para Nubes de Puntos 3D},
+    author  = {Rafael Tapia},
+    school  = {Universidad de Chile, Departamento de Ingeniería Eléctrica},
+    year    = {2026},
+    type    = {Memoria de Título}
+}
 ```
 
-These tests write visualizations to `tests/outputs/` for manual inspection.
+## License
 
-For more detailed architecture and config documentation, see `.github/copilot-instructions.md`.
+This code was developed as part of a thesis project. Please contact the author for usage permissions.
