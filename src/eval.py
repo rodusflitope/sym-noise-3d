@@ -295,7 +295,7 @@ def evaluate(
     # ── Sample caching ──────────────────────────────────────────────────
     cache_path = _samples_cache_path(ckpt_path, n_eval, used_seed, eval_all)
     if cache_path.exists():
-        print(f"[eval] ✓ Loading cached samples from {cache_path}")
+        print(f"[eval] Loading cached samples from {cache_path}")
         samples = torch.load(cache_path, map_location="cpu", weights_only=True)
         print(f"[eval]   shape={tuple(samples.shape)}, dtype={samples.dtype}")
     else:
@@ -498,7 +498,7 @@ def evaluate(
 
         # Save samples to cache
         torch.save(samples, cache_path)
-        print(f"[eval] ✓ Cached {samples.shape[0]} samples to {cache_path}")
+        print(f"[eval] Cached {samples.shape[0]} samples to {cache_path}")
 
     # ── Free model from GPU (no longer needed) ────────────────────────
     if 'model' in dir():
@@ -695,13 +695,79 @@ def parse_args() -> ap.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    evaluate(
-        args.cfg,
-        args.ckpt,
-        num_samples=args.num_samples,
-        seed=args.seed,
-        max_points=args.max_points,
-        ae_ckpt=args.ae_ckpt,
-        eval_all=args.eval_all,
-        compute_emd=args.compute_emd,
-    )
+    
+    ckpt_path = args.ckpt
+    p = pathlib.Path(ckpt_path)
+    
+    # Resolve the runs/checkpoints to evaluate
+    runs_to_eval = []
+    if p.is_dir():
+        # Check if the directory itself is a run directory
+        if (p / "best.pt").exists() or (p / "last.pt").exists():
+            runs_to_eval.append(str(p))
+        else:
+            # Search recursively for all subdirectories containing best.pt or last.pt
+            found_dirs = set()
+            for path in p.rglob("best.pt"):
+                found_dirs.add(path.parent)
+            for path in p.rglob("last.pt"):
+                found_dirs.add(path.parent)
+            
+            runs_to_eval = sorted([str(d) for d in found_dirs])
+    else:
+        # It's a file
+        runs_to_eval.append(ckpt_path)
+        
+    if not runs_to_eval:
+        print(f"[eval] Error: No run directories containing 'best.pt' or 'last.pt' found under '{ckpt_path}'")
+        exit(1)
+        
+    if len(runs_to_eval) > 1:
+        print(f"[eval] Found {len(runs_to_eval)} runs to evaluate under '{ckpt_path}':")
+        for r in runs_to_eval:
+            print(f"  - {r}")
+        print("=" * 80)
+        
+        success_count = 0
+        failed_runs = []
+        for idx, run in enumerate(runs_to_eval, 1):
+            print(f"\n[eval] [{idx}/{len(runs_to_eval)}] Evaluating run: {run}")
+            print("-" * 50)
+            try:
+                evaluate(
+                    args.cfg,
+                    run,
+                    num_samples=args.num_samples,
+                    seed=args.seed,
+                    max_points=args.max_points,
+                    ae_ckpt=args.ae_ckpt,
+                    eval_all=args.eval_all,
+                    compute_emd=args.compute_emd,
+                )
+                success_count += 1
+            except Exception as e:
+                print(f"[eval] ERROR evaluating {run}: {e}")
+                import traceback
+                traceback.print_exc()
+                failed_runs.append((run, str(e)))
+            print("-" * 50)
+            
+        print("\n" + "=" * 80)
+        print(f"[eval] Batch evaluation finished. {success_count}/{len(runs_to_eval)} runs succeeded.")
+        if failed_runs:
+            print("[eval] Failed runs:")
+            for run, err in failed_runs:
+                print(f"  - {run} : {err}")
+        print("=" * 80)
+    else:
+        # Single run evaluation (original behavior)
+        evaluate(
+            args.cfg,
+            runs_to_eval[0],
+            num_samples=args.num_samples,
+            seed=args.seed,
+            max_points=args.max_points,
+            ae_ckpt=args.ae_ckpt,
+            eval_all=args.eval_all,
+            compute_emd=args.compute_emd,
+        )
