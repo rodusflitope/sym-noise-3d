@@ -566,7 +566,15 @@ def evaluate(
     gt = _normalize_pc(gt)
     print(f"[eval] Tensors on device: gen={gen.device}, gt={gt.device}")
 
-    cd_vals = chamfer_distance(gen, gt)
+    # Compute CD in sub-batches to avoid CUDA OOM (square_distance creates [B,N,N] tensors)
+    cd_batch_size = 32
+    cd_parts = []
+    for ci in range(0, n_eval, cd_batch_size):
+        cj = min(ci + cd_batch_size, n_eval)
+        cd_parts.append(chamfer_distance(gen[ci:cj], gt[ci:cj]))
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    cd_vals = torch.cat(cd_parts, dim=0)
     
     if compute_emd:
         # Compute EMD in sub-batches to avoid OOM (Sinkhorn creates [B,N,M] cost matrices)
@@ -582,8 +590,19 @@ def evaluate(
         emd_vals = torch.zeros(n_eval, device=device)
 
     sym_axis = int(cfg.get("symmetry", {}).get("axis", 0))
-    rsd_gen_vals = reflection_symmetry_distance(gen, axis=sym_axis, per_sample=True)
-    rsd_gt_vals = reflection_symmetry_distance(gt, axis=sym_axis, per_sample=True)
+    
+    # Compute RSD in sub-batches to avoid OOM (calls CD internally)
+    rsd_batch_size = 32
+    rsd_gen_parts = []
+    rsd_gt_parts = []
+    for ri in range(0, n_eval, rsd_batch_size):
+        rj = min(ri + rsd_batch_size, n_eval)
+        rsd_gen_parts.append(reflection_symmetry_distance(gen[ri:rj], axis=sym_axis, per_sample=True))
+        rsd_gt_parts.append(reflection_symmetry_distance(gt[ri:rj], axis=sym_axis, per_sample=True))
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    rsd_gen_vals = torch.cat(rsd_gen_parts, dim=0)
+    rsd_gt_vals = torch.cat(rsd_gt_parts, dim=0)
 
     mean_cd = cd_vals.mean().item() if cd_vals.numel() > 0 else float("nan")
     mean_emd = emd_vals.mean().item() if emd_vals.numel() > 0 else float("nan")
