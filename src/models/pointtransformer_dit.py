@@ -58,7 +58,7 @@ class GenericDiTBlock(nn.Module):
     def forward(self, x, coords, c):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         x_modulated = modulate(self.norm1(x), shift_msa.unsqueeze(1), scale_msa.unsqueeze(1))
-        attn_out, _ = self.attn(x_modulated, x_modulated, x_modulated)
+        attn_out, _ = self.attn(x_modulated, x_modulated, x_modulated, need_weights=False)
         x = x + gate_msa.unsqueeze(1) * attn_out
         
         x_modulated_mlp = modulate(self.norm2(x), shift_mlp.unsqueeze(1), scale_mlp.unsqueeze(1))

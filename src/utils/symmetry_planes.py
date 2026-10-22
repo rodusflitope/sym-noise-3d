@@ -99,16 +99,50 @@ def gather_points(points: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     return torch.gather(points, 1, indices.unsqueeze(-1).expand(-1, -1, points.shape[-1]))
 
 
-def resample_point_cloud(points: torch.Tensor, num_points: int) -> torch.Tensor:
+def farthest_point_sample(points: torch.Tensor, npoint: int) -> torch.Tensor:
+    """
+    Vectorized iterative farthest point sampling (FPS) on CPU/GPU.
+    points: [N, 3] or [B, N, 3]
+    returns: [npoint, 3] or [B, npoint, 3]
+    """
+    is_unbatched = (points.ndim == 2)
+    if is_unbatched:
+        points = points.unsqueeze(0)
+    B, N, C = points.shape
+    if N <= npoint:
+        return points.squeeze(0) if is_unbatched else points
+
+    centroids = torch.zeros(B, npoint, dtype=torch.long, device=points.device)
+    distance = torch.full((B, N), 1e10, dtype=points.dtype, device=points.device)
+    farthest = torch.zeros(B, dtype=torch.long, device=points.device)
+    batch_indices = torch.arange(B, dtype=torch.long, device=points.device)
+
+    for i in range(npoint):
+        centroids[:, i] = farthest
+        centroid = points[batch_indices, farthest, :].view(B, 1, C)
+        dist = torch.sum((points - centroid) ** 2, -1)
+        mask = dist < distance
+        distance[mask] = dist[mask]
+        farthest = torch.max(distance, -1)[1]
+
+    sampled = torch.gather(points, 1, centroids.unsqueeze(-1).expand(-1, -1, C))
+    return sampled.squeeze(0) if is_unbatched else sampled
+
+
+def resample_point_cloud(points: torch.Tensor, num_points: int, method: str = "fps") -> torch.Tensor:
     if points.shape[0] == 0:
         return torch.zeros((int(num_points), 3), dtype=points.dtype, device=points.device)
     if points.shape[0] == int(num_points):
         return points
     if points.shape[0] > int(num_points):
+        if method == "fps":
+            return farthest_point_sample(points, int(num_points))
         idx = torch.randperm(points.shape[0], device=points.device)[: int(num_points)]
+        return points[idx]
     else:
-        idx = torch.randint(0, points.shape[0], (int(num_points),), device=points.device)
-    return points[idx]
+        diff = int(num_points) - points.shape[0]
+        extra_idx = torch.randint(0, points.shape[0], (diff,), device=points.device)
+        return torch.cat([points, points[extra_idx]], dim=0)
 
 
 def select_fundamental_domain(points: torch.Tensor, planes: torch.Tensor, mask: torch.Tensor, margin: float = 0.0) -> torch.Tensor:
