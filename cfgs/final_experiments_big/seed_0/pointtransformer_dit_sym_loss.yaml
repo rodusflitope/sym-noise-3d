@@ -11,10 +11,10 @@ data:
   symmetry_precompute_num_points: 4096
 model:
   name: pointtransformer_dit
-  hidden_dim: 384
-  time_dim: 384
-  num_heads: 6
-  num_layers: 8
+  hidden_dim: 256
+  time_dim: 256
+  num_heads: 8
+  num_layers: 6
   use_fourier_features: false
   use_symmetric_attention: false
 loss:
@@ -26,8 +26,8 @@ loss:
     metric: cd
     axis: 0
 train:
-  batch_size: 64
-  epochs: 1500
+  batch_size: 128
+  epochs: 1000
   log_every: 50
   num_points: 2048
   num_workers: 8
@@ -36,6 +36,8 @@ train:
   amp: true
   amp_dtype: fp16
   weight_decay: 1.0e-06
+  val_every: 10
+  save_last_every: 25
 diffusion:
   T: 1000
   beta_start: 0.0001

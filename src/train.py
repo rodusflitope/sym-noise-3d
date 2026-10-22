@@ -1123,7 +1123,9 @@ def main() -> None:
         val_loss_plane = None
         val_loss_recon = None
         val_loss_plane_cons = None
-        if dl_val is not None and len(splits["val"]) > 0:
+        val_every = int(cfg.get("train", {}).get("val_every", 10))
+        should_val = ((epoch + 1) % val_every == 0 or (epoch + 1) == cfg["train"]["epochs"])
+        if dl_val is not None and len(splits["val"]) > 0 and should_val:
             model_to_eval = ema.module if ema is not None else model
             model_to_eval.eval()
             v_sum = 0.0
@@ -1498,14 +1500,16 @@ def main() -> None:
                 ema_state=ema_state,
             )
 
-        save_ckpt(
-            model,
-            run_root,
-            run_name,
-            "last.pt",
-            metadata=ckpt_metadata,
-            ema_state=ema_state,
-        )
+        save_last_every = max(1, int(cfg.get("train", {}).get("save_last_every", 10)))
+        if (epoch + 1) % save_last_every == 0 or (epoch + 1) == cfg["train"]["epochs"]:
+            save_ckpt(
+                model,
+                run_root,
+                run_name,
+                "last.pt",
+                metadata=ckpt_metadata,
+                ema_state=ema_state,
+            )
 
         sel = val_loss if val_loss is not None else avg_epoch_loss
         if sel < best_loss:

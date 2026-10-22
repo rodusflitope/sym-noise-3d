@@ -27,11 +27,11 @@ data:
   soft_cut_margin: 0.05
 model:
   name: pointtransformer_true_joint_multiplane_relative_dit
-  hidden_dim: 384
-  time_dim: 384
+  hidden_dim: 256
+  time_dim: 256
   num_planes: 3
-  num_heads: 6
-  num_layers: 8
+  num_heads: 8
+  num_layers: 6
   use_fourier_features: false
   use_symmetric_attention: false
 joint_symmetry:
@@ -42,6 +42,7 @@ joint_symmetry:
   mask_inactive_plane_noise: false
   filter_seam_before_reflection: true
   seam_resample_method: fps
+  half_buffer_factor: 1.15
 loss:
   name: true_joint_symmetry_plane_loss
   lambda_diff: 1.0
@@ -54,8 +55,8 @@ loss:
   weighting: none
   metric: cd
 train:
-  batch_size: 64
-  epochs: 1500
+  batch_size: 128
+  epochs: 1000
   log_every: 50
   num_points: 2048
   num_workers: 8
@@ -66,6 +67,8 @@ train:
   amp: true
   amp_dtype: fp16
   weight_decay: 1.0e-06
+  val_every: 10
+  save_last_every: 25
 diffusion:
   T: 1000
   beta_start: 0.0001
