@@ -468,7 +468,7 @@ def sample_timesteps(batch_size: int, T: int, device: torch.device) -> torch.Ten
 
 def parse_args() -> ap.Namespace:
     p = ap.ArgumentParser(description="Baseline Diffusion - Train")
-    p.add_argument("--cfg", type=str, default="cfgs/default.yaml")
+    p.add_argument("--cfg", type=str, default=None, help="Path to config YAML file or directory of configs.")
     p.add_argument(
         "--ae_ckpt",
         type=str,
@@ -482,7 +482,7 @@ def parse_args() -> ap.Namespace:
         "--resume",
         type=str,
         default=None,
-        help="Path to a checkpoint (.pt file) to resume training or fine-tune.",
+        help="Path to a checkpoint (.pt file) or run directory to resume training.",
     )
     return p.parse_args()
 
@@ -490,9 +490,12 @@ def parse_args() -> ap.Namespace:
 def main() -> None:
     args = parse_args()
 
-    cfg_path_obj = pathlib.Path(args.cfg)
-    if cfg_path_obj.is_dir():
+    if args.cfg is None and args.resume is None:
+        args.cfg = "cfgs/default.yaml"
+
+    if args.cfg is not None and pathlib.Path(args.cfg).is_dir():
         import subprocess
+        cfg_path_obj = pathlib.Path(args.cfg)
         print(f"[train] Directory provided for --cfg: {cfg_path_obj}")
         yaml_files = sorted(list(cfg_path_obj.glob("*.yaml")) + list(cfg_path_obj.glob("*.yml")))
         if not yaml_files:
@@ -519,19 +522,55 @@ def main() -> None:
                 # We continue to the next experiment so a single crash doesn't stop the whole batch
         return
 
-    cfg = load_cfg(args.cfg)
+    resume_ckpt_path = None
+    if args.resume:
+        from src.utils.checkpoint import resolve_ckpt_path, load_ckpt_config
+        resume_ckpt_path = resolve_ckpt_path(args.resume)
+        ckpt_path_obj = pathlib.Path(resume_ckpt_path)
+        run_dir = ckpt_path_obj.parent
+        run_root = run_dir.parent
+        run_name = run_dir.name
+
+        if args.cfg is None:
+            if (run_dir / "config.yaml").exists():
+                cfg = load_cfg(str(run_dir / "config.yaml"))
+            elif (run_dir / "training_history.json").exists():
+                with open(run_dir / "training_history.json", "r", encoding="utf-8") as f:
+                    th = json.load(f)
+                    if "config" in th:
+                        cfg = th["config"]
+                    else:
+                        raise ValueError(f"Could not find 'config' in {run_dir / 'training_history.json'}")
+            else:
+                recovered_cfg = load_ckpt_config(resume_ckpt_path)
+                if recovered_cfg is not None:
+                    cfg = recovered_cfg
+                else:
+                    raise ValueError(f"Could not find configuration in {run_dir}. Please provide --cfg.")
+        else:
+            cfg = load_cfg(args.cfg)
+        print(f"[train] Resuming training in: {run_root / run_name}")
+    else:
+        cfg = load_cfg(args.cfg)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_name = str(cfg["exp_name"])
+        run_id = get_run_id()
+        run_name = f"{exp_name}_{run_id}"
+        run_root = resolve_dated_root(cfg["train"]["out_dir"])
 
     set_seed(cfg.get("seed"))
     device = get_device(cfg.get("device", "auto"))
     print(f"[train] device = {device}")
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_name = str(cfg["exp_name"])
-    run_id = get_run_id()
-    run_name = f"{exp_name}_{run_id}"
-    run_root = resolve_dated_root(cfg["train"]["out_dir"])
     print(f"[train] experiment name = {run_name}")
-    print(f"[train] output dir = {run_root / run_name}")
+    out_dir = run_root / run_name
+    print(f"[train] output dir = {out_dir}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    import yaml
+    config_save_path = out_dir / "config.yaml"
+    if not config_save_path.exists():
+        with open(config_save_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, default_flow_style=False)
 
     use_latent = cfg.get("use_latent_diffusion", False)
     autoencoder = None
@@ -551,12 +590,6 @@ def main() -> None:
         print("[train] MODE: Direct Point Cloud Diffusion")
 
     model = build_model(cfg).to(device)
-    if args.resume:
-        from src.utils.checkpoint import load_ckpt
-
-        print(f"[train] Resuming/Fine-tuning from checkpoint: {args.resume}")
-        model = load_ckpt(model, args.resume, map_location=device)
-
     print(
         "[train] model params:", sum(p.numel() for p in model.parameters()) / 1e6, "M"
     )
@@ -790,8 +823,8 @@ def main() -> None:
 
     training_history: dict[str, object] = {
         "config": cfg,
-        "timestamp": timestamp,
-        "run_id": run_id,
+        "timestamp": timestamp if not resume_ckpt_path else "",
+        "run_id": run_id if not resume_ckpt_path else run_name,
         "run_name": run_name,
         "epochs": [],
         "best_epoch": None,
@@ -800,7 +833,37 @@ def main() -> None:
 
     best_loss = float("inf")
     global_step = 0
-    for epoch in range(cfg["train"]["epochs"]):
+    start_epoch = 0
+
+    if resume_ckpt_path:
+        from src.utils.checkpoint import load_resume_ckpt
+        print(f"[train] Resuming full state from checkpoint: {resume_ckpt_path}")
+        resume_data = load_resume_ckpt(
+            ckpt_path=resume_ckpt_path,
+            model=model,
+            optimizer=opt,
+            scheduler=scheduler,
+            scaler=scaler,
+            ema=ema,
+            device=device,
+        )
+        start_epoch = resume_data["epoch"]
+        global_step = resume_data["global_step"]
+        best_loss = resume_data["best_loss"]
+        if resume_data.get("training_history") is not None:
+            training_history = resume_data["training_history"]
+        elif (out_dir / "training_history.json").exists():
+            try:
+                with open(out_dir / "training_history.json", "r", encoding="utf-8") as f:
+                    training_history = json.load(f)
+            except Exception:
+                pass
+        print(
+            f"[train] Resumed successfully: epoch={start_epoch}, "
+            f"global_step={global_step}, best_loss={best_loss:.6f}"
+        )
+
+    for epoch in range(start_epoch, cfg["train"]["epochs"]):
         epoch_start_time = time.time()
         epoch_loss_sum = 0.0
         epoch_steps = 0
@@ -1500,7 +1563,7 @@ def main() -> None:
                 ema_state=ema_state,
             )
 
-        save_last_every = max(1, int(cfg.get("train", {}).get("save_last_every", 10)))
+        save_last_every = max(1, int(cfg.get("train", {}).get("save_last_every", 1)))
         if (epoch + 1) % save_last_every == 0 or (epoch + 1) == cfg["train"]["epochs"]:
             save_ckpt(
                 model,
@@ -1509,6 +1572,13 @@ def main() -> None:
                 "last.pt",
                 metadata=ckpt_metadata,
                 ema_state=ema_state,
+                optimizer=opt,
+                scheduler=scheduler,
+                scaler=scaler,
+                epoch=epoch + 1,
+                global_step=global_step,
+                best_loss=best_loss,
+                training_history=training_history,
             )
 
         sel = val_loss if val_loss is not None else avg_epoch_loss
@@ -1555,6 +1625,10 @@ def main() -> None:
                 ema.module.train()
 
     total_time = time.time() - train_start_time
+    if training_history.get("epochs"):
+        recorded_time = sum(float(ep.get("time", 0.0)) for ep in training_history["epochs"])
+        if recorded_time > 0:
+            total_time = recorded_time
     training_history["total_time"] = total_time
     save_training_history(run_root, run_name, training_history)
     print(
