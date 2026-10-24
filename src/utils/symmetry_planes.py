@@ -606,9 +606,27 @@ def estimate_multiple_symmetry_planes(
         final_planes.append(torch.zeros(4))
         final_scores.append(float('inf'))
         
+    final_planes_tensor = torch.stack(final_planes)
+    balances = []
+    halfspace_epsilon = 0.02
+    for fp in final_planes_tensor:
+        n = fp[:3]
+        d = fp[3]
+        if float(n.norm().item()) < 1e-6:
+            balances.append(1.0)
+            continue
+        dist = pts.matmul(n.to(device=pts.device, dtype=pts.dtype)) - d.to(device=pts.device, dtype=pts.dtype)
+        pos_mask = dist > halfspace_epsilon
+        neg_mask = dist < -halfspace_epsilon
+        pos_count = int(pos_mask.sum().item())
+        neg_count = int(neg_mask.sum().item())
+        total_count = max(1, pos_count + neg_count)
+        balances.append(float(abs(pos_count - neg_count) / total_count))
+        
     return {
-        "planes": torch.stack(final_planes),
+        "planes": final_planes_tensor,
         "scores": final_scores,
+        "balances": balances,
     }
 
 
@@ -772,13 +790,27 @@ def build_symmetry_plane_cache(
         obj_paths = obj_paths[:max_models]
 
     total_models = len(obj_paths)
+    planes: dict[str, Any] = {}
+    if partial_save_path is not None and Path(partial_save_path).exists():
+        try:
+            cached = load_symmetry_plane_cache(partial_save_path)
+            if isinstance(cached, dict) and "planes" in cached and isinstance(cached["planes"], dict):
+                planes = dict(cached["planes"])
+                print(
+                    f"[symmetry_plane_cache] Resuming from existing cache: {len(planes)}/{total_models} models already completed."
+                )
+        except Exception as e:
+            print(f"[symmetry_plane_cache] Could not load partial cache ({e}), starting fresh.")
+
     print(
         f"[symmetry_plane_cache] starting precompute | root={Path(root_dir)} | "
-        f"models={total_models} | num_points={num_points} | restarts={num_restarts} | steps={steps} | device={device}"
+        f"models={total_models} (remaining: {total_models - len(planes)}) | num_points={num_points} | restarts={num_restarts} | steps={steps} | device={device}"
     )
-    planes: dict[str, Any] = {}
     start_time = time.time()
     for index, obj_path in enumerate(obj_paths, start=1):
+        key = symmetry_plane_cache_key(root_dir, obj_path)
+        if key in planes:
+            continue
         item_start = time.time()
         seed = stable_mesh_seed(obj_path, num_points)
         points, normalization = sample_normalized_point_cloud(
@@ -789,8 +821,6 @@ def build_symmetry_plane_cache(
             deterministic_seed=seed,
             return_normalization=True,
         )
-
-        key = symmetry_plane_cache_key(root_dir, obj_path)
         if canonical_planes is not None:
             result = evaluate_canonical_symmetry_scores(
                 points,
@@ -820,6 +850,7 @@ def build_symmetry_plane_cache(
                 planes[key] = {
                     "planes": result["planes"],
                     "scores": result["scores"],
+                    "balances": result.get("balances", None),
                     "normalization": normalization,
                 }
                 score_repr = ",".join(f"{s:.6f}" for s in result["scores"])

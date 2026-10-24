@@ -68,18 +68,21 @@ def main() -> None:
     out_file = Path(out_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
     print(f"[precompute_symmetry_planes] output file: {out_file}")
-    save_symmetry_plane_cache(
-        out_file,
-        {
-            "meta": {
-                "partial": True,
-                "completed": 0,
-                "total": 0,
+    if not out_file.exists():
+        save_symmetry_plane_cache(
+            out_file,
+            {
+                "meta": {
+                    "partial": True,
+                    "completed": 0,
+                    "total": 0,
+                },
+                "planes": {},
             },
-            "planes": {},
-        },
-    )
-    print("[precompute_symmetry_planes] created output directory and initialized partial cache")
+        )
+        print("[precompute_symmetry_planes] created output directory and initialized partial cache")
+    else:
+        print(f"[precompute_symmetry_planes] Found existing cache file at {out_file}, will resume incomplete models.")
 
     use_canonical = args.canonical or bool(data_cfg.get("canonical_symmetry_planes", False))
     
@@ -113,9 +116,13 @@ def main() -> None:
             canonical_planes = None
     else:
         canonical_planes = CANONICAL_SYMMETRY_PLANES if use_canonical else None
-    device_arg = cfg.get("device", "auto")
-    if device_arg == "auto":
+    if args.device and args.device != "cpu":
+        device_arg = args.device
+    elif cfg.get("device", "auto") != "auto":
+        device_arg = cfg.get("device")
+    else:
         device_arg = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[precompute_symmetry_planes] compute device = {device_arg}")
         
     canonical_offset_reduction = args.canonical_offset_reduction or str(data_cfg.get("canonical_symmetry_offset_reduction", "median"))
     num_restarts = int(args.num_restarts)
