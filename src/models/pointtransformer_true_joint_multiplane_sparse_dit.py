@@ -97,7 +97,7 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         use_orthant_embedding: bool = True,
         symmetry_dropout_prob: float = 0.0,
         use_null_token: bool = False,
-        use_gradient_checkpointing: bool = True,
+        use_gradient_checkpointing: bool = False,
     ):
         super().__init__()
         self.use_fourier_features = use_fourier_features

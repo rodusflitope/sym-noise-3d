@@ -24,7 +24,7 @@ loss:
   name: mse
   weighting: none
 train:
-  batch_size: 128
+  batch_size: 32
   epochs: 1000
   log_every: 50
   num_points: 2048
