@@ -12,34 +12,38 @@ class SparseSymmetryAwareAttention(nn.Module):
         self.proj = nn.Linear(hidden_dim, hidden_dim)
         self.soft_cut_margin = soft_cut_margin
         
-    def forward(self, x, distances):
+    def forward(self, x, distances=None, attn_mask=None):
         # x: (B, N, C) where N can be N_points + 1 (hub token)
         # distances: (B, N_points, P)
         B, N, C = x.shape
-        N_points = distances.shape[1]
-        P = distances.shape[-1]
         qkv = self.qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: t.view(B, N, self.num_heads, C // self.num_heads).transpose(1, 2), qkv)
         
-        # Check positive/negative sides with soft margin
-        sign_plus = distances > -self.soft_cut_margin   # (B, N_points, P)
-        sign_minus = distances < self.soft_cut_margin   # (B, N_points, P)
+        if attn_mask is None:
+            if distances is None:
+                raise ValueError("Either distances or attn_mask must be provided to SparseSymmetryAwareAttention")
+            N_points = distances.shape[1]
+            P = distances.shape[-1]
+            sign_plus = distances > -self.soft_cut_margin   # (B, N_points, P)
+            sign_minus = distances < self.soft_cut_margin   # (B, N_points, P)
+            
+            # Memory-efficient: compute plane by plane without allocating massive (B, N, N, P) 4D tensor
+            attn_mask_points = torch.ones((B, N_points, N_points), dtype=torch.bool, device=distances.device)
+            for p in range(P):
+                sp = sign_plus[:, :, p]
+                sm = sign_minus[:, :, p]
+                plane_p = (sp.unsqueeze(2) & sp.unsqueeze(1)) | (sm.unsqueeze(2) & sm.unsqueeze(1))
+                attn_mask_points &= plane_p
+            
+            # Expand mask for Hub Token
+            if N > N_points:
+                attn_mask = F.pad(attn_mask_points, (0, N - N_points, 0, N - N_points), value=True)
+            else:
+                attn_mask = attn_mask_points
+                    
+            attn_mask = attn_mask.unsqueeze(1) # (B, 1, N, N)
         
-        shared_plus = sign_plus.unsqueeze(2) & sign_plus.unsqueeze(1) # (B, N_points, N_points, P)
-        shared_minus = sign_minus.unsqueeze(2) & sign_minus.unsqueeze(1) # (B, N_points, N_points, P)
-        shared_plane = shared_plus | shared_minus # (B, N_points, N_points, P)
-        
-        attn_mask_points = shared_plane.all(dim=-1) # (B, N_points, N_points)
-        
-        # Expand mask for Hub Token
-        if N > N_points:
-            attn_mask = F.pad(attn_mask_points, (0, N - N_points, 0, N - N_points), value=True)
-        else:
-            attn_mask = attn_mask_points
-                
-        attn_mask = attn_mask.unsqueeze(1) # (B, 1, N, N)
-        
-        # Use PyTorch's optimized scaled dot product attention (FlashAttention/memory efficient)
+        # Use PyTorch's scaled dot product attention
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         
         out = out.transpose(1, 2).reshape(B, N, C)
@@ -63,11 +67,11 @@ class SparseSymmetryDiTBlock(nn.Module):
         nn.init.zeros_(self.adaLN_modulation[1].weight)
         nn.init.zeros_(self.adaLN_modulation[1].bias)
 
-    def forward(self, x, c, distances=None):
+    def forward(self, x, c, distances=None, attn_mask=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         
         x_modulated = modulate(self.norm1(x), shift_msa.unsqueeze(1), scale_msa.unsqueeze(1))
-        x = x + gate_msa.unsqueeze(1) * self.attn(x_modulated, distances)
+        x = x + gate_msa.unsqueeze(1) * self.attn(x_modulated, distances=distances, attn_mask=attn_mask)
         
         x_modulated_mlp = modulate(self.norm2(x), shift_mlp.unsqueeze(1), scale_mlp.unsqueeze(1))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(x_modulated_mlp)
@@ -93,6 +97,7 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         use_orthant_embedding: bool = True,
         symmetry_dropout_prob: float = 0.0,
         use_null_token: bool = False,
+        use_gradient_checkpointing: bool = True,
     ):
         super().__init__()
         self.use_fourier_features = use_fourier_features
@@ -106,6 +111,7 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         self.use_orthant_embedding = bool(use_orthant_embedding)
         self.symmetry_dropout_prob = float(symmetry_dropout_prob)
         self.use_null_token = bool(use_null_token)
+        self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
         
         if self.use_null_token:
             self.null_normal = nn.Parameter(torch.zeros(3))
@@ -170,6 +176,22 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         else:
             self.presence_head = None
 
+    @staticmethod
+    def compute_sparse_mask(distances: torch.Tensor, soft_cut_margin: float, total_tokens: int) -> torch.Tensor:
+        """Memory-efficient calculation of block-diagonal orthant mask with hub token."""
+        B, N_points, P = distances.shape
+        sign_plus = distances > -soft_cut_margin
+        sign_minus = distances < soft_cut_margin
+        mask = torch.ones((B, N_points, N_points), dtype=torch.bool, device=distances.device)
+        for p in range(P):
+            sp = sign_plus[:, :, p]
+            sm = sign_minus[:, :, p]
+            plane_p = (sp.unsqueeze(2) & sp.unsqueeze(1)) | (sm.unsqueeze(2) & sm.unsqueeze(1))
+            mask &= plane_p
+        if total_tokens > N_points:
+            mask = F.pad(mask, (0, total_tokens - N_points, 0, total_tokens - N_points), value=True)
+        return mask.unsqueeze(1) # (B, 1, total_tokens, total_tokens)
+
     def forward(self, x_t: torch.Tensor, plane_t: torch.Tensor, t: torch.LongTensor, **kwargs):
         B, N, _ = x_t.shape
         
@@ -231,11 +253,27 @@ class PointTransformerTrueJointMultiplaneSparseDiT(nn.Module):
         hub = self.hub_token.expand(B, -1, -1)
         feats = torch.cat([feats, hub], dim=1) # (B, N+1, hidden_dim)
 
+        # Precompute sparse attention mask once for all layers
+        if self.use_sparse_attention:
+            attn_mask = self.compute_sparse_mask(distances, self.soft_cut_margin, feats.shape[1])
+        else:
+            attn_mask = None
+
         for layer in self.layers:
             if isinstance(layer, SparseSymmetryDiTBlock):
-                feats = layer(feats, c=c, distances=distances)
+                if self.training and self.use_gradient_checkpointing:
+                    feats = torch.utils.checkpoint.checkpoint(
+                        layer, feats, c, None, attn_mask, use_reentrant=False
+                    )
+                else:
+                    feats = layer(feats, c=c, attn_mask=attn_mask)
             else:
-                feats = layer(feats, coords=x_t, c=c)
+                if self.training and self.use_gradient_checkpointing:
+                    feats = torch.utils.checkpoint.checkpoint(
+                        layer, feats, x_t, c, use_reentrant=False
+                    )
+                else:
+                    feats = layer(feats, coords=x_t, c=c)
 
         # Extract hub token before removal for global plane prediction
         hub_out = feats[:, -1, :]

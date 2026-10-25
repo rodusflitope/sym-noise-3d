@@ -380,6 +380,7 @@ def build_model(cfg):
         use_presence_logits = bool(joint_cfg.get("use_presence_logits", cfg["model"].get("use_presence_logits", False)))
         soft_cut_margin = float(joint_cfg.get("soft_cut_margin", cfg["model"].get("soft_cut_margin", 0.05)))
         use_orthant_embedding = bool(cfg["model"].get("use_orthant_embedding", True))
+        use_gradient_checkpointing = bool(cfg["model"].get("use_gradient_checkpointing", True))
 
         return PointTransformerTrueJointMultiplaneSparseDiT(
             hidden_dim=hidden_dim,
@@ -396,5 +397,6 @@ def build_model(cfg):
             use_orthant_embedding=use_orthant_embedding,
             symmetry_dropout_prob=symmetry_dropout_prob,
             use_null_token=use_null_token,
+            use_gradient_checkpointing=use_gradient_checkpointing,
         )
     raise ValueError(f"Unknown model: {name}")
