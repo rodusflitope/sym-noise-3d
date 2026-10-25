@@ -495,21 +495,22 @@ def main() -> None:
 
     if args.cfg is not None and pathlib.Path(args.cfg).is_dir():
         import subprocess
+        import sys
         cfg_path_obj = pathlib.Path(args.cfg)
         print(f"[train] Directory provided for --cfg: {cfg_path_obj}")
-        yaml_files = sorted(list(cfg_path_obj.glob("*.yaml")) + list(cfg_path_obj.glob("*.yml")))
+        yaml_files = sorted(list(cfg_path_obj.rglob("*.yaml")) + list(cfg_path_obj.rglob("*.yml")))
         if not yaml_files:
             print(f"[train] No YAML files found in {cfg_path_obj}")
             return
         
         print(f"[train] Found {len(yaml_files)} config files to train sequentially.")
         for i, yml_file in enumerate(yaml_files, 1):
-            print(f"\n{'='*60}")
-            print(f"[{i}/{len(yaml_files)}] Training config: {yml_file.name}")
+            rel_name = str(yml_file.relative_to(cfg_path_obj))
+            print("\n" + "=" * 60)
+            print(f"[{i}/{len(yaml_files)}] Training config: {rel_name}")
             print(f"{'='*60}")
             
-            # Reconstruct the command for the subprocess
-            cmd = ["python", "-m", "src.train", "--cfg", str(yml_file)]
+            cmd = [sys.executable, "-m", "src.train", "--cfg", str(yml_file)]
             if args.ae_ckpt:
                 cmd.extend(["--ae_ckpt", args.ae_ckpt])
             if args.resume:
@@ -518,8 +519,7 @@ def main() -> None:
             try:
                 subprocess.run(cmd, check=True)
             except subprocess.CalledProcessError as e:
-                print(f"[train] ERROR: Training failed for {yml_file.name} with exit code {e.returncode}")
-                # We continue to the next experiment so a single crash doesn't stop the whole batch
+                print(f"[train] ERROR: Training failed for {rel_name} with exit code {e.returncode}")
         return
 
     resume_ckpt_path = None
