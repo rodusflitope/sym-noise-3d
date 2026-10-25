@@ -129,7 +129,7 @@ def farthest_point_sample(points: torch.Tensor, npoint: int) -> torch.Tensor:
     return sampled.squeeze(0) if is_unbatched else sampled
 
 
-def resample_point_cloud(points: torch.Tensor, num_points: int, method: str = "fps") -> torch.Tensor:
+def resample_point_cloud(points: torch.Tensor, num_points: int, method: str = "random") -> torch.Tensor:
     if points.shape[0] == 0:
         return torch.zeros((int(num_points), 3), dtype=points.dtype, device=points.device)
     if points.shape[0] == int(num_points):

@@ -290,11 +290,11 @@ class ShapeNetDataset(Dataset):
         
         k = int(mask.sum().item())
         target_fundamental = max(1, self.num_points // (2 ** k))
-        fundamental = resample_point_cloud(fundamental, target_fundamental)
+        fundamental = resample_point_cloud(fundamental, target_fundamental, method="random")
         if self.return_fundamental_domain:
             return fundamental
         reconstructed = reconstruct_from_fundamental_domain(fundamental, planes, mask)
-        return resample_point_cloud(reconstructed, self.num_points)
+        return resample_point_cloud(reconstructed, self.num_points, method="random")
 
     def __len__(self) -> int:
         return len(self.obj_paths)
