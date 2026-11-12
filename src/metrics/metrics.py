@@ -2,8 +2,22 @@ from __future__ import annotations
 
 import torch
 from typing import Optional, Dict, List, Tuple
-from scipy.optimize import linear_sum_assignment
-from tqdm import tqdm
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, total=None, desc=None, leave=False):
+        class _DummyPbar:
+            def update(self, n=1): pass
+            def close(self): pass
+        if iterable is not None:
+            return iterable
+        return _DummyPbar()
+
+try:
+    from scipy.optimize import linear_sum_assignment
+except ImportError:
+    linear_sum_assignment = None
 
 try:
     from geomloss import SamplesLoss
@@ -79,6 +93,12 @@ def earth_movers_distance(
 
         return loss_fn(x, y)
 
+    if linear_sum_assignment is None:
+        raise ImportError(
+            "Neither GeomLoss nor scipy.optimize.linear_sum_assignment is available. "
+            "Please install geomloss or scipy to compute EMD."
+        )
+
     print("[WARN] GeomLoss not detected. Using scipy (slow).")
     emd_vals = []
     x_np = x.detach().cpu().numpy()
@@ -108,6 +128,47 @@ def reflection_symmetry_distance(
     if per_sample:
         return cd
     return cd.mean()
+
+
+def compute_aabb_diagonal_sq(x: torch.Tensor) -> torch.Tensor:
+    """
+    Square of AABB diagonal:
+        diag(X)^2 = (x_max - x_min)^2 + (y_max - y_min)^2 + (z_max - z_min)^2
+    Args:
+        x: [B, N, 3] or [N, 3]
+    Returns:
+        Tensor [B] with diag(X)^2
+    """
+    x = _ensure_bnc3(x, name="x_aabb")
+    extents = x.max(dim=1).values - x.min(dim=1).values  # [B, 3]
+    return (extents ** 2).sum(dim=-1)  # [B]
+
+
+def compute_nscd(
+    x: torch.Tensor,
+    axis: int = 0,
+    eps: float = 1e-12,
+    per_sample: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Computes Sym-CD and Normalized Symmetry Chamfer Distance (NSCD) based on
+    Caytuiro & Sipiran (2024 / 2026):
+        NSCD(X) = Sym-CD(X) / diag(X)^2
+    where:
+        Sym-CD(X) = d_CD(X - c, R_axis(X - c))
+        diag(X)^2 = ||max_i x_i - min_i x_i||_2^2
+    Returns:
+        sym_cd: [B]
+        diag_sq: [B]
+        nscd: [B]
+    """
+    x = _ensure_bnc3(x, name="x_nscd")
+    sym_cd = reflection_symmetry_distance(x, axis=axis, per_sample=True)
+    diag_sq = compute_aabb_diagonal_sq(x)
+    nscd = sym_cd / torch.clamp(diag_sq, min=eps)
+    if not per_sample:
+        return sym_cd.mean(), diag_sq.mean(), nscd.mean()
+    return sym_cd, diag_sq, nscd
 
 
 def _batched_chamfer_pairwise(

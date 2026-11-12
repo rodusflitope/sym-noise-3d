@@ -28,7 +28,14 @@ from src.models import (
 from src.schedulers import build_beta_schedule, build_noise_type
 from src.samplers import build_sampler, SymmetricDDPM_Sampler, JointSymmetricDDPM_Sampler, TrueJointSymmetricDDPM_Sampler
 from src.data import ShapeNetDataset
-from src.metrics import chamfer_distance, earth_movers_distance, reflection_symmetry_distance, compute_all_metrics
+from src.metrics import (
+    chamfer_distance,
+    earth_movers_distance,
+    reflection_symmetry_distance,
+    compute_aabb_diagonal_sq,
+    compute_nscd,
+    compute_all_metrics,
+)
 from src.utils.checkpoint import load_ckpt_config
 from src.utils.joint_modes import validate_joint_configuration
 from src.utils.symmetry_planes import (
@@ -36,7 +43,6 @@ from src.utils.symmetry_planes import (
     reconstruct_from_fundamental_domain,
     resample_point_cloud,
 )
-
 
 
 def load_checkpoint(model: torch.nn.Module, path: str, device: torch.device, *, prefer_ema: bool = False) -> None:
@@ -157,18 +163,16 @@ def _samples_cache_path(
     return cache_dir / f"{tag}.pt"
 
 
-def _eval_out_path(
+def _find_existing_eval_json(
     ckpt_path: str,
     n_eval: int,
     max_points: Optional[int],
     seed: Optional[int],
     use_latent: bool,
-) -> pathlib.Path:
+) -> Optional[pathlib.Path]:
     repo_root = _get_repo_root()
-    evals_root = resolve_dated_root(repo_root / "evals")
     run_name = pathlib.Path(ckpt_path).parent.name
     ckpt_stem = pathlib.Path(ckpt_path).stem
-
     tag = f"{_safe_tag(ckpt_stem)}_n{int(n_eval)}"
     if max_points is not None and int(max_points) > 0:
         tag += f"_mp{int(max_points)}"
@@ -177,9 +181,57 @@ def _eval_out_path(
     if use_latent:
         tag += "_latent"
 
+    # 1. Search under repo_root / "evals"
+    evals_dir = repo_root / "evals"
+    if evals_dir.exists():
+        for candidate in evals_dir.rglob(f"{tag}.json"):
+            if candidate.parent.name in {_safe_tag(run_name), run_name}:
+                return candidate
+
+    # 2. Search under run directory or run directory / "eval"
+    run_dir = pathlib.Path(ckpt_path).parent
+    for candidate in [run_dir / f"{tag}.json", run_dir / "eval" / f"{tag}.json"]:
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def _eval_out_path(
+    ckpt_path: str,
+    n_eval: int,
+    max_points: Optional[int],
+    seed: Optional[int],
+    use_latent: bool,
+    custom_out_dir: Optional[str] = None,
+) -> pathlib.Path:
+    ckpt_stem = pathlib.Path(ckpt_path).stem
+    tag = f"{_safe_tag(ckpt_stem)}_n{int(n_eval)}"
+    if max_points is not None and int(max_points) > 0:
+        tag += f"_mp{int(max_points)}"
+    if seed is not None:
+        tag += f"_seed{int(seed)}"
+    if use_latent:
+        tag += "_latent"
+
+    if custom_out_dir:
+        out_dir = pathlib.Path(custom_out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return out_dir / f"{tag}.json"
+
+    # Search for an existing evaluation file to update
+    existing = _find_existing_eval_json(ckpt_path, n_eval, max_points, seed, use_latent)
+    if existing is not None:
+        return existing
+
+    repo_root = _get_repo_root()
+    evals_root = resolve_dated_root(repo_root / "evals")
+    run_name = pathlib.Path(ckpt_path).parent.name
+
     out_dir = evals_root / _safe_tag(run_name)
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir / f"{tag}.json"
+
 
 def evaluate(
     cfg_path: Optional[str],
@@ -190,7 +242,11 @@ def evaluate(
     ae_ckpt: Optional[str] = None,
     eval_all: bool = False,
     compute_emd: bool = False,
+    only_nscd: bool = False,
+    only_symmetry: bool = False,
+    out_dir: Optional[str] = None,
 ) -> None:
+    only_nscd = bool(only_nscd or only_symmetry)
     ckpt_path = _resolve_ckpt_path(ckpt_path)
 
     cfg = load_ckpt_config(ckpt_path)
@@ -208,15 +264,6 @@ def evaluate(
     used_seed = seed if seed is not None else cfg.get("seed")
     set_seed(used_seed)
     device = get_device(cfg.get("device", "auto"))
-
-    model = build_model(cfg).to(device)
-    prefer_ema = bool((cfg.get("ema", {}) or {}).get("use", False))
-    load_checkpoint(model, ckpt_path, device, prefer_ema=prefer_ema)
-    model.eval()
-
-    betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
-    noise_type = build_noise_type(cfg)
-    sampler = build_sampler(cfg, betas, alphas, alpha_bars, noise_type=noise_type)
 
     num_points = int(cfg["train"]["num_points"])
     use_latent = bool(cfg.get("use_latent_diffusion", False))
@@ -299,6 +346,16 @@ def evaluate(
         samples = torch.load(cache_path, map_location="cpu", weights_only=True)
         print(f"[eval]   shape={tuple(samples.shape)}, dtype={samples.dtype}")
     else:
+        # Instantiate model only when we need to generate samples
+        model = build_model(cfg).to(device)
+        prefer_ema = bool((cfg.get("ema", {}) or {}).get("use", False))
+        load_checkpoint(model, ckpt_path, device, prefer_ema=prefer_ema)
+        model.eval()
+
+        betas, alphas, alpha_bars = build_beta_schedule(cfg, device)
+        noise_type = build_noise_type(cfg)
+        sampler = build_sampler(cfg, betas, alphas, alpha_bars, noise_type=noise_type)
+
         # ── Generate samples (needs model on GPU) ──────────────────────
         all_samples = []
         with torch.no_grad():
@@ -501,7 +558,7 @@ def evaluate(
         print(f"[eval] Cached {samples.shape[0]} samples to {cache_path}")
 
     # ── Free model from GPU (no longer needed) ────────────────────────
-    if 'model' in dir():
+    if 'model' in locals():
         del model
     if 'ae' in locals():
         del ae
@@ -513,7 +570,7 @@ def evaluate(
     if n_eval <= 0:
         raise ValueError("[eval] Invalid num_samples or no data to evaluate.")
 
-    # Use DataLoader for parallel GT loading (much faster than sequential ds[i])
+    # Use DataLoader for parallel GT loading
     from torch.utils.data import DataLoader
     gt_loader = DataLoader(
         ds, batch_size=batch_size_eval, shuffle=False,
@@ -522,7 +579,6 @@ def evaluate(
     )
     gt_list = []
     return_fundamental = bool(cfg.get("data", {}).get("return_fundamental_domain", False))
-    from src.utils.symmetry_planes import reconstruct_from_fundamental_domain, resample_point_cloud
     for batch in gt_loader:
         if isinstance(batch, dict):
             pts = batch["points"]
@@ -535,7 +591,6 @@ def evaluate(
                 for b_idx in range(pts.shape[0]):
                     gt_list.append(resample_point_cloud(pts[b_idx], num_points) if pts.shape[1] != num_points else pts[b_idx])
         else:
-            # batch is a tensor [B, N, 3]
             for b_idx in range(batch.shape[0]):
                 gt_list.append(batch[b_idx])
     if len(gt_list) == 0:
@@ -543,7 +598,7 @@ def evaluate(
     gt = torch.stack(gt_list[:n_eval], dim=0)
     gen = samples[:n_eval]
 
-    # Move everything to GPU for metrics computation
+    # Move to device
     gen = gen.to(device)
     gt = gt.to(device)
 
@@ -552,12 +607,9 @@ def evaluate(
 
     # Normalize point clouds for fair metric comparison (shape only, ignore scale/shift)
     def _normalize_pc(pc: torch.Tensor) -> torch.Tensor:
-        # pc: [B, N, 3]
         centroid = pc.mean(dim=1, keepdim=True)
         pc = pc - centroid
-        # max distance from origin
         dist = torch.sqrt((pc ** 2).sum(dim=2, keepdim=True)).max(dim=1, keepdim=True)[0]
-        # avoid div by zero
         dist[dist < 1e-8] = 1.0
         pc = pc / dist
         return pc
@@ -566,113 +618,136 @@ def evaluate(
     gt = _normalize_pc(gt)
     print(f"[eval] Tensors on device: gen={gen.device}, gt={gt.device}")
 
-    # Compute CD in sub-batches to avoid CUDA OOM (square_distance creates [B,N,N] tensors)
-    cd_batch_size = 32
-    cd_parts = []
-    for ci in range(0, n_eval, cd_batch_size):
-        cj = min(ci + cd_batch_size, n_eval)
-        cd_parts.append(chamfer_distance(gen[ci:cj], gt[ci:cj]))
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    cd_vals = torch.cat(cd_parts, dim=0)
-    
-    if compute_emd:
-        # Compute EMD in sub-batches to avoid OOM (Sinkhorn creates [B,N,M] cost matrices)
-        emd_batch_size = 16
-        emd_parts = []
-        for ei in range(0, n_eval, emd_batch_size):
-            ej = min(ei + emd_batch_size, n_eval)
-            emd_parts.append(earth_movers_distance(gen[ei:ej], gt[ei:ej], max_points=max_points))
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        emd_vals = torch.cat(emd_parts, dim=0)
-    else:
-        emd_vals = torch.zeros(n_eval, device=device)
-
     sym_axis = int(cfg.get("symmetry", {}).get("axis", 0))
-    
-    # Compute RSD in sub-batches to avoid OOM (calls CD internally)
+
+    # Compute NSCD and Sym-CD in sub-batches
     rsd_batch_size = 32
-    rsd_gen_parts = []
-    rsd_gt_parts = []
+    sym_cd_gen_parts = []
+    diag_sq_gen_parts = []
+    nscd_gen_parts = []
+    sym_cd_gt_parts = []
+    diag_sq_gt_parts = []
+    nscd_gt_parts = []
+
     for ri in range(0, n_eval, rsd_batch_size):
         rj = min(ri + rsd_batch_size, n_eval)
-        rsd_gen_parts.append(reflection_symmetry_distance(gen[ri:rj], axis=sym_axis, per_sample=True))
-        rsd_gt_parts.append(reflection_symmetry_distance(gt[ri:rj], axis=sym_axis, per_sample=True))
+        cd_g, diag_g, nscd_g = compute_nscd(gen[ri:rj], axis=sym_axis, per_sample=True)
+        cd_r, diag_r, nscd_r = compute_nscd(gt[ri:rj], axis=sym_axis, per_sample=True)
+        sym_cd_gen_parts.append(cd_g)
+        diag_sq_gen_parts.append(diag_g)
+        nscd_gen_parts.append(nscd_g)
+        sym_cd_gt_parts.append(cd_r)
+        diag_sq_gt_parts.append(diag_r)
+        nscd_gt_parts.append(nscd_r)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    rsd_gen_vals = torch.cat(rsd_gen_parts, dim=0)
-    rsd_gt_vals = torch.cat(rsd_gt_parts, dim=0)
 
-    mean_cd = cd_vals.mean().item() if cd_vals.numel() > 0 else float("nan")
-    mean_emd = emd_vals.mean().item() if emd_vals.numel() > 0 else float("nan")
-    mean_rsd_gen = rsd_gen_vals.mean().item()
-    mean_rsd_gt = rsd_gt_vals.mean().item()
+    sym_cd_gen_vals = torch.cat(sym_cd_gen_parts, dim=0)
+    diag_sq_gen_vals = torch.cat(diag_sq_gen_parts, dim=0)
+    nscd_gen_vals = torch.cat(nscd_gen_parts, dim=0)
 
-    print(f"Chamfer Distance (mean over {n_eval} samples): {mean_cd:.6f}")
-    print(f"Earth Mover's Distance (mean, over {n_eval} samples): {mean_emd:.6f}")
-    print(f"Reflection Symmetry Distance - Generated (mean): {mean_rsd_gen:.6f}")
-    print(f"Reflection Symmetry Distance - Ground Truth (mean): {mean_rsd_gt:.6f}")
-    print(f"RSD ratio (gen/gt, closer to 1.0 = better): {mean_rsd_gen / max(mean_rsd_gt, 1e-10):.4f}")
+    sym_cd_gt_vals = torch.cat(sym_cd_gt_parts, dim=0)
+    diag_sq_gt_vals = torch.cat(diag_sq_gt_parts, dim=0)
+    nscd_gt_vals = torch.cat(nscd_gt_parts, dim=0)
 
-    print("[eval] Computing advanced metrics (CD)...")
-    
-    metrics_to_compute = ["cd"]
-    if compute_emd:
-        print("[eval] Also computing EMD and advanced EMD metrics (esto puede tardar mucho)...")
-        metrics_to_compute.append("emd")
-    
-    adv_metrics = compute_all_metrics(
-        gen, gt, 
-        batch_size=32, 
-        metrics_list=metrics_to_compute
-    )
-    
-    print("-" * 40)
-    print(f"{'Metric':<15} | {'CD':<10} | {'EMD':<10}")
-    print("-" * 40)
-    emd_1nna = adv_metrics.get('1-NNA-EMD', '-')
-    emd_1nna_str = f"{emd_1nna:.4f}" if isinstance(emd_1nna, (float, int)) else str(emd_1nna)
-    emd_cov = adv_metrics.get('COV-EMD', '-')
-    emd_cov_str = f"{emd_cov:.4f}" if isinstance(emd_cov, (float, int)) else str(emd_cov)
-    emd_mmd = adv_metrics.get('MMD-EMD', '-')
-    emd_mmd_str = f"{emd_mmd:.6f}" if isinstance(emd_mmd, (float, int)) else str(emd_mmd)
+    mean_rsd_gen = sym_cd_gen_vals.mean().item()
+    std_rsd_gen = sym_cd_gen_vals.std().item()
+    mean_rsd_gt = sym_cd_gt_vals.mean().item()
+    std_rsd_gt = sym_cd_gt_vals.std().item()
 
-    print(f"{'1-NNA':<15} | {adv_metrics.get('1-NNA-CD', 0):.4f}     | {emd_1nna_str}")
-    print(f"{'COV':<15}   | {adv_metrics.get('COV-CD', 0):.4f}     | {emd_cov_str}")
-    print(f"{'MMD':<15}   | {adv_metrics.get('MMD-CD', 0):.6f}   | {emd_mmd_str}")
-    print("-" * 40)
+    mean_nscd_gen = nscd_gen_vals.mean().item()
+    std_nscd_gen = nscd_gen_vals.std().item()
+    mean_nscd_gt = nscd_gt_vals.mean().item()
+    std_nscd_gt = nscd_gt_vals.std().item()
 
-    out = {
-        "ckpt": str(ckpt_path),
-        "run_dir": str(pathlib.Path(ckpt_path).parent),
-        "num_samples": int(n_eval),
-        "max_points": int(max_points) if max_points is not None else None,
-        "seed": int(used_seed) if used_seed is not None else None,
-        "use_latent_diffusion": bool(use_latent),
-        "metrics": {
-            "cd": {
-                "mean": float(mean_cd),
-                "values": cd_vals.detach().cpu().tolist(),
-            },
-            "emd": {
-                "mean": float(mean_emd),
-                "values": emd_vals.detach().cpu().tolist(),
-            },
-            "rsd_gen": {
-                "mean": float(mean_rsd_gen),
-                "axis": sym_axis,
-                "values": rsd_gen_vals.detach().cpu().tolist(),
-            },
-            "rsd_gt": {
-                "mean": float(mean_rsd_gt),
-                "axis": sym_axis,
-                "values": rsd_gt_vals.detach().cpu().tolist(),
-            },
-            "rsd_ratio": float(mean_rsd_gen / max(mean_rsd_gt, 1e-10)),
-            **adv_metrics 
-        },
-    }
+    rsd_ratio = mean_rsd_gen / max(mean_rsd_gt, 1e-10)
+    nscd_ratio = mean_nscd_gen / max(mean_nscd_gt, 1e-12)
+
+    if only_nscd:
+        print("=" * 70)
+        print("Normalized Symmetry Chamfer Distance (NSCD)")
+        print("  Referencia: Caytuiro & Sipiran (Computers & Graphics 2026)")
+        print(f"  Eje de reflexión:                 {sym_axis}")
+        print(f"  NSCD - Generado (mean +/- std):   {mean_nscd_gen:.6e} +/- {std_nscd_gen:.6e}")
+        print(f"       (x10^3, escala C&G 2026):   {mean_nscd_gen * 1e3:.4f} +/- {std_nscd_gen * 1e3:.4f}")
+        print(f"       (x10^4, escala paper):       {mean_nscd_gen * 1e4:.4f} +/- {std_nscd_gen * 1e4:.4f}")
+        print(f"  NSCD - Ground Truth (referencia): {mean_nscd_gt:.6e} +/- {std_nscd_gt:.6e}")
+        print(f"       (x10^3, escala C&G 2026):   {mean_nscd_gt * 1e3:.4f} +/- {std_nscd_gt * 1e3:.4f}")
+        print(f"  Ratio vs Dataset Real (gen/gt):   {nscd_ratio:.4f} (1.0 = paridad exacta con GT)")
+        print("=" * 70)
+    else:
+        print("=" * 70)
+        print("Symmetry Metrics (Caytuiro & Sipiran, C&G 2026):")
+        print(f"  Reflection Axis:                  {sym_axis}")
+        print(f"  Sym-CD - Generated (mean +/- std): {mean_rsd_gen:.6f} +/- {std_rsd_gen:.6f}")
+        print(f"  Sym-CD - Ground Truth (reference): {mean_rsd_gt:.6f} +/- {std_rsd_gt:.6f}")
+        print(f"  Sym-CD ratio (gen/gt):            {rsd_ratio:.4f}")
+        print(f"  NSCD - Generated (mean +/- std):   {mean_nscd_gen:.6e} +/- {std_nscd_gen:.6e}")
+        print(f"       (x10^3: {mean_nscd_gen * 1e3:.4f}, x10^4: {mean_nscd_gen * 1e4:.4f})")
+        print(f"  NSCD - Ground Truth (reference):   {mean_nscd_gt:.6e} +/- {std_nscd_gt:.6e}")
+        print(f"       (x10^3: {mean_nscd_gt * 1e3:.4f}, x10^4: {mean_nscd_gt * 1e4:.4f})")
+        print(f"  NSCD ratio (gen/gt, 1.0 = match): {nscd_ratio:.4f}")
+        print("=" * 70)
+
+    cd_vals = None
+    emd_vals = None
+    adv_metrics = {}
+
+    if not only_nscd:
+        # Compute CD in sub-batches to avoid CUDA OOM
+        cd_batch_size = 32
+        cd_parts = []
+        for ci in range(0, n_eval, cd_batch_size):
+            cj = min(ci + cd_batch_size, n_eval)
+            cd_parts.append(chamfer_distance(gen[ci:cj], gt[ci:cj]))
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        cd_vals = torch.cat(cd_parts, dim=0)
+        
+        if compute_emd:
+            emd_batch_size = 16
+            emd_parts = []
+            for ei in range(0, n_eval, emd_batch_size):
+                ej = min(ei + emd_batch_size, n_eval)
+                emd_parts.append(earth_movers_distance(gen[ei:ej], gt[ei:ej], max_points=max_points))
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            emd_vals = torch.cat(emd_parts, dim=0)
+        else:
+            emd_vals = torch.zeros(n_eval, device=device)
+
+        mean_cd = cd_vals.mean().item() if cd_vals.numel() > 0 else float("nan")
+        mean_emd = emd_vals.mean().item() if emd_vals.numel() > 0 else float("nan")
+
+        print(f"Chamfer Distance (mean over {n_eval} samples): {mean_cd:.6f}")
+        print(f"Earth Mover's Distance (mean, over {n_eval} samples): {mean_emd:.6f}")
+
+        print("[eval] Computing advanced metrics (CD)...")
+        metrics_to_compute = ["cd"]
+        if compute_emd:
+            print("[eval] Also computing EMD and advanced EMD metrics (esto puede tardar mucho)...")
+            metrics_to_compute.append("emd")
+        
+        adv_metrics = compute_all_metrics(
+            gen, gt, 
+            batch_size=32, 
+            metrics_list=metrics_to_compute
+        )
+        
+        print("-" * 40)
+        print(f"{'Metric':<15} | {'CD':<10} | {'EMD':<10}")
+        print("-" * 40)
+        emd_1nna = adv_metrics.get('1-NNA-EMD', '-')
+        emd_1nna_str = f"{emd_1nna:.4f}" if isinstance(emd_1nna, (float, int)) else str(emd_1nna)
+        emd_cov = adv_metrics.get('COV-EMD', '-')
+        emd_cov_str = f"{emd_cov:.4f}" if isinstance(emd_cov, (float, int)) else str(emd_cov)
+        emd_mmd = adv_metrics.get('MMD-EMD', '-')
+        emd_mmd_str = f"{emd_mmd:.6f}" if isinstance(emd_mmd, (float, int)) else str(emd_mmd)
+
+        print(f"{'1-NNA':<15} | {adv_metrics.get('1-NNA-CD', 0):.4f}     | {emd_1nna_str}")
+        print(f"{'COV':<15}   | {adv_metrics.get('COV-CD', 0):.4f}     | {emd_cov_str}")
+        print(f"{'MMD':<15}   | {adv_metrics.get('MMD-CD', 0):.6f}   | {emd_mmd_str}")
+        print("-" * 40)
 
     out_path = _eval_out_path(
         ckpt_path=ckpt_path,
@@ -680,10 +755,111 @@ def evaluate(
         max_points=max_points,
         seed=used_seed,
         use_latent=use_latent,
+        custom_out_dir=out_dir,
     )
+
+    symmetry_metrics_payload = {
+        "rsd_gen": {
+            "mean": float(mean_rsd_gen),
+            "std": float(std_rsd_gen),
+            "axis": sym_axis,
+            "values": sym_cd_gen_vals.detach().cpu().tolist(),
+        },
+        "rsd_gt": {
+            "mean": float(mean_rsd_gt),
+            "std": float(std_rsd_gt),
+            "axis": sym_axis,
+            "values": sym_cd_gt_vals.detach().cpu().tolist(),
+        },
+        "rsd_ratio": float(rsd_ratio),
+        "sym_cd": {
+            "gen_mean": float(mean_rsd_gen),
+            "gen_std": float(std_rsd_gen),
+            "gt_mean": float(mean_rsd_gt),
+            "gt_std": float(std_rsd_gt),
+            "ratio": float(rsd_ratio),
+            "axis": sym_axis,
+        },
+        "nscd": {
+            "gen_mean": float(mean_nscd_gen),
+            "gen_std": float(std_nscd_gen),
+            "gen_mean_x10^3": float(mean_nscd_gen * 1000.0),
+            "gen_mean_x10^4": float(mean_nscd_gen * 10000.0),
+            "gt_mean": float(mean_nscd_gt),
+            "gt_std": float(std_nscd_gt),
+            "gt_mean_x10^3": float(mean_nscd_gt * 1000.0),
+            "gt_mean_x10^4": float(mean_nscd_gt * 10000.0),
+            "ratio": float(nscd_ratio),
+            "axis": sym_axis,
+            "values_gen": nscd_gen_vals.detach().cpu().tolist(),
+            "values_gt": nscd_gt_vals.detach().cpu().tolist(),
+        },
+        "nscd_gen_mean": float(mean_nscd_gen),
+        "nscd_gen_std": float(std_nscd_gen),
+        "nscd_gt_mean": float(mean_nscd_gt),
+        "nscd_gt_std": float(std_nscd_gt),
+        "nscd_ratio": float(nscd_ratio),
+        "sym_cd_gen_mean": float(mean_rsd_gen),
+        "sym_cd_gen_std": float(std_rsd_gen),
+        "sym_cd_gt_mean": float(mean_rsd_gt),
+        "sym_cd_gt_std": float(std_rsd_gt),
+    }
+
+    if only_nscd and out_path.exists():
+        try:
+            with open(out_path, "r", encoding="utf-8") as f:
+                out = json.load(f)
+            if "metrics" not in out or not isinstance(out["metrics"], dict):
+                out["metrics"] = {}
+            out["metrics"].update(symmetry_metrics_payload)
+            print(f"[eval] Updated existing evaluation file with NSCD: {out_path}")
+        except Exception as e:
+            print(f"[eval] Could not read existing JSON ({e}); creating fresh file.")
+            out = {
+                "ckpt": str(ckpt_path),
+                "run_dir": str(pathlib.Path(ckpt_path).parent),
+                "num_samples": int(n_eval),
+                "max_points": int(max_points) if max_points is not None else None,
+                "seed": int(used_seed) if used_seed is not None else None,
+                "use_latent_diffusion": bool(use_latent),
+                "metrics": symmetry_metrics_payload,
+            }
+    elif only_nscd:
+        out = {
+            "ckpt": str(ckpt_path),
+            "run_dir": str(pathlib.Path(ckpt_path).parent),
+            "num_samples": int(n_eval),
+            "max_points": int(max_points) if max_points is not None else None,
+            "seed": int(used_seed) if used_seed is not None else None,
+            "use_latent_diffusion": bool(use_latent),
+            "metrics": symmetry_metrics_payload,
+        }
+    else:
+        out = {
+            "ckpt": str(ckpt_path),
+            "run_dir": str(pathlib.Path(ckpt_path).parent),
+            "num_samples": int(n_eval),
+            "max_points": int(max_points) if max_points is not None else None,
+            "seed": int(used_seed) if used_seed is not None else None,
+            "use_latent_diffusion": bool(use_latent),
+            "metrics": {
+                "cd": {
+                    "mean": float(mean_cd),
+                    "values": cd_vals.detach().cpu().tolist() if cd_vals is not None else [],
+                },
+                "emd": {
+                    "mean": float(mean_emd),
+                    "values": emd_vals.detach().cpu().tolist() if emd_vals is not None else [],
+                },
+                **symmetry_metrics_payload,
+                **adv_metrics,
+            },
+        }
+
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)
     print(f"[eval] saved: {out_path}")
+
 
 def parse_args() -> ap.Namespace:
     parser = ap.ArgumentParser(description="Evaluate a trained 3D diffusion model")
@@ -709,6 +885,20 @@ def parse_args() -> ap.Namespace:
                         help="Autoencoder checkpoint (required if use_latent_diffusion=true)")
     parser.add_argument("--compute_emd", action="store_true", help="Compute EMD and pairwise EMD for advanced metrics (1-NN/COV/MMD). Very slow.")
     parser.add_argument("--eval_all", action="store_true", help="Evaluate on the full test split from splits.json")
+    parser.add_argument(
+        "--only_nscd",
+        "--only_ncsd",
+        "--only_symmetry",
+        dest="only_nscd",
+        action="store_true",
+        help="Evaluate ONLY NSCD (Normalized Symmetry Chamfer Distance, Caytuiro & Sipiran 2026). If an evaluation JSON already exists, updates it in-place without recomputing expensive CD/EMD/1-NNA/COV metrics.",
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default=None,
+        help="Optional custom output directory to save/update the eval JSON results.",
+    )
     return parser.parse_args()
 
 
@@ -762,6 +952,8 @@ if __name__ == "__main__":
                     ae_ckpt=args.ae_ckpt,
                     eval_all=args.eval_all,
                     compute_emd=args.compute_emd,
+                    only_nscd=args.only_nscd,
+                    out_dir=args.out_dir,
                 )
                 success_count += 1
             except Exception as e:
@@ -779,7 +971,7 @@ if __name__ == "__main__":
                 print(f"  - {run} : {err}")
         print("=" * 80)
     else:
-        # Single run evaluation (original behavior)
+        # Single run evaluation
         evaluate(
             args.cfg,
             runs_to_eval[0],
@@ -789,4 +981,6 @@ if __name__ == "__main__":
             ae_ckpt=args.ae_ckpt,
             eval_all=args.eval_all,
             compute_emd=args.compute_emd,
+            only_nscd=args.only_nscd,
+            out_dir=args.out_dir,
         )
