@@ -19,7 +19,7 @@ def scale_config(
     time_dim: int = 256,
     num_layers: int = 6,
     num_heads: int = 8,
-    batch_size: int = 128,
+    batch_size: int = 32,
     epochs: int = 1000,
     weight_decay: float = 1e-6,
     warmup_steps: int = 1000,
@@ -41,10 +41,15 @@ def scale_config(
         cfg['model']['num_layers'] = num_layers
         cfg['model']['num_heads'] = num_heads
             
-    # Standardize Training Params
+    # Standardize Training Params (preserve explicit reduced num_points e.g. 1024 equal-cost baseline)
     if 'train' not in cfg:
         cfg['train'] = {}
-    cfg['train']['num_points'] = 2048
+    orig_num_points = cfg['train'].get('num_points', 2048)
+    cfg['train']['num_points'] = (
+        int(orig_num_points)
+        if orig_num_points is not None and int(orig_num_points) < 2048
+        else 2048
+    )
     cfg['train']['amp'] = True
     cfg['train']['amp_dtype'] = 'fp16'
     cfg['train']['batch_size'] = batch_size
@@ -86,7 +91,7 @@ def main():
     parser.add_argument("--time_dim", type=int, default=256, help="Time embedding dimension (default: 256)")
     parser.add_argument("--num_layers", type=int, default=6, help="Number of DiT layers (default: 6)")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads (default: 8)")
-    parser.add_argument("--batch_size", type=int, default=128, help="Batch size (default: 128)")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size (default: 32)")
     parser.add_argument("--epochs", type=int, default=1000, help="Epochs (default: 1000)")
     parser.add_argument("--weight_decay", type=float, default=1e-6, help="Weight decay (default: 1e-6)")
     parser.add_argument("--warmup_steps", type=int, default=1000, help="Warmup steps (default: 1000)")
@@ -102,6 +107,7 @@ def main():
 
     experiment_files = [
         "pointtransformer_dit_baseline.yaml",
+        "pointtransformer_dit_baseline_1024.yaml",
         "pointtransformer_dit_sym_loss.yaml",
         "pointtransformer_dit_sym_noise.yaml",
         "pt_true_joint_no_multiplane_x.yaml",
@@ -158,8 +164,8 @@ def main():
             dst_path = dst_dir / seed_subfolder / fname
             save_yaml(cfg_scaled, dst_path)
 
-    print(f"\nSuccessfully generated 5 seed subfolders (seed_0 to seed_4) in {dst_dir}!")
-    print(f"Total YAML files: {len(args.seeds) * len(experiment_files)} (strictly 8 per seed folder, 0 loose in root)")
+    print(f"\nSuccessfully generated {len(args.seeds)} seed subfolders in {dst_dir}!")
+    print(f"Total YAML files: {len(args.seeds) * len(experiment_files)} (strictly {len(experiment_files)} per seed folder, 0 loose in root)")
 
 if __name__ == '__main__':
     main()

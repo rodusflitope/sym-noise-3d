@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import time
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 
 from src.samplers.ddpm import DDPM_Sampler
 from src.utils.symmetry_planes import normalize_active_planes, normalize_plane, reflect_points, resample_point_cloud
+
+
+def _sync_cuda_if_needed(device: torch.device | str) -> None:
+    if torch.cuda.is_available():
+        dev_str = str(device)
+        if dev_str.startswith("cuda"):
+            torch.cuda.synchronize()
 
 
 class TrueJointSymmetricDDPM_Sampler:
@@ -18,6 +26,7 @@ class TrueJointSymmetricDDPM_Sampler:
         self.alpha_bars = base_sampler.alpha_bars
         self.T = int(self.betas.shape[0])
         self.noise_type = base_sampler.noise_type
+        self.last_timing_info: dict[str, float | int | str] = {}
 
     @torch.no_grad()
     def sample(
@@ -40,6 +49,9 @@ class TrueJointSymmetricDDPM_Sampler:
         presence_threshold = float(joint_cfg.get("presence_threshold", 0.5))
         prune_inactive_planes_on_output = bool(joint_cfg.get("prune_inactive_planes_on_output", True))
         use_iterative_reflection = bool(joint_cfg.get("use_iterative_reflection", False))
+        seam_resample_method = str(joint_cfg.get("seam_resample_method", "fps")).lower()
+        if seam_resample_method not in {"fps", "random"}:
+            seam_resample_method = "fps"
 
         is_half = (geometry_mode == "half")
         num_planes = getattr(model, "num_planes", 1)
@@ -51,6 +63,9 @@ class TrueJointSymmetricDDPM_Sampler:
             N_gen = int((num_points // 2) * buffer_factor)
         else:
             N_gen = num_points
+
+        _sync_cuda_if_needed(device)
+        t_diff_start = time.perf_counter()
 
         if num_planes > 1:
             if self.noise_type is not None:
@@ -73,28 +88,28 @@ class TrueJointSymmetricDDPM_Sampler:
 
         for t in tqdm(reversed(range(self.T)), desc="True Joint DDPM Sampling", total=self.T):
             t_batch = torch.full((num_samples,), t, dtype=torch.long, device=device)
-            
+
             if guided_inference and (is_half or num_planes > 1) and t > 0:
                 with torch.enable_grad():
                     x_t_in = x_t.detach().requires_grad_(True)
                     plane_t_in = plane_t.detach()
-                    
+
                     result = model(x_t=x_t_in, plane_t=plane_t_in, t=t_batch)
                     eps_pred_points = result["eps_points"]
                     eps_pred_plane = result["eps_plane"]
                     if "plane_presence_logits" in result:
                         plane_presence_logits_last = result["plane_presence_logits"].detach()
-                    
+
                     abar = self.alpha_bars[t_batch].view(-1, 1, 1)
                     x0_pred = (x_t_in - torch.sqrt(1.0 - abar) * eps_pred_points) / torch.sqrt(abar)
-                    
+
                     plane_abar = self.alpha_bars[t_batch].view(*([-1] + [1] * (plane_t_in.dim() - 1)))
                     plane_x0_pred = (plane_t_in - torch.sqrt(1.0 - plane_abar) * eps_pred_plane) / torch.sqrt(plane_abar)
                     plane_x0_pred = normalize_active_planes(plane_x0_pred, threshold=inactive_plane_norm_threshold)
-                    
+
                     boundary_frac = float(joint_cfg.get("boundary_frac", 0.05))
                     boundary_margin = float(joint_cfg.get("boundary_margin", 0.01))
-                    
+
                     recon_plane_iter = plane_x0_pred.unsqueeze(1) if plane_x0_pred.dim() == 2 else plane_x0_pred
                     loss_boundary_acc = torch.zeros((), device=x0_pred.device, dtype=x0_pred.dtype)
                     active_plane_count = 0
@@ -111,12 +126,12 @@ class TrueJointSymmetricDDPM_Sampler:
                         weight = active_plane.to(dtype=per_sample.dtype)
                         loss_boundary_acc += (per_sample * weight).sum() / weight.sum().clamp(min=1.0)
                         active_plane_count += 1
-                    
+
                     if active_plane_count > 0:
                         loss = loss_boundary_acc / float(active_plane_count)
                     else:
                         loss = torch.zeros((), device=x0_pred.device, dtype=x0_pred.dtype)
-                    
+
                 if loss > 0:
                     grad_x = torch.autograd.grad(loss, x_t_in)[0]
                     eps_pred_points = eps_pred_points.detach() + guide_scale * torch.sqrt(1.0 - abar) * grad_x
@@ -134,6 +149,9 @@ class TrueJointSymmetricDDPM_Sampler:
             plane_t = self.base_sampler.step_from_eps(plane_t, eps_pred_plane, t)
             if renormalize_planes and (t % plane_renorm_every == 0 or t == 0):
                 plane_t = normalize_active_planes(plane_t, threshold=inactive_plane_norm_threshold)
+
+        _sync_cuda_if_needed(device)
+        t_post_start = time.perf_counter()
 
         x0 = x_t.clamp(-2, 2)
         plane_final = plane_t
@@ -159,11 +177,11 @@ class TrueJointSymmetricDDPM_Sampler:
                 plane_iter = plane_final.unsqueeze(1)
             else:
                 plane_iter = plane_final
-                
+
             for b in range(num_samples):
                 pts_list = [x0[b]]
                 p_batch = plane_iter[b].clone() # Clone to not mutate the original tensor in-place
-                
+
                 unique_planes = []
                 for p_idx in range(p_batch.shape[0]):
                     if use_presence_for_reflection and presence_probs_final is not None and presence_probs_final.dim() == 2:
@@ -172,9 +190,9 @@ class TrueJointSymmetricDDPM_Sampler:
                     p_curr = p_batch[p_idx]
                     magnitude = torch.norm(p_curr[:3])
                     if magnitude < reflection_plane_norm_threshold:
-                        continue 
+                        continue
                     p_curr = normalize_plane(p_curr)
-                    
+
                     is_duplicate = False
                     for p_uniq in unique_planes:
                         dot = torch.abs(torch.dot(p_curr[:3], p_uniq[:3]))
@@ -184,7 +202,7 @@ class TrueJointSymmetricDDPM_Sampler:
                             break
                     if not is_duplicate:
                         unique_planes.append(p_curr)
-                
+
                 pts = x0[b]
                 filter_seam = bool(joint_cfg.get("filter_seam_before_reflection", True))
                 if filter_seam and len(unique_planes) > 0:
@@ -202,22 +220,32 @@ class TrueJointSymmetricDDPM_Sampler:
                     for p_curr in unique_planes:
                         reflected = [reflect_points(p.unsqueeze(0), p_curr.unsqueeze(0)).squeeze(0) for p in pts_list]
                         pts_list = pts_list + reflected
-                    
-                    x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points, method="fps")
+
+                    x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points, method=seam_resample_method)
                     x0_full_list.append(x0_b_full)
                 else:
                     from src.utils.symmetry_planes import calculate_group_closure_matrices
                     unique_matrices = calculate_group_closure_matrices(unique_planes, dtype=x0.dtype, device=x0.device)
-                            
+
                     homo_points = torch.cat([pts, torch.ones((pts.shape[0], 1), dtype=pts.dtype, device=pts.device)], dim=-1)
                     M_stacked = torch.stack(unique_matrices)
                     transformed = torch.einsum('ni, gji -> gnj', homo_points, M_stacked)[..., :3]
-                        
-                    x0_b_full = resample_point_cloud(transformed.reshape(-1, 3), num_points, method="fps")
+
+                    x0_b_full = resample_point_cloud(transformed.reshape(-1, 3), num_points, method=seam_resample_method)
                     x0_full_list.append(x0_b_full)
             x0_full = torch.stack(x0_full_list, dim=0)
         else:
             x0_full = x0
+
+        _sync_cuda_if_needed(device)
+        t_end = time.perf_counter()
+        self.last_timing_info = {
+            "diffusion_time_s": float(t_post_start - t_diff_start),
+            "postprocess_time_s": float(t_end - t_post_start),
+            "total_time_s": float(t_end - t_diff_start),
+            "n_gen": int(N_gen),
+            "seam_resample_method": seam_resample_method,
+        }
 
         if return_plane:
             return x0_full, plane_final
@@ -240,13 +268,16 @@ class TrueJointSymmetricDDPM_Sampler:
         reflection_plane_norm_threshold = float(joint_cfg.get("reflection_plane_norm_threshold", 0.5))
         prune_inactive_planes_on_output = bool(joint_cfg.get("prune_inactive_planes_on_output", True))
         use_iterative_reflection = bool(joint_cfg.get("use_iterative_reflection", False))
+        seam_resample_method = str(joint_cfg.get("seam_resample_method", "fps")).lower()
+        if seam_resample_method not in {"fps", "random"}:
+            seam_resample_method = "fps"
 
         is_half = (geometry_mode == "half")
         num_planes = target_planes.shape[1] if target_planes.dim() > 2 else 1
-        
+
         active_planes_count = (target_planes[0, ..., :3].norm(dim=-1) > 1e-5).sum().item() if target_planes.dim() > 2 else (target_planes[0, :3].norm(dim=-1) > 1e-5).sum().item()
         return_fundamental_domain = bool(cfg.get("data", {}).get("return_fundamental_domain", False))
-        
+
         if is_half or return_fundamental_domain:
             filter_seam = bool(joint_cfg.get("filter_seam_before_reflection", True))
             buffer_factor = float(joint_cfg.get("half_buffer_factor", 1.15)) if filter_seam else 1.0
@@ -261,44 +292,44 @@ class TrueJointSymmetricDDPM_Sampler:
         else:
             x_t = torch.randn(num_samples, N_gen, 3, device=device)
             plane_t = torch.randn_like(target_planes)
-            
+
         # Zero out inactive slots right from the start!
         active_mask = (target_planes[..., :3].norm(dim=-1) > 1e-5).unsqueeze(-1)
         plane_t = plane_t * active_mask
 
         for t in tqdm(reversed(range(self.T)), desc="Fixed Plane Sampling", total=self.T):
             t_batch = torch.full((num_samples,), t, dtype=torch.long, device=device)
-            
+
             result = model(x_t=x_t, plane_t=plane_t, t=t_batch)
             eps_pred_points = result["eps_points"]
-            
+
             cfg_scale = float(cfg.get("sampler", {}).get("cfg_scale", 1.0))
             if cfg_scale > 1.0:
                 uncond_plane = torch.zeros_like(plane_t)
                 result_uncond = model(x_t=x_t, plane_t=uncond_plane, t=t_batch)
                 eps_uncond = result_uncond["eps_points"]
                 eps_pred_points = eps_uncond + cfg_scale * (eps_pred_points - eps_uncond)
-            
+
             x_t = self.base_sampler.step_from_eps(x_t, eps_pred_points, t)
-            
+
             if t > 0:
                 alpha_t = self.alphas[t]
                 abar_t = self.alpha_bars[t]
                 abar_t_prev = self.alpha_bars[t-1]
                 beta_t = self.betas[t]
-                
+
                 w_t = torch.sqrt(alpha_t) * (1.0 - abar_t_prev) / (1.0 - abar_t)
                 w_0 = torch.sqrt(abar_t_prev) * beta_t / (1.0 - abar_t)
-                
+
                 posterior_mean = w_t * plane_t + w_0 * target_planes
-                
+
                 posterior_variance = beta_t * (1.0 - abar_t_prev) / (1.0 - abar_t)
                 noise = torch.randn_like(plane_t)
-                
+
                 plane_t = posterior_mean + torch.sqrt(posterior_variance) * noise
             else:
                 plane_t = target_planes
-                
+
             plane_t = plane_t * active_mask
 
         x0 = x_t.clamp(-2, 2)
@@ -309,28 +340,28 @@ class TrueJointSymmetricDDPM_Sampler:
             else:
                 active_mask = torch.norm(plane_final[..., :3], dim=-1) >= reflection_plane_norm_threshold
             plane_final = torch.where(active_mask.unsqueeze(-1), plane_final, torch.zeros_like(plane_final))
-        
+
         return_fundamental_only = getattr(self, 'return_fundamental_only', False)
         return_fundamental_domain = bool(cfg.get("data", {}).get("return_fundamental_domain", False))
-        
+
         if (is_half or return_fundamental_domain) and not return_fundamental_only:
             x0_full_list = []
             if plane_final.dim() == 2:
                 plane_iter = plane_final.unsqueeze(1)
             else:
                 plane_iter = plane_final
-                
+
             for b in range(num_samples):
                 pts_list = [x0[b]]
                 p_batch = plane_iter[b]
-                
+
                 unique_planes = []
                 for p_idx in range(p_batch.shape[0]):
                     p_curr = p_batch[p_idx]
                     if torch.norm(p_curr[:3]) < reflection_plane_norm_threshold:
                         continue
                     p_curr = normalize_plane(p_curr)
-                        
+
                     is_duplicate = False
                     for p_uniq in unique_planes:
                         dot = torch.abs(torch.dot(p_curr[:3], p_uniq[:3]))
@@ -340,7 +371,7 @@ class TrueJointSymmetricDDPM_Sampler:
                             break
                     if not is_duplicate:
                         unique_planes.append(p_curr)
-                
+
                 pts = x0[b]
                 filter_seam = bool(joint_cfg.get("filter_seam_before_reflection", True))
                 if filter_seam and len(unique_planes) > 0:
@@ -358,18 +389,18 @@ class TrueJointSymmetricDDPM_Sampler:
                     for p_curr in unique_planes:
                         reflected = [reflect_points(p.unsqueeze(0), p_curr.unsqueeze(0)).squeeze(0) for p in pts_list]
                         pts_list = pts_list + reflected
-                        
-                    x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points, method="fps")
+
+                    x0_b_full = resample_point_cloud(torch.cat(pts_list, dim=0), num_points, method=seam_resample_method)
                     x0_full_list.append(x0_b_full)
                 else:
                     from src.utils.symmetry_planes import calculate_group_closure_matrices
                     unique_matrices = calculate_group_closure_matrices(unique_planes, dtype=x0.dtype, device=x0.device)
-                            
+
                     homo_points = torch.cat([pts, torch.ones((pts.shape[0], 1), dtype=pts.dtype, device=pts.device)], dim=-1)
                     M_stacked = torch.stack(unique_matrices)
                     transformed = torch.einsum('ni, gji -> gnj', homo_points, M_stacked)[..., :3]
-                        
-                    x0_b_full = resample_point_cloud(transformed.reshape(-1, 3), num_points, method="fps")
+
+                    x0_b_full = resample_point_cloud(transformed.reshape(-1, 3), num_points, method=seam_resample_method)
                     x0_full_list.append(x0_b_full)
             x0_full = torch.stack(x0_full_list, dim=0)
         else:

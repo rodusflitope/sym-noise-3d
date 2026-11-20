@@ -46,19 +46,20 @@ def square_distance(src, dst):
     dist += torch.sum(src ** 2, -1).view(B, N, 1)
 
     dist += torch.sum(dst ** 2, -1).view(B, 1, M)
-    
-    return dist
+
+    return torch.clamp(dist, min=0.0)
+
 
 def chamfer_distance(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     x = _ensure_bnc3(x, name="x")
     y = _ensure_bnc3(y, name="y")
 
-    dist_sq = square_distance(x, y) 
+    dist_sq = square_distance(x, y)
 
     min_dist_x_to_y = torch.min(dist_sq, dim=2)[0]
 
     min_dist_y_to_x = torch.min(dist_sq, dim=1)[0]
-    
+
     return torch.mean(min_dist_x_to_y, dim=1) + torch.mean(min_dist_y_to_x, dim=1)
 
 
@@ -103,14 +104,14 @@ def earth_movers_distance(
     emd_vals = []
     x_np = x.detach().cpu().numpy()
     y_np = y.detach().cpu().numpy()
-    
+
     for b in range(B):
         cost = torch.cdist(x[b:b+1], y[b:b+1], p=2).squeeze(0) ** 2
         cost_cpu = cost.cpu().numpy()
         row_ind, col_ind = linear_sum_assignment(cost_cpu)
         total_cost = cost_cpu[row_ind, col_ind].mean()
         emd_vals.append(total_cost)
-        
+
     return torch.tensor(emd_vals, device=x.device, dtype=x.dtype)
 
 
@@ -118,13 +119,17 @@ def reflection_symmetry_distance(
     x: torch.Tensor,
     axis: int = 0,
     per_sample: bool = False,
+    center: bool = True,
 ) -> torch.Tensor:
     x = _ensure_bnc3(x, name="x")
-    centroid = x.mean(dim=1, keepdim=True)
-    x_centered = x - centroid
-    x_reflected = x_centered.clone()
+    if center:
+        centroid = x.mean(dim=1, keepdim=True)
+        x_eval = x - centroid
+    else:
+        x_eval = x
+    x_reflected = x_eval.clone()
     x_reflected[:, :, axis] = -x_reflected[:, :, axis]
-    cd = chamfer_distance(x_centered, x_reflected)
+    cd = chamfer_distance(x_eval, x_reflected)
     if per_sample:
         return cd
     return cd.mean()
@@ -149,13 +154,14 @@ def compute_nscd(
     axis: int = 0,
     eps: float = 1e-12,
     per_sample: bool = True,
+    center: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Computes Sym-CD and Normalized Symmetry Chamfer Distance (NSCD) based on
-    Caytuiro & Sipiran (2024 / 2026):
-        NSCD(X) = Sym-CD(X) / diag(X)^2
+    Caytuiro & Sipiran (Computers & Graphics 2026, Eq. 1-2):
+        NSCD(X) = CD(X, R_axis(X)) / diag(X)^2
     where:
-        Sym-CD(X) = d_CD(X - c, R_axis(X - c))
+        CD(X, Y) = (1/|X|) sum min ||x-y||_2^2 + (1/|Y|) sum min ||y-x||_2^2
         diag(X)^2 = ||max_i x_i - min_i x_i||_2^2
     Returns:
         sym_cd: [B]
@@ -163,7 +169,7 @@ def compute_nscd(
         nscd: [B]
     """
     x = _ensure_bnc3(x, name="x_nscd")
-    sym_cd = reflection_symmetry_distance(x, axis=axis, per_sample=True)
+    sym_cd = reflection_symmetry_distance(x, axis=axis, per_sample=True, center=center)
     diag_sq = compute_aabb_diagonal_sq(x)
     nscd = sym_cd / torch.clamp(diag_sq, min=eps)
     if not per_sample:
@@ -183,19 +189,13 @@ def _batched_chamfer_pairwise(
     Bx, N, _ = x_batch.shape
     By, M, _ = y_batch.shape
 
-    # Expand for pairwise: [Bx, 1, N, 3] vs [1, By, M, 3] -> we process per x_i
-    # For memory efficiency, tile x one-at-a-time but vectorize over all y
-    # Actually, we can do better: compute all at once if memory allows
-    # x_exp: [Bx*By, N, 3], y_exp: [Bx*By, M, 3]
     if Bx * By * N * M < 500_000_000:  # ~2GB for fp32, safe for most GPUs
         x_exp = x_batch.unsqueeze(1).expand(Bx, By, N, 3).reshape(Bx * By, N, 3)
         y_exp = y_batch.unsqueeze(0).expand(Bx, By, M, 3).reshape(Bx * By, M, 3)
-        # Use torch.cdist for efficient batched pairwise distances
         dists_sq = torch.cdist(x_exp, y_exp, p=2.0).pow(2)  # [Bx*By, N, M]
         cd = dists_sq.min(dim=2)[0].mean(dim=1) + dists_sq.min(dim=1)[0].mean(dim=1)  # [Bx*By]
         return cd.reshape(Bx, By)
     else:
-        # Fallback: iterate over x_batch but still vectorize over y_batch
         results = []
         for k in range(Bx):
             x_k = x_batch[k].unsqueeze(0).expand(By, -1, -1)  # [By, N, 3]
@@ -206,9 +206,9 @@ def _batched_chamfer_pairwise(
 
 
 def compute_pairwise_dist_batch(
-    x: torch.Tensor, 
-    y: torch.Tensor, 
-    batch_size: int = 32, 
+    x: torch.Tensor,
+    y: torch.Tensor,
+    batch_size: int = 32,
     use_emd: bool = False,
     desc: str = "Pairwise Dist",
     emd_max_points: Optional[int] = None,
@@ -227,32 +227,30 @@ def compute_pairwise_dist_batch(
         if M_pts > emd_max_points:
             idx = torch.randperm(M_pts, device=y.device)[:emd_max_points]
             y = y[:, idx, :]
-    
+
     N_samples = x.shape[0]
     M_samples = y.shape[0]
     dist_mat = torch.zeros((N_samples, M_samples), device=x.device, dtype=x.dtype)
 
     loss_fn = None
     if use_emd and GEOMLOSS_AVAILABLE:
-        # scaling=0.7 for pairwise: fewer Sinkhorn iters, ~2-3x faster
         loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.05, scaling=0.7, backend="tensorized")
 
     import math
     num_batches_x = math.ceil(N_samples / batch_size)
     num_batches_y = math.ceil(M_samples / batch_size)
     total_iters = num_batches_x * num_batches_y
-    
+
     pbar = tqdm(total=total_iters, desc=desc, leave=False)
 
     for i in range(0, N_samples, batch_size):
         x_batch = x[i : i + batch_size]
-        
+
         for j in range(0, M_samples, batch_size):
             y_batch = y[j : j + batch_size]
             bx = x_batch.shape[0]
-            
+
             if use_emd:
-                # EMD: vectorize over y_batch for each x_i
                 for k in range(bx):
                     x_k_expanded = x_batch[k].unsqueeze(0).expand(y_batch.shape[0], -1, -1).contiguous()
                     if loss_fn:
@@ -261,11 +259,10 @@ def compute_pairwise_dist_batch(
                         dists = earth_movers_distance(x_k_expanded, y_batch)
                     dist_mat[i+k, j : j + y_batch.shape[0]] = dists
             else:
-                # CD: fully vectorized via broadcasting
                 cd_block = _batched_chamfer_pairwise(x_batch, y_batch)
                 dist_mat[i : i + bx, j : j + y_batch.shape[0]] = cd_block
             pbar.update(1)
-            
+
     pbar.close()
 
     return dist_mat
@@ -279,18 +276,18 @@ def _compute_stats_from_matrices(d_gg: torch.Tensor, d_rr: torch.Tensor, d_gr: t
     min_dist_gen_to_ref, nearest_ref_indices = d_gr.min(dim=1)
     unique_ref_covered = torch.unique(nearest_ref_indices)
     cov = float(len(unique_ref_covered)) / float(d_rr.shape[0])
-    
+
     d_gg_c = d_gg.clone()
     d_rr_c = d_rr.clone()
     d_gg_c.fill_diagonal_(float("inf"))
     d_rr_c.fill_diagonal_(float("inf"))
-    
+
     top_row = torch.cat([d_gg_c, d_gr], dim=1)
     bot_row = torch.cat([d_gr.t(), d_rr_c], dim=1)
     full_mat = torch.cat([top_row, bot_row], dim=0)
 
     nearest_idx = full_mat.argmin(dim=1)
-    
+
     N = d_gg.shape[0]
 
     gen_nearest_is_gen = (nearest_idx[:N] < N).float().mean()
@@ -298,7 +295,7 @@ def _compute_stats_from_matrices(d_gg: torch.Tensor, d_rr: torch.Tensor, d_gr: t
     ref_nearest_is_ref = (nearest_idx[N:] >= N).float().mean()
 
     one_nna = (gen_nearest_is_gen + ref_nearest_is_ref) / 2.0
-    
+
     return {
         "1-NNA": one_nna.item(),
         "COV": cov,
@@ -307,8 +304,8 @@ def _compute_stats_from_matrices(d_gg: torch.Tensor, d_rr: torch.Tensor, d_gr: t
 
 
 def compute_all_metrics(
-    gen: torch.Tensor, 
-    gt: torch.Tensor, 
+    gen: torch.Tensor,
+    gt: torch.Tensor,
     batch_size: int = 32,
     metrics_list: List[str] = ["cd"],
     emd_max_points: int = 512,
@@ -316,24 +313,24 @@ def compute_all_metrics(
 
     gen = _ensure_bnc3(gen, name="gen")
     gt = _ensure_bnc3(gt, name="gt")
-    
+
     results = {}
-    
+
     for metric_name in metrics_list:
         m_type = metric_name.lower()
         use_emd = (m_type == "emd")
         suffix = m_type.upper()
-        
+
         pts_info = f" (subsampled to {emd_max_points} pts)" if use_emd and emd_max_points else ""
         print(f"[metrics] Computing pairwise matrix for {suffix}{pts_info}...")
 
         d_gg = compute_pairwise_dist_batch(gen, gen, batch_size, use_emd, desc=f"{suffix} Gen-Gen", emd_max_points=emd_max_points if use_emd else None)
         d_rr = compute_pairwise_dist_batch(gt, gt, batch_size, use_emd, desc=f"{suffix} Ref-Ref", emd_max_points=emd_max_points if use_emd else None)
         d_gr = compute_pairwise_dist_batch(gen, gt, batch_size, use_emd, desc=f"{suffix} Gen-Ref", emd_max_points=emd_max_points if use_emd else None)
-        
+
         stats = _compute_stats_from_matrices(d_gg, d_rr, d_gr)
-        
+
         for key, val in stats.items():
             results[f"{key}-{suffix}"] = val
-            
+
     return results

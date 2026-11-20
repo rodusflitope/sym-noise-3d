@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse as ap
+import copy
 import json
 import os
 import pathlib
+import time
 import torch
 from typing import Optional
 
@@ -43,6 +45,30 @@ from src.utils.symmetry_planes import (
     reconstruct_from_fundamental_domain,
     resample_point_cloud,
 )
+
+
+SEAM_MODE_PRESETS: dict[str, dict[str, object]] = {
+    "raw": {
+        "filter_seam_before_reflection": False,
+        "seam_resample_method": "random",
+        "half_buffer_factor": 1.0,
+    },
+    "clip": {
+        "filter_seam_before_reflection": True,
+        "seam_resample_method": "random",
+        "half_buffer_factor": 1.15,
+    },
+    "fps": {
+        "filter_seam_before_reflection": False,
+        "seam_resample_method": "fps",
+        "half_buffer_factor": 1.0,
+    },
+    "clip_fps": {
+        "filter_seam_before_reflection": True,
+        "seam_resample_method": "fps",
+        "half_buffer_factor": 1.15,
+    },
+}
 
 
 def load_checkpoint(model: torch.nn.Module, path: str, device: torch.device, *, prefer_ema: bool = False) -> None:
@@ -149,6 +175,7 @@ def _samples_cache_path(
     n_eval: int,
     seed: Optional[int],
     eval_all: bool,
+    seam_mode: str = "default",
 ) -> pathlib.Path:
     """Build path for cached generated samples: <run_dir>/cached_samples/<tag>.pt"""
     run_dir = pathlib.Path(ckpt_path).parent
@@ -160,18 +187,21 @@ def _samples_cache_path(
         tag += f"_seed{int(seed)}"
     if eval_all:
         tag += "_evalall"
+    if seam_mode and seam_mode != "default":
+        tag += f"_seam_{_safe_tag(seam_mode)}"
     return cache_dir / f"{tag}.pt"
 
 
-def _find_existing_eval_json(
+def _build_eval_tag(
     ckpt_path: str,
     n_eval: int,
     max_points: Optional[int],
     seed: Optional[int],
     use_latent: bool,
-) -> Optional[pathlib.Path]:
-    repo_root = _get_repo_root()
-    run_name = pathlib.Path(ckpt_path).parent.name
+    seam_mode: str = "default",
+    gt_num_points: Optional[int] = None,
+    gen_num_points: Optional[int] = None,
+) -> str:
     ckpt_stem = pathlib.Path(ckpt_path).stem
     tag = f"{_safe_tag(ckpt_stem)}_n{int(n_eval)}"
     if max_points is not None and int(max_points) > 0:
@@ -180,6 +210,29 @@ def _find_existing_eval_json(
         tag += f"_seed{int(seed)}"
     if use_latent:
         tag += "_latent"
+    if seam_mode and seam_mode != "default":
+        tag += f"_seam_{_safe_tag(seam_mode)}"
+    if gt_num_points is not None and gen_num_points is not None and int(gt_num_points) != int(gen_num_points):
+        tag += f"_gt{int(gt_num_points)}"
+    return tag
+
+
+def _find_existing_eval_json(
+    ckpt_path: str,
+    n_eval: int,
+    max_points: Optional[int],
+    seed: Optional[int],
+    use_latent: bool,
+    seam_mode: str = "default",
+    gt_num_points: Optional[int] = None,
+    gen_num_points: Optional[int] = None,
+) -> Optional[pathlib.Path]:
+    repo_root = _get_repo_root()
+    run_name = pathlib.Path(ckpt_path).parent.name
+    tag = _build_eval_tag(
+        ckpt_path, n_eval, max_points, seed, use_latent,
+        seam_mode=seam_mode, gt_num_points=gt_num_points, gen_num_points=gen_num_points,
+    )
 
     # 1. Search under repo_root / "evals"
     evals_dir = repo_root / "evals"
@@ -204,15 +257,14 @@ def _eval_out_path(
     seed: Optional[int],
     use_latent: bool,
     custom_out_dir: Optional[str] = None,
+    seam_mode: str = "default",
+    gt_num_points: Optional[int] = None,
+    gen_num_points: Optional[int] = None,
 ) -> pathlib.Path:
-    ckpt_stem = pathlib.Path(ckpt_path).stem
-    tag = f"{_safe_tag(ckpt_stem)}_n{int(n_eval)}"
-    if max_points is not None and int(max_points) > 0:
-        tag += f"_mp{int(max_points)}"
-    if seed is not None:
-        tag += f"_seed{int(seed)}"
-    if use_latent:
-        tag += "_latent"
+    tag = _build_eval_tag(
+        ckpt_path, n_eval, max_points, seed, use_latent,
+        seam_mode=seam_mode, gt_num_points=gt_num_points, gen_num_points=gen_num_points,
+    )
 
     if custom_out_dir:
         out_dir = pathlib.Path(custom_out_dir)
@@ -220,7 +272,10 @@ def _eval_out_path(
         return out_dir / f"{tag}.json"
 
     # Search for an existing evaluation file to update
-    existing = _find_existing_eval_json(ckpt_path, n_eval, max_points, seed, use_latent)
+    existing = _find_existing_eval_json(
+        ckpt_path, n_eval, max_points, seed, use_latent,
+        seam_mode=seam_mode, gt_num_points=gt_num_points, gen_num_points=gen_num_points,
+    )
     if existing is not None:
         return existing
 
@@ -245,6 +300,9 @@ def evaluate(
     only_nscd: bool = False,
     only_symmetry: bool = False,
     out_dir: Optional[str] = None,
+    seam_mode: str = "default",
+    gt_num_points: Optional[int] = None,
+    force_resample: bool = False,
 ) -> None:
     only_nscd = bool(only_nscd or only_symmetry)
     ckpt_path = _resolve_ckpt_path(ckpt_path)
@@ -261,11 +319,22 @@ def evaluate(
             "Pass explicit --cfg or use a checkpoint that has metadata/config or training_history.json in its directory."
         )
 
+    cfg = copy.deepcopy(cfg)
+    seam_mode = str(seam_mode or "default").lower()
+    if seam_mode != "default":
+        if seam_mode not in SEAM_MODE_PRESETS:
+            raise ValueError(f"[eval] Unknown --seam_mode '{seam_mode}'. Expected one of: default, {', '.join(SEAM_MODE_PRESETS.keys())}")
+        if "joint_symmetry" not in cfg or cfg["joint_symmetry"] is None:
+            cfg["joint_symmetry"] = {}
+        cfg["joint_symmetry"].update(SEAM_MODE_PRESETS[seam_mode])
+        print(f"[eval] Applied --seam_mode={seam_mode}: {SEAM_MODE_PRESETS[seam_mode]}")
+
     used_seed = seed if seed is not None else cfg.get("seed")
     set_seed(used_seed)
     device = get_device(cfg.get("device", "auto"))
 
     num_points = int(cfg["train"]["num_points"])
+    eval_gt_num_points = int(gt_num_points) if gt_num_points is not None else num_points
     use_latent = bool(cfg.get("use_latent_diffusion", False))
 
     data_cfg = cfg.get("data", {})
@@ -286,15 +355,15 @@ def evaluate(
         from torch.utils.data import Subset
         ckpt_dir = pathlib.Path(ckpt_path).parent
         splits_path = ckpt_dir / "splits.json"
-        
+
         full_ds = ShapeNetDataset(
             root_dir=root_dir,
-            num_points=num_points,
+            num_points=eval_gt_num_points,
             max_models=None,
             categories=data_cfg.get("categories", None),
             augment=False,
         )
-        
+
         test_indices = []
         if splits_path.exists():
             try:
@@ -305,7 +374,7 @@ def evaluate(
             except Exception as e:
                 print(f"[eval] Error loading splits.json: {e}. Falling back to manual splitting.")
                 splits_path = None
-                
+
         if not splits_path or not splits_path.exists():
             n = len(full_ds)
             val_frac = float(data_cfg.get("val_frac", 0.1))
@@ -318,13 +387,13 @@ def evaluate(
             perm = torch.randperm(n, generator=g).tolist()
             test_indices = perm[n_train + n_val :]
             print(f"[eval] Calculated {len(test_indices)} test indices manually.")
-            
+
         ds = Subset(full_ds, test_indices)
         n_eval = len(ds)
     else:
         ds = ShapeNetDataset(
             root_dir=root_dir,
-            num_points=num_points,
+            num_points=eval_gt_num_points,
             max_models=num_samples,
             categories=data_cfg.get("categories", None),
             augment=False,
@@ -340,8 +409,9 @@ def evaluate(
     batch_size_eval = int(cfg.get("eval", {}).get("batch_size", cfg.get("train", {}).get("batch_size", 16)))
 
     # ── Sample caching ──────────────────────────────────────────────────
-    cache_path = _samples_cache_path(ckpt_path, n_eval, used_seed, eval_all)
-    if cache_path.exists():
+    cache_path = _samples_cache_path(ckpt_path, n_eval, used_seed, eval_all, seam_mode=seam_mode)
+    inference_efficiency: Optional[dict[str, object]] = None
+    if cache_path.exists() and not force_resample:
         print(f"[eval] Loading cached samples from {cache_path}")
         samples = torch.load(cache_path, map_location="cpu", weights_only=True)
         print(f"[eval]   shape={tuple(samples.shape)}, dtype={samples.dtype}")
@@ -356,13 +426,21 @@ def evaluate(
         noise_type = build_noise_type(cfg)
         sampler = build_sampler(cfg, betas, alphas, alpha_bars, noise_type=noise_type)
 
+        if torch.cuda.is_available() and device.type == "cuda":
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats(device)
+        infer_start_t = time.perf_counter()
+        total_diff_s = 0.0
+        total_post_s = 0.0
+        has_split_timing = False
+
         # ── Generate samples (needs model on GPU) ──────────────────────
         all_samples = []
         with torch.no_grad():
             for i in range(0, n_eval, batch_size_eval):
                 curr_n = min(batch_size_eval, n_eval - i)
                 print(f"[eval] Generating samples {i+1} to {i+curr_n} of {n_eval}...")
-                
+
                 if isinstance(model, (PVCNNSymLearnedPlane, PTSymLearnedPlane)) and not use_latent:
                     sym_sampler = SymmetricDDPM_Sampler(sampler)
                     curr_samples = sym_sampler.sample(model, num_samples=curr_n, num_points=num_points, device=device).detach()
@@ -387,6 +465,10 @@ def evaluate(
                         device=device,
                         alpha_bars=alpha_bars,
                     ).detach()
+                    if true_joint_sampler.last_timing_info:
+                        has_split_timing = True
+                        total_diff_s += float(true_joint_sampler.last_timing_info.get("diffusion_time_s", 0.0))
+                        total_post_s += float(true_joint_sampler.last_timing_info.get("postprocess_time_s", 0.0))
                 elif isinstance(model, PointTransformerSymClassDiT) and not use_latent:
                     data_cfg = cfg.get("data", {}) or {}
                     sampler_cfg = cfg.get("sampler", {}) or {}
@@ -408,7 +490,7 @@ def evaluate(
                     ae_ckpt_resolved = ae_ckpt or os.getenv("AE_CHECKPOINT", None)
                     if not ae_ckpt_resolved:
                         raise ValueError("Eval in latent mode requires --ae_ckpt or AE_CHECKPOINT in environment.")
-    
+
                     ae_cfg = cfg.get("autoencoder", {})
                     ae_type = str(ae_cfg.get("type", "point_mlp")).lower()
                     if ae_type in {"lion", "lion_pvcnn"}:
@@ -445,16 +527,16 @@ def evaluate(
                         ae = PointAutoencoder(num_points=num_points, hidden_dim=ae_hidden_dim, latent_dim=latent_dim_cfg).to(device)
                     else:
                         raise ValueError(f"Unknown autoencoder.type: {ae_type}")
-    
+
                     load_checkpoint(ae, ae_ckpt_resolved, device)
                     ae.eval()
-    
+
                     is_lion_two_priors = bool(isinstance(model, LionTwoPriorsDDM))
                     if is_lion_two_priors:
                         ae_ok_types = (LionAutoencoder,)
                         if not isinstance(ae, ae_ok_types):
                             raise ValueError("lion_priors requires an autoencoder compatible with LionTwoPriorsDDM")
-    
+
                     if not is_lion_two_priors:
                         if hasattr(ae, "latent_dim_total"):
                             latent_dim = int(getattr(ae, "latent_dim_total"))
@@ -462,40 +544,40 @@ def evaluate(
                             latent_dim = int(getattr(ae, "latent_dim"))
                         else:
                             raise ValueError("Autoencoder does not expose latent dimensionality")
-    
+
                     T = betas.shape[0]
                     sampler_name = cfg["sampler"].get("name", "ddpm").lower()
-    
+
                     if is_lion_two_priors:
                         style_dim = int(ae.global_latent_dim)
                         local_dim = int(ae.local_flat_dim)
-    
+
                         if noise_type is not None:
                             z_t = noise_type.sample((curr_n, style_dim), device)
                             h_t = noise_type.sample((curr_n, local_dim), device)
                         else:
                             z_t = torch.randn(curr_n, style_dim, device=device)
                             h_t = torch.randn(curr_n, local_dim, device=device)
-    
+
                         class _ZWrapper(torch.nn.Module):
                             def __init__(self, inner: LionTwoPriorsDDM):
                                 super().__init__()
                                 self.inner = inner
-    
+
                             def forward(self, x: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
                                 return self.inner.ddm_z(x, t_batch)
-    
+
                         class _HCondWrapper(torch.nn.Module):
                             def __init__(self, inner: LionTwoPriorsDDM, z0_cond: torch.Tensor):
                                 super().__init__()
                                 self.inner = inner
                                 self.z0_cond = z0_cond
-    
+
                             def forward(self, x: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
                                 return self.inner.ddm_h(x, self.z0_cond, t_batch)
-    
+
                         z_model = _ZWrapper(model)
-    
+
                         if sampler_name == "ddpm":
                             for t in reversed(range(T)):
                                 z_t = _sampler_step(sampler, z_model, z_t, t)
@@ -509,10 +591,10 @@ def evaluate(
                                 z_t = _sampler_step(sampler, z_model, z_t, t, t_prev)
                         else:
                             raise ValueError(f"Sampler not supported: {sampler_name}")
-    
+
                         z0 = z_t
                         h_model = _HCondWrapper(model, z0)
-    
+
                         if sampler_name == "ddpm":
                             for t in reversed(range(T)):
                                 h_t = _sampler_step(sampler, h_model, h_t, t)
@@ -526,14 +608,14 @@ def evaluate(
                                 h_t = _sampler_step(sampler, h_model, h_t, t, t_prev)
                         else:
                             raise ValueError(f"Sampler not supported: {sampler_name}")
-    
+
                         curr_samples = ae.decode_split(z0, h_t).detach()
                     else:
                         if noise_type is not None:
                             z_t = noise_type.sample((curr_n, latent_dim), device)
                         else:
                             z_t = torch.randn(curr_n, latent_dim, device=device)
-    
+
                         if sampler_name == "ddpm":
                             for t in reversed(range(T)):
                                 z_t = _sampler_step(sampler, model, z_t, t)
@@ -547,10 +629,44 @@ def evaluate(
                                 z_t = _sampler_step(sampler, model, z_t, t, t_prev)
                         else:
                             raise ValueError(f"Sampler not supported: {sampler_name}")
-    
+
                         curr_samples = ae.decode(z_t).detach()
-                
+
                 all_samples.append(curr_samples)
+
+        if torch.cuda.is_available() and device.type == "cuda":
+            torch.cuda.synchronize()
+            peak_alloc_mb = float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+            peak_res_mb = float(torch.cuda.max_memory_reserved(device) / (1024 ** 2))
+        else:
+            peak_alloc_mb = 0.0
+            peak_res_mb = 0.0
+        infer_total_s = float(time.perf_counter() - infer_start_t)
+        ms_per_sample = (infer_total_s * 1000.0) / max(1, n_eval)
+        shapes_per_sec = n_eval / max(infer_total_s, 1e-9)
+
+        inference_efficiency = {
+            "total_time_s": infer_total_s,
+            "ms_per_sample": ms_per_sample,
+            "shapes_per_sec": shapes_per_sec,
+            "num_samples": int(n_eval),
+            "batch_size": int(batch_size_eval),
+            "peak_vram_allocated_mb": peak_alloc_mb,
+            "peak_vram_reserved_mb": peak_res_mb,
+            "seam_mode": seam_mode,
+        }
+        if has_split_timing:
+            inference_efficiency["diffusion_time_s"] = total_diff_s
+            inference_efficiency["postprocess_time_s"] = total_post_s
+            inference_efficiency["diffusion_ms_per_sample"] = (total_diff_s * 1000.0) / max(1, n_eval)
+            inference_efficiency["postprocess_ms_per_sample"] = (total_post_s * 1000.0) / max(1, n_eval)
+
+        print(
+            f"[eval] Inference efficiency: total={infer_total_s:.2f}s | "
+            f"{ms_per_sample:.1f} ms/shape ({shapes_per_sec:.2f} shapes/s) | "
+            f"Peak VRAM alloc={peak_alloc_mb:.1f} MB, reserved={peak_res_mb:.1f} MB"
+        )
+
         samples = torch.cat(all_samples, dim=0).cpu()
 
         # Save samples to cache
@@ -585,11 +701,11 @@ def evaluate(
             if return_fundamental and "symmetry_plane" in batch and "symmetry_plane_mask" in batch:
                 for b_idx in range(pts.shape[0]):
                     p = reconstruct_from_fundamental_domain(pts[b_idx], batch["symmetry_plane"][b_idx], batch["symmetry_plane_mask"][b_idx])
-                    p = resample_point_cloud(p, num_points)
+                    p = resample_point_cloud(p, eval_gt_num_points)
                     gt_list.append(p)
             else:
                 for b_idx in range(pts.shape[0]):
-                    gt_list.append(resample_point_cloud(pts[b_idx], num_points) if pts.shape[1] != num_points else pts[b_idx])
+                    gt_list.append(resample_point_cloud(pts[b_idx], eval_gt_num_points) if pts.shape[1] != eval_gt_num_points else pts[b_idx])
         else:
             for b_idx in range(batch.shape[0]):
                 gt_list.append(batch[b_idx])
@@ -604,6 +720,8 @@ def evaluate(
 
     gen = _ensure_bnc3(gen, name="gen")
     gt = _ensure_bnc3(gt, name="gt")
+    gen_num_points_actual = int(gen.shape[1])
+    gt_num_points_actual = int(gt.shape[1])
 
     # Normalize point clouds for fair metric comparison (shape only, ignore scale/shift)
     def _normalize_pc(pc: torch.Tensor) -> torch.Tensor:
@@ -616,9 +734,9 @@ def evaluate(
 
     gen = _normalize_pc(gen)
     gt = _normalize_pc(gt)
-    print(f"[eval] Tensors on device: gen={gen.device}, gt={gt.device}")
+    print(f"[eval] Tensors on device: gen={tuple(gen.shape)} ({gen.device}), gt={tuple(gt.shape)} ({gt.device})")
 
-    sym_axis = int(cfg.get("symmetry", {}).get("axis", 0))
+    sym_axis = int((cfg.get("symmetry", {}) or {}).get("axis", (cfg.get("data", {}) or {}).get("symmetry_axis", 0)))
 
     # Compute NSCD and Sym-CD in sub-batches
     rsd_batch_size = 32
@@ -668,6 +786,7 @@ def evaluate(
         print("Normalized Symmetry Chamfer Distance (NSCD)")
         print("  Referencia: Caytuiro & Sipiran (Computers & Graphics 2026)")
         print(f"  Eje de reflexión:                 {sym_axis}")
+        print(f"  Puntos evaluados (gen / gt):      {gen_num_points_actual} / {gt_num_points_actual}")
         print(f"  NSCD - Generado (mean +/- std):   {mean_nscd_gen:.6e} +/- {std_nscd_gen:.6e}")
         print(f"       (x10^3, escala C&G 2026):   {mean_nscd_gen * 1e3:.4f} +/- {std_nscd_gen * 1e3:.4f}")
         print(f"       (x10^4, escala paper):       {mean_nscd_gen * 1e4:.4f} +/- {std_nscd_gen * 1e4:.4f}")
@@ -679,6 +798,7 @@ def evaluate(
         print("=" * 70)
         print("Symmetry Metrics (Caytuiro & Sipiran, C&G 2026):")
         print(f"  Reflection Axis:                  {sym_axis}")
+        print(f"  Evaluated Points (gen / gt):      {gen_num_points_actual} / {gt_num_points_actual}")
         print(f"  Sym-CD - Generated (mean +/- std): {mean_rsd_gen:.6f} +/- {std_rsd_gen:.6f}")
         print(f"  Sym-CD - Ground Truth (reference): {mean_rsd_gt:.6f} +/- {std_rsd_gt:.6f}")
         print(f"  Sym-CD ratio (gen/gt):            {rsd_ratio:.4f}")
@@ -703,7 +823,7 @@ def evaluate(
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         cd_vals = torch.cat(cd_parts, dim=0)
-        
+
         if compute_emd:
             emd_batch_size = 16
             emd_parts = []
@@ -727,13 +847,13 @@ def evaluate(
         if compute_emd:
             print("[eval] Also computing EMD and advanced EMD metrics (esto puede tardar mucho)...")
             metrics_to_compute.append("emd")
-        
+
         adv_metrics = compute_all_metrics(
-            gen, gt, 
-            batch_size=32, 
+            gen, gt,
+            batch_size=32,
             metrics_list=metrics_to_compute
         )
-        
+
         print("-" * 40)
         print(f"{'Metric':<15} | {'CD':<10} | {'EMD':<10}")
         print("-" * 40)
@@ -756,6 +876,9 @@ def evaluate(
         seed=used_seed,
         use_latent=use_latent,
         custom_out_dir=out_dir,
+        seam_mode=seam_mode,
+        gt_num_points=gt_num_points_actual,
+        gen_num_points=gen_num_points_actual,
     )
 
     symmetry_metrics_payload = {
@@ -812,6 +935,11 @@ def evaluate(
             if "metrics" not in out or not isinstance(out["metrics"], dict):
                 out["metrics"] = {}
             out["metrics"].update(symmetry_metrics_payload)
+            out["gen_num_points"] = gen_num_points_actual
+            out["gt_num_points"] = gt_num_points_actual
+            out["seam_mode"] = seam_mode
+            if inference_efficiency is not None:
+                out["inference_efficiency"] = inference_efficiency
             print(f"[eval] Updated existing evaluation file with NSCD: {out_path}")
         except Exception as e:
             print(f"[eval] Could not read existing JSON ({e}); creating fresh file.")
@@ -819,9 +947,13 @@ def evaluate(
                 "ckpt": str(ckpt_path),
                 "run_dir": str(pathlib.Path(ckpt_path).parent),
                 "num_samples": int(n_eval),
+                "gen_num_points": gen_num_points_actual,
+                "gt_num_points": gt_num_points_actual,
+                "seam_mode": seam_mode,
                 "max_points": int(max_points) if max_points is not None else None,
                 "seed": int(used_seed) if used_seed is not None else None,
                 "use_latent_diffusion": bool(use_latent),
+                "inference_efficiency": inference_efficiency,
                 "metrics": symmetry_metrics_payload,
             }
     elif only_nscd:
@@ -829,9 +961,13 @@ def evaluate(
             "ckpt": str(ckpt_path),
             "run_dir": str(pathlib.Path(ckpt_path).parent),
             "num_samples": int(n_eval),
+            "gen_num_points": gen_num_points_actual,
+            "gt_num_points": gt_num_points_actual,
+            "seam_mode": seam_mode,
             "max_points": int(max_points) if max_points is not None else None,
             "seed": int(used_seed) if used_seed is not None else None,
             "use_latent_diffusion": bool(use_latent),
+            "inference_efficiency": inference_efficiency,
             "metrics": symmetry_metrics_payload,
         }
     else:
@@ -839,9 +975,13 @@ def evaluate(
             "ckpt": str(ckpt_path),
             "run_dir": str(pathlib.Path(ckpt_path).parent),
             "num_samples": int(n_eval),
+            "gen_num_points": gen_num_points_actual,
+            "gt_num_points": gt_num_points_actual,
+            "seam_mode": seam_mode,
             "max_points": int(max_points) if max_points is not None else None,
             "seed": int(used_seed) if used_seed is not None else None,
             "use_latent_diffusion": bool(use_latent),
+            "inference_efficiency": inference_efficiency,
             "metrics": {
                 "cd": {
                     "mean": float(mean_cd),
@@ -881,10 +1021,24 @@ def parse_args() -> ap.Namespace:
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument("--max_points", type=int, default=None,
                         help="Maximum number of points to use when computing EMD. If provided, point clouds will be subsampled to this number of points to speed up evaluation.")
+    parser.add_argument("--gt_num_points", type=int, default=None,
+                        help="Optional number of points to sample for ground truth (e.g. 2048 when evaluating a 1024-token baseline against 2048-pt GT).")
     parser.add_argument("--ae_ckpt", type=str, default=None,
                         help="Autoencoder checkpoint (required if use_latent_diffusion=true)")
     parser.add_argument("--compute_emd", action="store_true", help="Compute EMD and pairwise EMD for advanced metrics (1-NN/COV/MMD). Very slow.")
     parser.add_argument("--eval_all", action="store_true", help="Evaluate on the full test split from splits.json")
+    parser.add_argument(
+        "--seam_mode",
+        type=str,
+        default="default",
+        choices=["default", "raw", "clip", "fps", "clip_fps"],
+        help="Override inference seam post-processing without retraining: default (use cfg), raw (no clip, random resample), clip (clip x*n>=0 + random), fps (no clip + FPS), clip_fps (clip + FPS).",
+    )
+    parser.add_argument(
+        "--force_resample",
+        action="store_true",
+        help="Ignore cached samples and re-run sampling (also records fresh inference timing and peak VRAM).",
+    )
     parser.add_argument(
         "--only_nscd",
         "--only_ncsd",
@@ -904,10 +1058,10 @@ def parse_args() -> ap.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    
+
     ckpt_path = args.ckpt
     p = pathlib.Path(ckpt_path)
-    
+
     # Resolve the runs/checkpoints to evaluate
     runs_to_eval = []
     if p.is_dir():
@@ -921,22 +1075,22 @@ if __name__ == "__main__":
                 found_dirs.add(path.parent)
             for path in p.rglob("last.pt"):
                 found_dirs.add(path.parent)
-            
+
             runs_to_eval = sorted([str(d) for d in found_dirs])
     else:
         # It's a file
         runs_to_eval.append(ckpt_path)
-        
+
     if not runs_to_eval:
         print(f"[eval] Error: No run directories containing 'best.pt' or 'last.pt' found under '{ckpt_path}'")
         exit(1)
-        
+
     if len(runs_to_eval) > 1:
         print(f"[eval] Found {len(runs_to_eval)} runs to evaluate under '{ckpt_path}':")
         for r in runs_to_eval:
             print(f"  - {r}")
         print("=" * 80)
-        
+
         success_count = 0
         failed_runs = []
         for idx, run in enumerate(runs_to_eval, 1):
@@ -954,6 +1108,9 @@ if __name__ == "__main__":
                     compute_emd=args.compute_emd,
                     only_nscd=args.only_nscd,
                     out_dir=args.out_dir,
+                    seam_mode=args.seam_mode,
+                    gt_num_points=args.gt_num_points,
+                    force_resample=args.force_resample,
                 )
                 success_count += 1
             except Exception as e:
@@ -962,7 +1119,7 @@ if __name__ == "__main__":
                 traceback.print_exc()
                 failed_runs.append((run, str(e)))
             print("-" * 50)
-            
+
         print("\n" + "=" * 80)
         print(f"[eval] Batch evaluation finished. {success_count}/{len(runs_to_eval)} runs succeeded.")
         if failed_runs:
@@ -983,4 +1140,7 @@ if __name__ == "__main__":
             compute_emd=args.compute_emd,
             only_nscd=args.only_nscd,
             out_dir=args.out_dir,
+            seam_mode=args.seam_mode,
+            gt_num_points=args.gt_num_points,
+            force_resample=args.force_resample,
         )

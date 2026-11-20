@@ -522,6 +522,7 @@ def main() -> None:
                 print(f"[train] ERROR: Training failed for {rel_name} with exit code {e.returncode}")
         return
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     resume_ckpt_path = None
     if args.resume:
         from src.utils.checkpoint import resolve_ckpt_path, load_ckpt_config
@@ -862,6 +863,9 @@ def main() -> None:
             f"[train] Resumed successfully: epoch={start_epoch}, "
             f"global_step={global_step}, best_loss={best_loss:.6f}"
         )
+
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     for epoch in range(start_epoch, cfg["train"]["epochs"]):
         epoch_start_time = time.time()
@@ -1516,6 +1520,31 @@ def main() -> None:
                 f"== Epoch {epoch} done. Avg loss: {avg_epoch_loss:.6f} | Time: {epoch_time:.2f}s =="
             )
 
+        peak_vram_allocated_mb = (
+            float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+            if device.type == "cuda"
+            else None
+        )
+        peak_vram_reserved_mb = (
+            float(torch.cuda.max_memory_reserved(device) / (1024 ** 2))
+            if device.type == "cuda"
+            else None
+        )
+        if peak_vram_allocated_mb is not None:
+            prev_alloc = training_history.get("peak_vram_allocated_mb")
+            training_history["peak_vram_allocated_mb"] = (
+                max(float(prev_alloc), peak_vram_allocated_mb)
+                if prev_alloc is not None
+                else peak_vram_allocated_mb
+            )
+        if peak_vram_reserved_mb is not None:
+            prev_res = training_history.get("peak_vram_reserved_mb")
+            training_history["peak_vram_reserved_mb"] = (
+                max(float(prev_res), peak_vram_reserved_mb)
+                if prev_res is not None
+                else peak_vram_reserved_mb
+            )
+
         epoch_metadata: dict[str, object] = {
             "epoch": epoch,
             "avg_loss": avg_epoch_loss,
@@ -1523,6 +1552,10 @@ def main() -> None:
             "time": epoch_time,
             "global_step": global_step,
         }
+        if peak_vram_allocated_mb is not None:
+            epoch_metadata["peak_vram_allocated_mb"] = peak_vram_allocated_mb
+        if peak_vram_reserved_mb is not None:
+            epoch_metadata["peak_vram_reserved_mb"] = peak_vram_reserved_mb
         if use_two_priors:
             epoch_metadata["avg_mse_z"] = avg_epoch_mse_z
             epoch_metadata["avg_mse_h"] = avg_epoch_mse_h
@@ -1631,8 +1664,14 @@ def main() -> None:
             total_time = recorded_time
     training_history["total_time"] = total_time
     save_training_history(run_root, run_name, training_history)
+    vram_summary = ""
+    if training_history.get("peak_vram_allocated_mb") is not None:
+        vram_summary = (
+            f" | Peak VRAM: {training_history['peak_vram_allocated_mb']:.1f} MB alloc "
+            f"/ {training_history.get('peak_vram_reserved_mb', 0.0):.1f} MB reserved"
+        )
     print(
-        f"\nEntrenamiento finalizado. Tiempo total: {total_time:.2f}s ({total_time / 60:.2f}min)"
+        f"\nEntrenamiento finalizado. Tiempo total: {total_time:.2f}s ({total_time / 60:.2f}min){vram_summary}"
     )
 
 
